@@ -1,0 +1,5 @@
+gradio>=5.0
+requests>=2.31
+mutagen>=1.47
+sentencepiece
+protobuf

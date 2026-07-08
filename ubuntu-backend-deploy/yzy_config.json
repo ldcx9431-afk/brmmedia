@@ -1,0 +1,5 @@
+{
+  "language": "chinese",
+  "fp16": true,
+  "queue_concurrency": 1
+}

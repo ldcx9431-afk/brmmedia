@@ -1,0 +1,31 @@
+# Huge runtime/build artifacts
+win-unpacked/
+.tmp_asar_extract/
+.tmp_asar_tool/
+ubuntu-backend-deploy/models/
+ubuntu-backend-deploy-offline-models.tar
+ubuntu-backend-deploy.zip
+
+# Python / logs / caches
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.venv/
+venv/
+ubuntu-backend-deploy/.cache/
+ubuntu-backend-deploy/logs/
+ubuntu-backend-deploy/outputs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Large installers and scratch files
+VC_redist.x64.exe
+_*.json
+_*.log
+_*.py
+_*.bat
+_*.ps1
+_*.vbs
