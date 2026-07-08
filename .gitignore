@@ -16,6 +16,9 @@ venv/
 ubuntu-backend-deploy/.cache/
 ubuntu-backend-deploy/logs/
 ubuntu-backend-deploy/outputs/
+llm-backend-deploy/.venv/
+llm-backend-deploy/.cache/
+llm-backend-deploy/logs/
 
 # OS / editor
 .DS_Store

@@ -1,0 +1,16 @@
+[Unit]
+Description=Qwen3.6 27B vLLM OpenAI-compatible service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/baorongwanxiang/llm-backend-deploy
+ExecStart=/opt/baorongwanxiang/llm-backend-deploy/start_qwen_vllm.sh
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -6,6 +6,19 @@
 
 如果使用 `ubuntu-backend-deploy-offline-models.tar` 离线包，则包内已经包含 `models/` 目录。执行 `./install_ubuntu.sh` 时会自动把这些模型同步到 `$COMFYUI_ROOT/models/`，通常不需要再从 Hugging Face 下载。
 
+Qwen3.6 27B LLM 不放在本后端进程里，已单独整合到：
+
+```text
+../llm-backend-deploy/
+```
+
+推荐 GPU 分配：
+
+```text
+GPU0: ComfyUI/Gradio
+GPU1: Qwen3.6 27B vLLM
+```
+
 ## 1. 目录内容
 
 ```text

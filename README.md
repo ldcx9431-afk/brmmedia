@@ -6,10 +6,17 @@
 ubuntu-backend-deploy/
 ```
 
+Qwen3.6 27B vLLM 独立部署位于：
+
+```text
+llm-backend-deploy/
+```
+
 完整部署说明见：
 
 ```text
 ubuntu-backend-deploy/README_UBUNTU_DEPLOY.md
+llm-backend-deploy/README_QWEN_VLLM_DEPLOY.md
 ```
 
 ## 重要说明
@@ -24,6 +31,18 @@ ubuntu-backend-deploy-offline-models.tar
 该文件约 105GB，适合通过网盘、内网传输、移动硬盘或对象存储交付到 Ubuntu 服务器，不适合直接提交到 GitHub。
 
 ## Ubuntu 快速启动
+
+从 GitHub 同步后，一键安装全栈：
+
+```bash
+cd /opt/baorongwanxiang/brmmedia
+chmod +x install_ubuntu_full_stack.sh check_ubuntu_full_stack.sh install_ubuntu_systemd_services.sh
+./install_ubuntu_full_stack.sh
+./check_ubuntu_full_stack.sh
+sudo ./install_ubuntu_systemd_services.sh "$USER"
+```
+
+只启动后端离线包：
 
 ```bash
 tar -xf ubuntu-backend-deploy-offline-models.tar
@@ -40,4 +59,12 @@ chmod +x install_ubuntu.sh start_backend.sh check_ubuntu_ready.sh tune_nvidia_pe
 echo 'BRM_PERF_PROFILE=max' >> .env
 echo 'COMFYUI_ARGS=--highvram' >> .env
 ./tune_nvidia_performance.sh
+```
+
+Qwen vLLM 默认使用第二张 A5000：
+
+```text
+QWEN_CUDA_VISIBLE_DEVICES=1
+QWEN_MODEL=Intel/Qwen3.6-27B-int4-AutoRound
+QWEN_PORT=8000
 ```
