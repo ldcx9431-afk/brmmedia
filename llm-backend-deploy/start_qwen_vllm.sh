@@ -23,8 +23,19 @@ export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 mkdir -p "$HF_HOME" logs
 
+MODEL_ID="${QWEN_MODEL:-cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit}"
+LOCAL_MODEL_DIR="${QWEN_LOCAL_MODEL_DIR:-./models/Qwen3.6-35B-A3B-AWQ-4bit}"
+case "$LOCAL_MODEL_DIR" in
+  /*) ;;
+  *) LOCAL_MODEL_DIR="$SCRIPT_DIR/$LOCAL_MODEL_DIR" ;;
+esac
+
+if [ "${QWEN_PREFER_LOCAL_MODEL:-true}" = "true" ] && [ -f "$LOCAL_MODEL_DIR/config.json" ]; then
+  MODEL_ID="$LOCAL_MODEL_DIR"
+fi
+
 ARGS=(
-  serve "${QWEN_MODEL:-Intel/Qwen3.6-27B-int4-AutoRound}"
+  serve "$MODEL_ID"
   --host "${QWEN_HOST:-0.0.0.0}"
   --port "${QWEN_PORT:-8000}"
   --served-model-name "${QWEN_SERVED_MODEL_NAME:-qwen}"
@@ -50,7 +61,7 @@ if [ -n "${QWEN_EXTRA_ARGS:-}" ]; then
 fi
 
 echo "[INFO] Starting Qwen vLLM on CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
-echo "[INFO] Model=${QWEN_MODEL:-Intel/Qwen3.6-27B-int4-AutoRound}"
+echo "[INFO] Model=$MODEL_ID"
 echo "[INFO] Port=${QWEN_PORT:-8000}"
 
 vllm "${ARGS[@]}" 2>&1 | tee -a logs/qwen-vllm.log

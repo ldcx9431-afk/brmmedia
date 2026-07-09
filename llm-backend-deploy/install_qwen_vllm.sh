@@ -30,7 +30,12 @@ source .env
 set +a
 
 if [ "${PREFETCH_MODEL:-1}" = "1" ]; then
-  huggingface-cli download "$QWEN_MODEL" || true
+  LOCAL_MODEL_DIR="${QWEN_LOCAL_MODEL_DIR:-./models/Qwen3.6-35B-A3B-AWQ-4bit}"
+  if [ "${QWEN_PREFER_LOCAL_MODEL:-true}" = "true" ] && [ -f "$LOCAL_MODEL_DIR/config.json" ]; then
+    echo "[INFO] Local Qwen model found at $LOCAL_MODEL_DIR; skipping prefetch."
+  else
+    huggingface-cli download "$QWEN_MODEL" || true
+  fi
 fi
 
 echo
