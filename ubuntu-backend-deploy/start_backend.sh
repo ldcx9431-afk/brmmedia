@@ -29,6 +29,11 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$CPU_THREADS}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-$CPU_THREADS}"
 export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 export TORCH_HOME="${TORCH_HOME:-$SCRIPT_DIR/.cache/torch}"
+if [ "${BRM_PROFILE:-normal}" = "highvram" ]; then
+  export CUDA_VISIBLE_DEVICES="${COMFYUI_HIGHVRAM_CUDA_VISIBLE_DEVICES:-0}"
+else
+  export CUDA_VISIBLE_DEVICES="${COMFYUI_CUDA_VISIBLE_DEVICES:-1}"
+fi
 mkdir -p "$HF_HOME" "$TORCH_HOME"
 
 if [ "${BRM_PERF_PROFILE:-balanced}" = "max" ]; then
@@ -40,5 +45,6 @@ fi
 
 echo "[INFO] Starting Bao Rong Wan Xiang backend..."
 echo "[INFO] COMFYUI_ROOT=${COMFYUI_ROOT:-$SCRIPT_DIR/ComfyUI}"
+echo "[INFO] BRM_PROFILE=${BRM_PROFILE:-normal}; CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "[INFO] BRM_PERF_PROFILE=${BRM_PERF_PROFILE:-balanced}; OMP_NUM_THREADS=$OMP_NUM_THREADS; COMFYUI_ARGS=${COMFYUI_ARGS:-}"
 python -u entry_yzy.py 2>&1 | tee -a logs/backend.log

@@ -33,7 +33,10 @@ BASE_DIR = Path(__file__).resolve().parent
 #     workflows/
 #   ComfyUI is external and selected with COMFYUI_ROOT.
 COMFY_ROOT = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expanduser().resolve()
-PYTHON_EXE = Path(os.environ.get("COMFYUI_PYTHON", sys.executable)).expanduser().resolve()
+# Do not resolve this path: a virtualenv interpreter is normally a symlink to
+# the system Python.  Resolving it would silently replace the venv executable
+# with /usr/bin/python and make ComfyUI miss its installed dependencies.
+PYTHON_EXE = Path(os.environ.get("COMFYUI_PYTHON", sys.executable)).expanduser()
 MAIN_PY = COMFY_ROOT / "main.py"
 WORKFLOW_DIR = BASE_DIR / "workflows"
 

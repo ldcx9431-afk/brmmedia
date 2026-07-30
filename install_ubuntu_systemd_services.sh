@@ -37,16 +37,50 @@ install_service \
   "$ROOT_DIR/llm-backend-deploy" \
   "$ROOT_DIR/llm-backend-deploy/start_qwen_vllm.sh"
 
+install_service \
+  "$ROOT_DIR/ubuntu-backend-deploy/baorong-backend-highvram.service.example" \
+  /etc/systemd/system/baorong-backend-highvram.service \
+  "$ROOT_DIR/ubuntu-backend-deploy" \
+  "$ROOT_DIR/ubuntu-backend-deploy/start_backend.sh"
+
+if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" ]; then
+  cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" \
+    /etc/systemd/system/baorong-model-import.service
+fi
+
+if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-custom-nodes-install.service.example" ]; then
+  cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-custom-nodes-install.service.example" \
+    /etc/systemd/system/baorong-custom-nodes-install.service
+fi
+
+if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-verify.service.example" ]; then
+  cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-verify.service.example" \
+    /etc/systemd/system/baorong-model-verify.service
+fi
+
 systemctl daemon-reload
-systemctl enable baorong-backend qwen-vllm
+systemctl enable baorong-backend
 
 cat <<EOF
 
 [OK] Services installed and enabled.
 
-Start:
+Start the normal image/music backend:
   sudo systemctl start baorong-backend
-  sudo systemctl start qwen-vllm
+
+Start Qwen only after its model has been imported:
+  sudo systemctl enable --now qwen-vllm
+
+Import local models / documented custom nodes when their source is ready:
+  sudo systemctl enable --now baorong-model-import
+  sudo systemctl start baorong-custom-nodes-install
+
+High-VRAM video mode (stops the normal backend and Qwen):
+  sudo systemctl start baorong-backend-highvram
+
+Return to normal mode:
+  sudo systemctl stop baorong-backend-highvram
+  sudo systemctl start baorong-backend qwen-vllm
 
 Logs:
   sudo journalctl -u baorong-backend -f

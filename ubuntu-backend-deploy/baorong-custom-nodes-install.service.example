@@ -1,0 +1,14 @@
+[Unit]
+Description=Install documented BRMMedia ComfyUI custom nodes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brm
+WorkingDirectory=/srv/brmmedia/app
+ExecStart=/mnt/d/brmmedia/source/install_documented_custom_nodes.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

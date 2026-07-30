@@ -44,11 +44,12 @@
 ### 第 1 步：发起调用，拿 event_id
 
 ```
-POST /gradio_api/call/{端点名}
+POST /gradio_api/call/v2/{端点名}
 Content-Type: application/json
 
 {
-  "data": [ 参数1, 参数2, ... ]     // 按端点参数顺序的数组
+  "参数名1": 参数1,
+  "参数名2": 参数2
 }
 ```
 
@@ -75,6 +76,7 @@ data: [返回值1, 返回值2, ...]
 ```
 
 - `complete` 事件的 `data` 是 JSON 数组，对应该端点的返回值列表。
+- 请求体字段名以运行中服务的 `GET /gradio_api/info` 中 `parameter_name` 为准；不要再使用旧版 `{ "data": [...] }` 协议。
 - 详见 [Gradio 官方 API 文档](https://www.gradio.app/guides/querying-gradio-apps-with-via-api)。
 
 ---
@@ -132,8 +134,8 @@ Content-Type: multipart/form-data
 调用 `/on_ref_upload`，把上一步的临时路径转成 ComfyUI 能识别的文件名：
 
 ```
-POST /gradio_api/call/on_ref_upload
-{ "data": [{ "path": "<上面拿到的 path>", "url": null, "size": ..., "orig_name": "...", "mime_type": "image/png", "is_stream": false }] }
+POST /gradio_api/call/v2/on_ref_upload
+{ "filepath": { "path": "<上面拿到的 path>", "url": null, "size": 123456, "orig_name": "...", "mime_type": "image/png", "is_stream": false, "meta": {"_type":"gradio.FileData"} } }
 ```
 
 **complete 返回**：`["<ComfyUI文件名>"]`，例如 `["photo.png"]`。
@@ -143,8 +145,8 @@ POST /gradio_api/call/on_ref_upload
 调用 `/on_audio_upload`，**返回两个值**（文件名 + 时长）：
 
 ```
-POST /gradio_api/call/on_audio_upload
-{ "data": [{ "path": "...", "url": null, "orig_name": "voice.wav", "mime_type": "audio/wav", ... }] }
+POST /gradio_api/call/v2/on_audio_upload
+{ "filepath": { "path": "...", "url": null, "orig_name": "voice.wav", "mime_type": "audio/wav", "meta": {"_type":"gradio.FileData"} } }
 ```
 
 **complete 返回**：`["<ComfyUI文件名>", <时长秒>]`，例如 `["voice.wav", 3.5]`。
@@ -171,9 +173,9 @@ POST /gradio_api/call/on_audio_upload
 
 **请求示例**：
 ```bash
-curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
+curl -X POST http://192.168.1.118:9000/gradio_api/call/v2/submit_workflow_1 \
   -H "Content-Type: application/json" \
-  -d '{"data": ["一个漂亮的女生在校园散步", "1024 × 1024", 1]}'
+  -d '{"prompt":"一个漂亮的女生在校园散步","size":"1024 × 1024","batch":1}'
 # → {"event_id": "xxx"}
 ```
 
@@ -187,7 +189,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `input_filename` | string | ComfyUI 文件名（**需先 3.2 上传**） |
 
 ```json
-{ "data": ["把背景换成海边", "photo.png"] }
+{ "prompt": "把背景换成海边", "input_filename": "photo.png" }
 ```
 > prompt 或 input_filename 为空会报错。
 
@@ -202,7 +204,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `seconds` | integer | 视频时长（秒，2–360） |
 
 ```json
-{ "data": ["一个亚洲女孩在花丛中散步", "768 × 1024", 5] }
+{ "prompt": "一个亚洲女孩在花丛中散步", "size": "768 × 1024", "seconds": 5 }
 ```
 
 ---
@@ -216,7 +218,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `seconds` | integer | 时长（2–360） |
 
 ```json
-{ "data": ["让人物微笑并转头", "photo.png", 5] }
+{ "prompt": "让人物微笑并转头", "input_filename": "photo.png", "seconds": 5 }
 ```
 
 ---
@@ -231,7 +233,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `seconds` | integer | 时长（2–360） |
 
 ```json
-{ "data": ["平滑过渡", "start.png", "end.png", 5] }
+{ "prompt": "平滑过渡", "input_filename1": "start.png", "input_filename2": "end.png", "seconds": 5 }
 ```
 
 ---
@@ -247,7 +249,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `size` | string（枚举） | 同 4.1 |
 
 ```json
-{ "data": ["自然说话", "person.png", "voice.wav", 3.5, "768 × 1024"] }
+{ "prompt": "自然说话", "image": "person.png", "audio": "voice.wav", "uploaded_dur": 3.5, "size": "768 × 1024" }
 ```
 
 ---
@@ -261,7 +263,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `temperature` | number | 采样温度，默认 `0.8` |
 
 ```json
-{ "data": ["你好，这是一段语音克隆测试。", "voice.wav", 0.8] }
+{ "prompt": "你好，这是一段语音克隆测试。", "ref_audio": "voice.wav", "temperature": 0.8 }
 ```
 
 ---
@@ -278,7 +280,7 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 | `model` | string | ACE-Step 模型版本：`turbo` / `base` / `sft` |
 
 ```json
-{ "data": ["pop, upbeat, electronic", "今晚我们追着星光奔跑", 30, 120, "zh", "turbo"] }
+{ "tags": "pop, upbeat, electronic", "lyrics": "今晚我们追着星光奔跑", "duration": 30, "bpm": 120, "language": "zh", "model": "turbo" }
 ```
 
 > `turbo` 使用 8 步、速度较快；`base` / `sft` 使用 50 步、质量更高但耗时更久。
@@ -290,8 +292,8 @@ curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
 ### 5.1 📋 查询队列状态 `/render_queue`
 
 ```
-POST /gradio_api/call/render_queue
-{ "data": [] }
+POST /gradio_api/call/v2/render_queue
+{}
 ```
 
 **complete 返回**（4 个值）：
@@ -317,24 +319,24 @@ POST /gradio_api/call/render_queue
 ### 5.2 ⏹️ 中断当前任务 `/interrupt`
 
 ```
-POST /gradio_api/call/interrupt
-{ "data": [] }
+POST /gradio_api/call/v2/interrupt
+{}
 ```
 返回 `["已发送中断信号。"]`。
 
 ### 5.3 🧹 清空排队任务 `/clear_pending`
 
 ```
-POST /gradio_api/call/clear_pending
-{ "data": [] }
+POST /gradio_api/call/v2/clear_pending
+{}
 ```
 返回 `["已清空排队任务 N 个。"]`（不影响正在执行的）。
 
 ### 5.4 💓 健康检查 `/check_health`
 
 ```
-POST /gradio_api/call/check_health
-{ "data": [] }
+POST /gradio_api/call/v2/check_health
+{}
 ```
 ComfyUI 在线时无异常；掉线时返回错误事件。
 
@@ -375,12 +377,12 @@ http://192.168.1.118:9000/gradio_api/file=outputs/任务_xxx.png
 const BASE = 'http://192.168.1.118:9000';
 
 // 工具：发起 Gradio 调用并等 complete 事件
-async function callGradio(endpoint, data, { timeout = 3600000 } = {}) {
+async function callGradio(endpoint, args, { timeout = 3600000 } = {}) {
   // 1. 提交，拿 event_id
-  const res = await fetch(`${BASE}/gradio_api/call/${endpoint}`, {
+  const res = await fetch(`${BASE}/gradio_api/call/v2/${endpoint}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data }),
+    body: JSON.stringify(args),
   }).then(r => r.json());
 
   const { event_id } = res;
@@ -463,32 +465,32 @@ async function waitForResult() {
 
 ```bash
 # 健康检查
-curl -X POST http://192.168.1.118:9000/gradio_api/call/check_health \
-  -H "Content-Type: application/json" -d '{"data":[]}'
+curl -X POST http://192.168.1.118:9000/gradio_api/call/v2/check_health \
+  -H "Content-Type: application/json" -d '{}'
 
 # 查看所有可用端点
 curl http://192.168.1.118:9000/gradio_api/info | jq
 
 # 文生图（提交）
-curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_1 \
+curl -X POST http://192.168.1.118:9000/gradio_api/call/v2/submit_workflow_1 \
   -H "Content-Type: application/json" \
-  -d '{"data":["一只猫","512 × 512",1]}'
+  -d '{"prompt":"一只猫","size":"512 × 512","batch":1}'
 
 # 音乐生成（提交）
-curl -X POST http://192.168.1.118:9000/gradio_api/call/submit_workflow_8 \
+curl -X POST http://192.168.1.118:9000/gradio_api/call/v2/submit_workflow_8 \
   -H "Content-Type: application/json; charset=utf-8" \
-  -d '{"data":["pop, upbeat, electronic","今晚我们追着星光奔跑",30,120,"zh","turbo"]}'
+  -d '{"tags":"pop, upbeat, electronic","lyrics":"今晚我们追着星光奔跑","duration":30,"bpm":120,"language":"zh","model":"turbo"}'
 ```
 
 ## 10. 实测验证记录（2026-06-15）
 
 以下路径已在运行中的服务上实测通过：
 
-- ✅ `POST /gradio_api/call/check_health` → 返回 `event_id`，SSE `complete: []`（ComfyUI 在线）
-- ✅ `POST /gradio_api/call/submit_workflow_1`（文生图）→ 返回 `event_id`，任务进入队列
-- ✅ `POST /gradio_api/call/render_queue` → 返回概览文本 + Markdown 表格 + 画廊数组 + 音频数组
+- ✅ `POST /gradio_api/call/v2/check_health` → 返回 `event_id`，SSE `complete: []`（ComfyUI 在线）
+- ✅ `POST /gradio_api/call/v2/submit_workflow_1`（文生图）→ 返回 `event_id`，任务进入队列
+- ✅ `POST /gradio_api/call/v2/render_queue` → 返回概览文本 + Markdown 表格 + 画廊数组 + 音频数组
 - ✅ `GET /gradio_api/call/{endpoint}/{event_id}` → SSE 流返回 `complete` 事件
-- ✅ `POST /gradio_api/call/submit_workflow_8`（音乐生成）→ 端点已接入任务队列，产物保存为 `.mp3`
+- ✅ `POST /gradio_api/call/v2/submit_workflow_8`（音乐生成）→ 端点已接入任务队列，产物保存为 `.mp3`
 
 > ⚠️ 注意：POST 中文提示词时，**请求体必须用 UTF-8 编码字节**发送（`Content-Type: application/json; charset=utf-8`），否则会报 `error parsing the body`。前端 fetch 默认即 UTF-8，无需特殊处理。
 

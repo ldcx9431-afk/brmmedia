@@ -24,11 +24,15 @@ import uuid
 import time
 import random
 import threading
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 import gradio as gr
+import requests
 
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
@@ -44,6 +48,16 @@ from comfyui_server import (
 BASE_DIR = Path(__file__).resolve().parent
 
 OUTPUT_DIR = BASE_DIR / "outputs"   # 所有产物统一保存到这里
+TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
+# 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
+gr.set_static_paths(paths=[OUTPUT_DIR])
+
+# 历史恢复时只扫描实际可展示或可下载的媒体，避免把日志等运行文件放进任务列表。
+PERSISTABLE_MEDIA_EXTS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+    ".mp4", ".webm", ".mov", ".mkv", ".avi",
+    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg",
+}
 
 DONE_GALLERY_MAX = 30       # 已完成画廊最多展示多少张
 DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时间运行后无限增长)
@@ -62,32 +76,52 @@ for _proxy_key in ("NO_PROXY", "no_proxy"):
 LOCAL_YZY_CONFIG_PATH = BASE_DIR / "yzy_config.json"
 PARENT_YZY_CONFIG_PATH = BASE_DIR.parent / "yzy_config.json"
 YZY_CONFIG_PATH = str(LOCAL_YZY_CONFIG_PATH if LOCAL_YZY_CONFIG_PATH.exists() else PARENT_YZY_CONFIG_PATH)
+GRADIO_HOST = os.environ.get("BRM_GRADIO_HOST", "127.0.0.1")
+GRADIO_ROOT_PATH = os.environ.get("BRM_GRADIO_ROOT_PATH", "").strip() or None
+QWEN_API_BASE = os.environ.get("BRM_QWEN_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
+QWEN_MODEL = os.environ.get("BRM_QWEN_MODEL", "qwen35-4b-awq")
+LAN_PASSWORD_HELPER = os.environ.get(
+    "BRM_LAN_PASSWORD_HELPER", "/usr/local/sbin/brmmedia-set-lan-password"
+)
+
+
 def load_config():
     """ 加载启动器的配置文件 """
     if os.path.exists(YZY_CONFIG_PATH):
-        with open(YZY_CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-def find_available_port(start_port=9000):
-    """ 找一个可用端口 """
-    port = start_port
-    cnt = 0
-    while True:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("0.0.0.0", port))
-                return port
-        except Exception:
-            cnt += 1
-            if cnt >= 20:
-                print("请检查网络是否正常.")
-                sys.exit(1)
-            print(f"端口 {port} 已被占用，尝试下一个...")
-            sys.stdout.flush()
-            time.sleep(0.1)  # 必须马上打印，不影响后面的打印
-            port += 1
-# 必须是第一个打印的：把端口号打印到 stdout（electron 会捕获）
-server_port = find_available_port()
+            with open(YZY_CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"读取全局配置失败，将使用默认配置: {exc}")
+    return {}
+
+
+def save_config(updates: dict) -> None:
+    """原子写入全局配置，避免服务意外中断时留下半个 JSON 文件。"""
+    config_path = Path(YZY_CONFIG_PATH)
+    config = load_config()
+    config.update(updates)
+    temp_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(config_path)
+    yzy_config.clear()
+    yzy_config.update(config)
+
+
+def configured_port(default=9000):
+    """读取固定监听端口；端口冲突时显式失败，避免反向代理失去目标。"""
+    try:
+        return int(os.environ.get("BRM_GRADIO_PORT", str(default)))
+    except ValueError:
+        print("BRM_GRADIO_PORT 必须是有效的整数端口。")
+        sys.exit(1)
+
+
+server_port = configured_port()
+# 必须是第一个打印的：把端口号打印到 stdout（Electron 会捕获）
 print(json.dumps({"server_port": server_port}))
 sys.stdout.flush()
 time.sleep(1)
@@ -100,6 +134,8 @@ def config_int(name, default=1, min_value=1, max_value=4):
         value = default
     return max(min_value, min(max_value, value))
 QUEUE_CONCURRENCY = config_int("queue_concurrency", default=1, min_value=1, max_value=4)
+DONE_TASKS_MAX = config_int("done_tasks_max", default=DONE_TASKS_MAX, min_value=20, max_value=500)
+DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=10, max_value=100)
 ################################ YZY启动器配置专用 结束 ##########################################
 
 # ============================================================================
@@ -145,11 +181,119 @@ class TaskQueue:
         self._max_workers = max(1, int(max_workers or 1))
         self._pending: deque[Task] = deque()
         self._running: dict[str, Task] = {}
-        self._done: list[Task] = []
+        self._done: list[Task] = self._load_history()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()      # 有新任务时唤醒 worker,实现立即执行
-        self._workers: list[threading.Thread] = []
+        self._workers: dict[int, threading.Thread] = {}
+        self._retire_worker_ids: set[int] = set()
+        self._next_worker_id = 1
+
+    @staticmethod
+    def _record_from_task(task: Task) -> dict:
+        """只保存恢复任务面板所需的字段，避免持久化不必要的提交参数。"""
+        return {
+            "id": task.id,
+            "name": task.name,
+            "workflow_name": task.workflow_name,
+            "status": task.status.value,
+            "submit_ts": task.submit_ts,
+            "start_ts": task.start_ts,
+            "done_ts": task.done_ts,
+            "result": task.result if isinstance(task.result, list) else [],
+            "error": task.error,
+        }
+
+    @staticmethod
+    def _task_from_record(record: dict) -> "Task | None":
+        """从落盘历史恢复已经结束的任务；丢失的产物不会显示为可下载素材。"""
+        try:
+            status = TaskStatus(record["status"])
+            if status not in (TaskStatus.DONE, TaskStatus.ERROR):
+                return None
+            result = [
+                str(Path(path))
+                for path in record.get("result", [])
+                if isinstance(path, str) and Path(path).is_file()
+            ]
+            if status == TaskStatus.DONE and not result:
+                return None
+            return Task(
+                id=str(record["id"]),
+                name=str(record.get("name", "历史任务")),
+                workflow_name=str(record.get("workflow_name", "历史恢复")),
+                args={},
+                status=status,
+                submit_ts=float(record.get("submit_ts", 0.0)),
+                start_ts=float(record.get("start_ts", 0.0)),
+                done_ts=float(record.get("done_ts", 0.0)),
+                result=result,
+                error=str(record.get("error", "")),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _legacy_output_history(self) -> list[Task]:
+        """为旧版本已经生成、但尚无任务索引的媒体创建一次可恢复历史。"""
+        try:
+            media_files = [
+                path for path in OUTPUT_DIR.iterdir()
+                if path.is_file() and path.suffix.lower() in PERSISTABLE_MEDIA_EXTS
+            ]
+        except OSError:
+            return []
+
+        recovered = []
+        for path in sorted(media_files, key=lambda item: item.stat().st_mtime, reverse=True):
+            try:
+                timestamp = path.stat().st_mtime
+            except OSError:
+                continue
+            recovered.append(Task(
+                id=f"legacy-{uuid.uuid5(uuid.NAMESPACE_URL, str(path))}",
+                name=f"历史素材：{path.name}",
+                workflow_name="历史恢复",
+                args={},
+                status=TaskStatus.DONE,
+                submit_ts=timestamp,
+                start_ts=timestamp,
+                done_ts=timestamp,
+                result=[str(path)],
+            ))
+        return recovered[:self._max_done]
+
+    def _load_history(self) -> list[Task]:
+        """加载完成/失败记录；首次升级时从已有 outputs 自动建立历史。"""
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        restored = []
+        try:
+            if TASK_HISTORY_PATH.exists():
+                payload = json.loads(TASK_HISTORY_PATH.read_text(encoding="utf-8"))
+                restored = [
+                    task for record in payload.get("tasks", [])
+                    if isinstance(record, dict) and (task := self._task_from_record(record))
+                ]
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[Queue] 读取任务历史失败，将从输出目录恢复: {exc}")
+
+        if not restored:
+            restored = self._legacy_output_history()
+            if restored:
+                self._save_history(restored)
+        restored.sort(key=lambda task: task.done_ts or task.submit_ts, reverse=True)
+        return restored[:self._max_done]
+
+    def _save_history(self, tasks: "list[Task] | None" = None) -> None:
+        """原子保存已结束任务；写入失败不会影响正在运行的生成任务。"""
+        records = [self._record_from_task(task) for task in (tasks if tasks is not None else self._done)]
+        payload = {"version": 1, "tasks": records}
+        try:
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            temp_path = TASK_HISTORY_PATH.with_name(f".{TASK_HISTORY_PATH.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temp_path.replace(TASK_HISTORY_PATH)
+        except OSError as exc:
+            print(f"[Queue] 保存任务历史失败: {exc}")
 
     def enqueue(self, task: Task) -> None:
         """把任务追加到队尾,并唤醒 worker。"""
@@ -178,19 +322,59 @@ class TaskQueue:
         self.start_workers()
 
     def start_workers(self) -> None:
-        self._stop.clear()
-        self._workers = [worker for worker in self._workers if worker.is_alive()]
+        with self._lock:
+            self._stop.clear()
+            self._sync_workers_locked()
+            active_count = len(self._workers)
+        print(f"[Queue] workers started: {active_count} (target: {self._max_workers})")
+
+    def _sync_workers_locked(self) -> None:
+        """把后台 worker 数量调整到目标值；缩容只会等待当前任务自然结束。"""
+        self._workers = {
+            worker_id: worker
+            for worker_id, worker in self._workers.items()
+            if worker.is_alive()
+        }
+        worker_ids = sorted(self._workers)
+        keep_ids = set(worker_ids[:self._max_workers])
+        self._retire_worker_ids = set(worker_ids) - keep_ids
+
         while len(self._workers) < self._max_workers:
-            index = len(self._workers) + 1
-            worker = threading.Thread(target=self._loop, args=(index,), daemon=True, name=f"task-worker-{index}")
+            worker_id = self._next_worker_id
+            self._next_worker_id += 1
+            worker = threading.Thread(
+                target=self._loop,
+                args=(worker_id,),
+                daemon=True,
+                name=f"task-worker-{worker_id}",
+            )
+            self._workers[worker_id] = worker
             worker.start()
-            self._workers.append(worker)
-        print(f"[Queue] workers started: {len(self._workers)}")
+        self._wake.set()
+
+    def set_max_workers(self, max_workers: int) -> tuple[int, int]:
+        """动态调整并发。降低并发不会中断正在处理的任务。"""
+        with self._lock:
+            self._max_workers = max(1, int(max_workers or 1))
+            self._sync_workers_locked()
+            return self._max_workers, len(self._workers)
+
+    def set_max_done(self, max_done: int) -> int:
+        """动态调整已完成任务的保留上限，并立即裁剪旧记录。"""
+        with self._lock:
+            self._max_done = max(1, int(max_done or 1))
+            del self._done[self._max_done:]
+            self._save_history()
+            return self._max_done
 
     def _loop(self, worker_index: int = 1) -> None:
         while not self._stop.is_set():
             task = None
             with self._lock:
+                if worker_index in self._retire_worker_ids:
+                    self._retire_worker_ids.discard(worker_index)
+                    self._workers.pop(worker_index, None)
+                    return
                 if self._pending:
                     task = self._pending.popleft()
                     task.status = TaskStatus.RUNNING
@@ -214,6 +398,7 @@ class TaskQueue:
                     self._done.insert(0, task)
                     # 只保留最近的若干条,避免列表与界面表格无限膨胀。
                     del self._done[self._max_done:]
+                    self._save_history()
 
 
 # 标记是否已经为 ComfyUI 掉线弹过一次提示,避免每轮检测都重复弹窗。
@@ -256,6 +441,132 @@ footer {
 }
 #q-table-md table {
     width: 100%;                  /* 表格占满整个容器宽度 */
+}
+/* 独立的浏览器主体素材查看器，不再依赖 Gallery 内部的小预览区域。 */
+#media-viewer {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 2000 !important;
+    box-sizing: border-box;
+    /* 预留顶部工具区和底部系统 Dock，避免竖图/竖视频被切掉。 */
+    padding: 72px 5vw max(180px, env(safe-area-inset-bottom));
+    overflow: hidden;
+    background: rgba(15, 23, 42, 0.88);
+}
+#media-viewer .brm-media-viewer-content {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+}
+#media-viewer .brm-media-viewer-toolbar {
+    width: min(1200px, 100%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #f8fafc;
+    gap: 12px;
+}
+#media-viewer .brm-media-viewer-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#media-viewer .brm-media-download {
+    flex: 0 0 auto;
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: #fff;
+    color: #312e81;
+    font-weight: 600;
+    text-decoration: none;
+}
+#media-viewer .brm-media-viewer-stage {
+    width: min(1200px, calc(100vw - 10vw));
+    height: calc(100vh - 252px) !important;
+    max-height: calc(100dvh - 252px) !important;
+    min-height: 240px;
+    overflow: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+#media-viewer img,
+#media-viewer video {
+    display: block;
+    width: auto !important;
+    height: auto !important;
+    max-width: min(1200px, calc(100vw - 10vw)) !important;
+    max-height: calc(100vh - 252px) !important;
+    object-fit: contain;
+    border-radius: 10px;
+    box-shadow: 0 16px 64px rgba(0, 0, 0, 0.48);
+}
+#media-viewer-close {
+    position: fixed !important;
+    z-index: 2001 !important;
+    top: 16px;
+    right: 24px;
+    width: auto !important;
+    min-width: 0 !important;
+}
+#media-viewer-close button {
+    width: auto !important;
+    min-width: 116px !important;
+    padding: 9px 16px !important;
+    background: #fff !important;
+    color: #1e293b !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
+}
+#global-settings-panel {
+    position: relative !important;
+    z-index: auto !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible;
+    box-sizing: border-box;
+    margin: 0 0 20px;
+    padding: 28px;
+    border: 1px solid var(--border-color-primary, #e5e7eb);
+    border-radius: var(--radius-lg, 14px);
+    background: var(--block-background-fill, #fff);
+    box-shadow: 0 20px 64px rgba(15, 23, 42, 0.32);
+}
+#global-toolbar {
+    align-items: center;
+    margin-bottom: 6px;
+}
+#global-settings-panel {
+    font-size: 1.05rem;
+}
+#global-settings-close {
+    min-width: 116px !important;
+}
+#global-settings-close button {
+    min-width: 116px !important;
+}
+@media (max-width: 720px) {
+    #global-settings-panel {
+        width: 100% !important;
+        padding: 18px;
+    }
+    #media-viewer {
+        padding: 64px 3vw max(132px, env(safe-area-inset-bottom));
+    }
+    #media-viewer .brm-media-viewer-stage {
+        width: 94vw;
+        height: calc(100vh - 212px) !important;
+        max-height: calc(100dvh - 212px) !important;
+    }
+    #media-viewer img,
+    #media-viewer video {
+        max-width: 94vw !important;
+        max-height: calc(100vh - 212px) !important;
+    }
 }
 """
 
@@ -389,6 +700,48 @@ def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model
         "language": language,
         "model": model,
     })
+
+
+# Public API wrappers deliberately use ordinary typed arguments instead of
+# gr.State.  Gradio omits State components from generated public APIs, which
+# would otherwise make the file-name arguments for edit/video/TTS workflows
+# impossible to pass from a LAN client.
+def api_submit_workflow_1(prompt: str, size: str, batch: int) -> None:
+    submit_workflow_1(prompt, size, batch)
+
+
+def api_submit_workflow_2(prompt: str, input_filename: str) -> None:
+    submit_workflow_2(prompt, input_filename)
+
+
+def api_submit_workflow_3(prompt: str, size: str, seconds: int) -> None:
+    submit_workflow_3(prompt, size, seconds)
+
+
+def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> None:
+    submit_workflow_4(prompt, input_filename, seconds)
+
+
+def api_submit_workflow_5(
+    prompt: str, input_filename1: str, input_filename2: str, seconds: int
+) -> None:
+    submit_workflow_5(prompt, input_filename1, input_filename2, seconds)
+
+
+def api_submit_workflow_6(
+    prompt: str, image: str, audio: str, duration: float, size: str
+) -> None:
+    submit_workflow_6(prompt, image, audio, duration, size)
+
+
+def api_submit_workflow_7(prompt: str, ref_audio: str, temperature: float) -> None:
+    submit_workflow_7(prompt, ref_audio, temperature)
+
+
+def api_submit_workflow_8(
+    tags: str, lyrics: str, duration: float, bpm: int, language: str, model: str
+) -> None:
+    submit_workflow_8(tags, lyrics, duration, bpm, language, model)
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +964,94 @@ def process_task(task: Task) -> None:
 task_queue = TaskQueue(processor=process_task, max_workers=QUEUE_CONCURRENCY)
 
 
+def _setting_int(value, default: int, min_value: int, max_value: int) -> int:
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
+    return max(min_value, min(max_value, value))
+
+
+def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_gallery_max=None):
+    """保存并立即应用工作台层面的全局设置。"""
+    global QUEUE_CONCURRENCY, DONE_TASKS_MAX, DONE_GALLERY_MAX
+
+    # 某些旧浏览器标签页在 Gradio 重连时可能发送一个没有表单值的陈旧事件。
+    # 忽略它，避免无意义的错误日志或意外覆盖已保存的设置。
+    if queue_concurrency is None and done_tasks_max is None and done_gallery_max is None:
+        return "当前全局设置未变更。"
+
+    concurrency = _setting_int(queue_concurrency, QUEUE_CONCURRENCY, 1, 4)
+    task_limit = _setting_int(done_tasks_max, DONE_TASKS_MAX, 20, 500)
+    gallery_limit = _setting_int(done_gallery_max, DONE_GALLERY_MAX, 10, 100)
+    try:
+        save_config({
+            "queue_concurrency": concurrency,
+            "done_tasks_max": task_limit,
+            "done_gallery_max": gallery_limit,
+        })
+    except OSError as exc:
+        return f"❌ 保存失败，设置未应用：{exc}"
+
+    QUEUE_CONCURRENCY = concurrency
+    DONE_TASKS_MAX = task_queue.set_max_done(task_limit)
+    DONE_GALLERY_MAX = gallery_limit
+    target_workers, active_workers = task_queue.set_max_workers(concurrency)
+    return (
+        f"✅ 全局设置已保存并生效：并发 {target_workers}（当前 worker {active_workers}），"
+        f"保留任务 {DONE_TASKS_MAX} 条，画廊显示 {DONE_GALLERY_MAX} 个产物。"
+    )
+
+
+def show_global_settings():
+    return gr.update(visible=True)
+
+
+def hide_global_settings():
+    return gr.update(visible=False)
+
+
+def change_lan_access_password(current_password, new_password, confirm_password):
+    """经受限 root helper 修改 Nginx Basic Auth 密码，绝不将密码放进命令行参数。"""
+    current_password = current_password or ""
+    new_password = new_password or ""
+    confirm_password = confirm_password or ""
+
+    if not current_password:
+        return "", "", "", "❌ 请输入当前局域网访问密码。"
+    if len(new_password) < 8:
+        return "", "", "", "❌ 新密码至少需要 8 个字符。"
+    if new_password != confirm_password:
+        return "", "", "", "❌ 两次输入的新密码不一致。"
+    if any("\n" in value or "\r" in value for value in (current_password, new_password)):
+        return "", "", "", "❌ 密码不能包含换行符。"
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", LAN_PASSWORD_HELPER],
+            input=f"{current_password}\n{new_password}\n",
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except FileNotFoundError:
+        return "", "", "", "❌ 密码修改组件尚未安装，请联系管理员部署。"
+    except subprocess.TimeoutExpired:
+        return "", "", "", "❌ 密码修改超时，未确认是否生效；请勿重复提交并联系管理员检查。"
+    except OSError as exc:
+        return "", "", "", f"❌ 无法执行密码修改：{exc}"
+
+    if result.returncode != 0:
+        # 不显示 helper 的详细输出，避免将认证细节暴露在工作台页面。
+        return "", "", "", "❌ 当前密码不正确，或密码修改服务暂不可用。"
+
+    return (
+        "", "", "",
+        "✅ 局域网访问密码已更新。请在当前浏览器刷新后，使用新密码重新登录。",
+    )
+
+
 def submit(wfname, args):
     """点击提交:把任务放进队列,立即返回。队列空时会被 worker 立即取走执行。"""
     _name = WORKFLOW_BUILDERS[wfname][1]
@@ -653,6 +1094,62 @@ STATUS_ICONS = {
 def _md_cell(text: str) -> str:
     """转义 Markdown 表格单元格里的特殊字符,并把换行压成空格。"""
     return (text or "").replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
+
+
+def _completed_output_path(value) -> Path | None:
+    """只允许任务历史中位于输出目录的文件进入预览或播放器。"""
+    try:
+        path = Path(value).resolve()
+        output_root = OUTPUT_DIR.resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    if path.is_file() and (path == output_root or output_root in path.parents):
+        return path
+    return None
+
+
+def open_completed_media_viewer(gallery_paths, evt: gr.SelectData):
+    """由缩略图选择事件打开覆盖浏览器主体的图片/视频查看器。"""
+    try:
+        index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
+        path = _completed_output_path(gallery_paths[index])
+    except (IndexError, TypeError, ValueError, AttributeError):
+        path = None
+
+    if path is None:
+        return gr.update(visible=False), gr.update(visible=False)
+
+    url = f"/gradio_api/file={quote(str(path), safe='/')}"
+    filename = escape(path.name)
+    if path.suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".avi"}:
+        media = f'<video controls autoplay playsinline src="{url}"></video>'
+    else:
+        media = f'<img src="{url}" alt="{filename}">'
+    viewer_html = (
+        '<div class="brm-media-viewer-content">'
+        '<div class="brm-media-viewer-toolbar">'
+        f'<span class="brm-media-viewer-name">{filename}</span>'
+        f'<a class="brm-media-download" href="{url}" download>下载</a>'
+        '</div>'
+        f'<div class="brm-media-viewer-stage">{media}</div>'
+        '</div>'
+    )
+    return gr.update(value=viewer_html, visible=True), gr.update(visible=True)
+
+
+def close_completed_media_viewer():
+    return gr.update(value="", visible=False), gr.update(visible=False)
+
+
+def play_completed_audio(path):
+    """将用户从完成音频列表中选择的文件送入内置播放器。"""
+    path = _completed_output_path(path)
+    return str(path) if path and path.suffix.lower() in AUDIO_EXTS else None
+
+
+def clear_completed_audio_preview():
+    """停止并移除当前试听音频，避免旧音频持续占据播放器。"""
+    return gr.update(value=None), None
 
 
 def render_queue():
@@ -699,7 +1196,7 @@ def render_queue():
     summary = (f"ComfyUI:{backend}　｜　并发 {QUEUE_CONCURRENCY}　｜　排队 {len(pending)}　｜　"
                f"处理中 {len(running)}　｜　完成 {ok}　｜　失败 {err}")
 
-    # 只把图片类产物送进画廊(音频/视频无法在画廊显示,但都已存到 outputs 目录)。
+    # 图片与视频保持紧凑缩略图，点击后交给独立全屏查看器；音频提供下载列表和播放器选择器。
     imgs = []
     audios = []
     for t in done:
@@ -710,7 +1207,17 @@ def render_queue():
                     imgs.append(p)
                 elif suffix in AUDIO_EXTS:
                     audios.append(p)
-    return summary, table_md, imgs[:DONE_GALLERY_MAX], audios[:DONE_TASKS_MAX]
+    gallery_paths = imgs[:DONE_GALLERY_MAX]
+    audio_paths = audios[:DONE_TASKS_MAX]
+    audio_choices = [(Path(path).name, path) for path in audio_paths]
+    return (
+        summary,
+        table_md,
+        gallery_paths,
+        audio_paths,
+        gr.update(choices=audio_choices),
+        gallery_paths,
+    )
 
 
 output_size = [
@@ -737,8 +1244,163 @@ def on_audio_upload(filepath):
     dur  = audio_duration(filepath)
     return name, dur
 
+
+def _qwen_display_text(reasoning: str, answer: str) -> str:
+    """将 Qwen 的可选推理片段与最终回答组合成适合流式文本框显示的内容。"""
+    parts = []
+    if reasoning:
+        parts.append("【模型推理】\n" + reasoning)
+    if answer:
+        parts.append("【回答】\n" + answer)
+    return "\n\n".join(parts) or "正在等待模型输出……"
+
+
+def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_thinking):
+    """通过 WSL 内部 vLLM OpenAI 兼容接口流式返回 Qwen 回答。"""
+    question = (question or "").strip()
+    if not question:
+        yield "请输入问题后再发送。"
+        return
+
+    messages = []
+    if (system_prompt or "").strip():
+        messages.append({"role": "system", "content": system_prompt.strip()})
+    messages.append({"role": "user", "content": question})
+    payload = {
+        "model": QWEN_MODEL,
+        "messages": messages,
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+        "stream": True,
+        # Qwen 默认会先输出较长的 reasoning。普通问答关闭它，把输出额度
+        # 留给正文；需要观察推理流时，用户可在页面中显式开启。
+        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
+    }
+
+    reasoning_parts = []
+    answer_parts = []
+    last_emit = 0.0
+    finish_reason = None
+    try:
+        with requests.post(
+            f"{QWEN_API_BASE}/chat/completions",
+            json=payload,
+            stream=True,
+            timeout=(8, 300),
+        ) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line or not raw_line.startswith("data:"):
+                    continue
+                data = raw_line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    choice = chunk.get("choices", [{}])[0]
+                    delta = choice.get("delta", {})
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    continue
+
+                # 当前 vLLM 的 Qwen3.5 reasoning parser 使用 `reasoning`；
+                # 也兼容其他 OpenAI 兼容服务常见的 `reasoning_content` 字段。
+                reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                content = delta.get("content") or ""
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                if content:
+                    answer_parts.append(content)
+
+                now = time.monotonic()
+                if (content or (enable_thinking and reasoning)) and now - last_emit >= 0.08:
+                    last_emit = now
+                    yield _qwen_display_text(
+                        "".join(reasoning_parts) if enable_thinking else "",
+                        "".join(answer_parts),
+                    )
+    except requests.RequestException as exc:
+        yield (
+            f"❌ 无法连接 Qwen 服务：{exc}\n\n"
+            "请确认当前为常规模式，且 `qwen-vllm` 服务处于运行状态。"
+        )
+        return
+
+    final_text = _qwen_display_text(
+        "".join(reasoning_parts) if enable_thinking else "",
+        "".join(answer_parts),
+    )
+    if not reasoning_parts and not answer_parts:
+        final_text = "⚠️ Qwen 服务已响应，但未返回可显示的文本。"
+    elif not answer_parts and reasoning_parts and not enable_thinking:
+        final_text = "⚠️ 模型未返回最终回答。请重试，或降低问题长度后再试。"
+    elif finish_reason == "length":
+        final_text += (
+            "\n\n⚠️ 已达到最大输出 Token，回答可能未完成。"
+            "请提高“最大输出 Token”，或将长文拆分为多次生成。"
+        )
+    yield final_text
+
+
+def clear_qwen_chat():
+    return "", ""
+
 def build_ui():
     with gr.Blocks(title="ComfyUI × Gradio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+        with gr.Row(elem_id="global-toolbar", equal_height=True):
+            with gr.Column(scale=8):
+                gr.Markdown("## BRM AI 工作台")
+            with gr.Column(scale=1, min_width=140):
+                settings_btn = gr.Button("⚙ 全局设置", variant="secondary")
+
+        with gr.Group(visible=False, elem_id="global-settings-panel") as settings_panel:
+            with gr.Row(equal_height=True):
+                with gr.Column(scale=10):
+                    gr.Markdown(
+                        "### 全局设置\n"
+                        "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
+                        "视频、数字人等高显存任务通常建议保持并发 **1**。"
+                    )
+                with gr.Column(scale=1, min_width=116):
+                    settings_close_top_btn = gr.Button(
+                        "✕ 关闭", variant="secondary", elem_id="global-settings-close",
+                    )
+            with gr.Row():
+                setting_concurrency = gr.Slider(
+                    1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
+                    label="任务并发数",
+                )
+                setting_done_tasks = gr.Slider(
+                    20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
+                    label="已完成任务保留数",
+                )
+                setting_done_gallery = gr.Slider(
+                    10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
+                    label="画廊最多显示产物数",
+                )
+            with gr.Row():
+                save_settings_btn = gr.Button("保存并应用", variant="primary")
+                close_settings_btn = gr.Button("关闭", variant="secondary")
+            settings_status = gr.Markdown("")
+            gr.Markdown("---\n#### 局域网访问密码")
+            gr.Markdown(
+                "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
+                "修改后当前浏览器需要用新密码重新登录。"
+            )
+            lan_current_password = gr.Textbox(
+                label="当前访问密码", type="password", max_length=128,
+            )
+            with gr.Row():
+                lan_new_password = gr.Textbox(
+                    label="新访问密码", type="password", max_length=128,
+                )
+                lan_confirm_password = gr.Textbox(
+                    label="确认新访问密码", type="password", max_length=128,
+                )
+            change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
+            lan_password_status = gr.Markdown("")
+
         # ---- 每个工作流一个 Tab。新增工作流时,复制一个 gr.Tab 块即可。 ----
         with gr.Tabs():
             # ========== Tab 1 ==========
@@ -751,7 +1413,12 @@ def build_ui():
                             size1 = gr.Dropdown(label="图片尺寸", choices=output_size, value="1024 × 1024")
                             batch1 = gr.Number(value=1, label="图片数量", minimum=1, maximum=4, precision=0)
                         submit_btn1 = gr.Button("提交", variant="primary")
-                submit_btn1.click(fn=submit_workflow_1, inputs=[prompt1, size1, batch1])
+                submit_btn1.click(
+                    fn=submit_workflow_1,
+                    inputs=[prompt1, size1, batch1],
+                    api_name="ui_submit_workflow_1",
+                    api_visibility="private",
+                )
 
             # ========== Tab 2 ==========
             with gr.Tab("图片编辑FLUX.2-klein"):
@@ -764,7 +1431,12 @@ def build_ui():
                         submit_btn2 = gr.Button("提交", variant="primary")
                 reference_image2.upload(fn=on_ref_upload, inputs=reference_image2, outputs=uploaded_name2)
                 reference_image2.clear(fn=lambda: "", outputs=uploaded_name2)   # 清空时一并清掉
-                submit_btn2.click(fn=submit_workflow_2, inputs=[prompt2, uploaded_name2])
+                submit_btn2.click(
+                    fn=submit_workflow_2,
+                    inputs=[prompt2, uploaded_name2],
+                    api_name="ui_submit_workflow_2",
+                    api_visibility="private",
+                )
 
             # ========== Tab 3 ==========
             with gr.Tab("文生视频LTX2.3"):
@@ -776,7 +1448,12 @@ def build_ui():
                             size3 = gr.Dropdown(label="视频尺寸", choices=output_size, value="768 × 1024")
                             seconds3 = gr.Number(value=5, label="视频时长", minimum=2, maximum=360, precision=0)
                         submit_btn3 = gr.Button("提交", variant="primary")
-                submit_btn3.click(fn=submit_workflow_3, inputs=[prompt3, size3, seconds3])
+                submit_btn3.click(
+                    fn=submit_workflow_3,
+                    inputs=[prompt3, size3, seconds3],
+                    api_name="ui_submit_workflow_3",
+                    api_visibility="private",
+                )
 
             # ========== Tab 4 ==========
             with gr.Tab("图生视频LTX2.3"):
@@ -790,7 +1467,12 @@ def build_ui():
                         submit_btn4 = gr.Button("提交", variant="primary")
                 reference_image4.upload(fn=on_ref_upload, inputs=reference_image4, outputs=uploaded_name4)
                 reference_image4.clear(fn=lambda: "", outputs=uploaded_name4)   # 清空时一并清掉
-                submit_btn4.click(fn=submit_workflow_4, inputs=[prompt4, uploaded_name4, seconds4])
+                submit_btn4.click(
+                    fn=submit_workflow_4,
+                    inputs=[prompt4, uploaded_name4, seconds4],
+                    api_name="ui_submit_workflow_4",
+                    api_visibility="private",
+                )
 
             # ========== Tab 5 ==========
             with gr.Tab("首尾帧视频LTX2.3"):
@@ -814,7 +1496,12 @@ def build_ui():
                 reference_image5_2.upload(fn=on_ref_upload, inputs=reference_image5_2, outputs=uploaded_name5_2)
                 reference_image5_2.clear(fn=lambda: "", outputs=uploaded_name5_2)   # 清空时一并清掉
 
-                submit_btn5.click(fn=submit_workflow_5, inputs=[prompt5, uploaded_name5_1, uploaded_name5_2, seconds5])
+                submit_btn5.click(
+                    fn=submit_workflow_5,
+                    inputs=[prompt5, uploaded_name5_1, uploaded_name5_2, seconds5],
+                    api_name="ui_submit_workflow_5",
+                    api_visibility="private",
+                )
 
             # ========== Tab 6 ==========
             with gr.Tab("数字人-语音驱动LTX2.3"):
@@ -840,7 +1527,12 @@ def build_ui():
                 reference_audio6_2.upload(fn=on_audio_upload, inputs=reference_audio6_2, outputs=[uploaded_name6_2, uploaded_dur])
                 reference_audio6_2.clear(fn=lambda: ("", ""), outputs=[uploaded_name6_2, uploaded_dur])   # 清空时一并清掉
 
-                submit_btn6.click(fn=submit_workflow_6, inputs=[prompt6, uploaded_name6_1, uploaded_name6_2, uploaded_dur, size6])
+                submit_btn6.click(
+                    fn=submit_workflow_6,
+                    inputs=[prompt6, uploaded_name6_1, uploaded_name6_2, uploaded_dur, size6],
+                    api_name="ui_submit_workflow_6",
+                    api_visibility="private",
+                )
 
             # ========== Tab 7 ==========
             with gr.Tab("语音克隆IndexTTS2"):
@@ -861,7 +1553,12 @@ def build_ui():
                 reference_audio7.upload(fn=on_audio_upload, inputs=reference_audio7,
                                         outputs=[uploaded_name7, uploaded_dur7])
                 reference_audio7.clear(fn=lambda: ("", 0.0), outputs=[uploaded_name7, uploaded_dur7])
-                submit_btn7.click(fn=submit_workflow_7, inputs=[prompt7, uploaded_name7, temperature7])
+                submit_btn7.click(
+                    fn=submit_workflow_7,
+                    inputs=[prompt7, uploaded_name7, temperature7],
+                    api_name="ui_submit_workflow_7",
+                    api_visibility="private",
+                )
 
             # ========== Tab 8 ==========
             with gr.Tab("音乐生成ACE-Step 1.5"):
@@ -900,6 +1597,53 @@ def build_ui():
                 submit_btn8.click(
                     fn=submit_workflow_8,
                     inputs=[tags8, lyrics8, duration8, bpm8, language8, model8],
+                    api_name="ui_submit_workflow_8",
+                    api_visibility="private",
+                )
+
+            # ========== Tab 9 ==========
+            with gr.Tab("Qwen 大模型"):
+                gr.Markdown(
+                    "使用本机 Qwen3.5-4B 的流式问答能力做快速验证。"
+                    "高显存视频模式会暂时停止 Qwen 服务。"
+                )
+                qwen_system = gr.Textbox(
+                    label="系统提示词（可选）",
+                    value="你是一个专业、简洁的中文助手。",
+                    lines=2,
+                )
+                qwen_question = gr.Textbox(
+                    label="问题",
+                    placeholder="例如：用三句话解释什么是向量数据库？",
+                    lines=5,
+                    autofocus=True,
+                )
+                with gr.Row():
+                    qwen_temperature = gr.Slider(
+                        0, 1.5, value=0.7, step=0.1,
+                        label="温度",
+                    )
+                    qwen_max_tokens = gr.Slider(
+                        128, 3584, value=2048, step=128, precision=0,
+                        label="最大输出 Token（长文建议 3072+）",
+                    )
+                qwen_enable_thinking = gr.Checkbox(
+                    label="启用模型推理（会占用输出字数）",
+                    value=False,
+                    info="普通问答默认关闭；仅在需要观察推理流时开启。",
+                )
+                with gr.Row():
+                    qwen_send_btn = gr.Button("发送并流式回答", variant="primary")
+                    qwen_stop_btn = gr.Button("停止", variant="stop")
+                    qwen_clear_btn = gr.Button("清空", variant="secondary")
+                qwen_answer = gr.Textbox(
+                    label="Qwen 流式回答",
+                    lines=18,
+                    max_lines=30,
+                    interactive=False,
+                    autoscroll=True,
+                    buttons=["copy"],
+                    elem_id="qwen-answer",
                 )
 
         gr.Markdown("---")
@@ -914,17 +1658,134 @@ def build_ui():
                 clear_btn = gr.Button("清空排队任务")
                 interrupt_btn = gr.Button("中断当前任务")
         op_status = gr.Markdown("")
-        q_audio = gr.File(label="已完成音频(累计)", file_count="multiple")
-        q_gallery = gr.Gallery(label="已完成图片/视频(累计)", columns=3, height=320)
+        q_audio = gr.File(label="已完成音频（累计，可下载）", file_count="multiple", height=110)
+        with gr.Row():
+            completed_audio_selector = gr.Dropdown(
+                label="选择要试听的已完成音频",
+                choices=[],
+                value=None,
+                scale=1,
+            )
+            completed_audio_player = gr.Audio(
+                label="音频试听",
+                type="filepath",
+                interactive=False,
+                buttons=["download"],
+                scale=2,
+            )
+        clear_audio_preview_btn = gr.Button("清除当前试听", variant="secondary")
+        q_gallery = gr.Gallery(
+            label="已完成图片/视频（累计）",
+            columns=5,
+            rows=1,
+            height=190,
+            object_fit="cover",
+            allow_preview=False,
+            preview=False,
+            buttons=["download", "download_all", "fullscreen"],
+            elem_id="q-gallery",
+        )
+        completed_gallery_paths = gr.State([])
+        media_viewer = gr.HTML(value="", visible=False, elem_id="media-viewer")
+        media_viewer_close_btn = gr.Button(
+            "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
+        )
+        gr.Markdown("点击图片或视频缩略图会打开浏览器主体大预览；可在预览内下载。画廊工具栏可下载全部。")
         gr.Markdown("", height=20)
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status)
         interrupt_btn.click(fn=interrupt, outputs=op_status)
+        completed_audio_selector.change(
+            fn=play_completed_audio,
+            inputs=completed_audio_selector,
+            outputs=completed_audio_player,
+            api_visibility="private",
+        )
+        clear_audio_preview_btn.click(
+            fn=clear_completed_audio_preview,
+            outputs=[completed_audio_selector, completed_audio_player],
+            api_visibility="private",
+        )
+        q_gallery.select(
+            fn=open_completed_media_viewer,
+            inputs=completed_gallery_paths,
+            outputs=[media_viewer, media_viewer_close_btn],
+            api_visibility="private",
+        )
+        media_viewer_close_btn.click(
+            fn=close_completed_media_viewer,
+            outputs=[media_viewer, media_viewer_close_btn],
+            api_visibility="private",
+        )
 
         # 定时刷新任务面板与存活检测。
-        gr.Timer(1.5).tick(fn=render_queue, outputs=[q_summary, q_table, q_gallery, q_audio])
+        gr.Timer(1.5).tick(
+            fn=render_queue,
+            outputs=[
+                q_summary,
+                q_table,
+                q_gallery,
+                q_audio,
+                completed_audio_selector,
+                completed_gallery_paths,
+            ],
+        )
         gr.Timer(3.0).tick(fn=check_health)
+
+        # Stable LAN API surface. These wrappers accept explicit values for
+        # arguments that are State-only in the browser UI (uploaded filenames
+        # and audio duration), so every documented workflow can be submitted
+        # from a non-browser client.
+        gr.api(api_submit_workflow_1, api_name="submit_workflow_1")
+        gr.api(api_submit_workflow_2, api_name="submit_workflow_2")
+        gr.api(api_submit_workflow_3, api_name="submit_workflow_3")
+        gr.api(api_submit_workflow_4, api_name="submit_workflow_4")
+        gr.api(api_submit_workflow_5, api_name="submit_workflow_5")
+        gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
+        gr.api(api_submit_workflow_7, api_name="submit_workflow_7")
+        gr.api(api_submit_workflow_8, api_name="submit_workflow_8")
+
+        # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
+        settings_btn.click(fn=show_global_settings, outputs=settings_panel, api_visibility="private")
+        settings_close_top_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
+        close_settings_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
+        save_settings_btn.click(
+            fn=save_global_settings,
+            inputs=[setting_concurrency, setting_done_tasks, setting_done_gallery],
+            outputs=settings_status,
+            api_visibility="private",
+        )
+        change_lan_password_btn.click(
+            fn=change_lan_access_password,
+            inputs=[lan_current_password, lan_new_password, lan_confirm_password],
+            outputs=[lan_current_password, lan_new_password, lan_confirm_password, lan_password_status],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="lan-password-change",
+            show_progress="minimal",
+        )
+        qwen_submit_event = qwen_send_btn.click(
+            fn=stream_qwen_answer,
+            inputs=[qwen_question, qwen_system, qwen_temperature, qwen_max_tokens, qwen_enable_thinking],
+            outputs=qwen_answer,
+            api_name="qwen_chat",
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="qwen-stream",
+            show_progress="minimal",
+            stream_every=0.08,
+        )
+        qwen_stop_btn.click(
+            fn=None,
+            cancels=[qwen_submit_event],
+            api_visibility="private",
+        )
+        qwen_clear_btn.click(
+            fn=clear_qwen_chat,
+            outputs=[qwen_question, qwen_answer],
+            api_visibility="private",
+        )
 
     return demo
 
@@ -935,7 +1796,12 @@ def main():
 
     demo = build_ui()
     demo.queue()
-    demo.launch(server_name="0.0.0.0", server_port=server_port, inbrowser=False)
+    demo.launch(
+        server_name=GRADIO_HOST,
+        server_port=server_port,
+        inbrowser=False,
+        root_path=GRADIO_ROOT_PATH,
+    )
 
 
 if __name__ == "__main__":

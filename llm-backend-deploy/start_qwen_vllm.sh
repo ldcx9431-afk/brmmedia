@@ -64,4 +64,7 @@ echo "[INFO] Starting Qwen vLLM on CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "[INFO] Model=$MODEL_ID"
 echo "[INFO] Port=${QWEN_PORT:-8000}"
 
-vllm "${ARGS[@]}" 2>&1 | tee -a logs/qwen-vllm.log
+# The deployment can use an offline ``--target`` package stage.  That layout
+# does not generate the ``vllm`` console-script shim, so invoke its CLI module
+# through the venv interpreter directly.
+exec .venv/bin/python -m vllm.entrypoints.cli.main "${ARGS[@]}"

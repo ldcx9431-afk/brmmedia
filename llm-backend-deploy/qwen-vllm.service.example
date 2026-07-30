@@ -2,6 +2,7 @@
 Description=Qwen3.6 27B vLLM OpenAI-compatible service
 After=network-online.target
 Wants=network-online.target
+Conflicts=baorong-backend-highvram.service
 
 [Service]
 Type=simple

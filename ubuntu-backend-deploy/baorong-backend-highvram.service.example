@@ -1,0 +1,18 @@
+[Unit]
+Description=Bao Rong Wan Xiang high-VRAM Gradio and ComfyUI backend
+After=network-online.target
+Wants=network-online.target
+Conflicts=baorong-backend.service qwen-vllm.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/baorongwanxiang/ubuntu-backend-deploy
+ExecStart=/opt/baorongwanxiang/ubuntu-backend-deploy/start_backend.sh
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=BRM_PROFILE=highvram
+
+[Install]
+WantedBy=multi-user.target
