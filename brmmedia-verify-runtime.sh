@@ -3,6 +3,7 @@
 set -u -o pipefail
 
 APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
+SOURCE_ROOT="${BRMMEDIA_SOURCE_ROOT:-/mnt/d/brmmedia/source}"
 COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-42d2aa55432b57371ddc9d4078ae250b54227641}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
@@ -34,6 +35,34 @@ check_timer() {
     ok "timer $name is active and enabled"
   else
     bad "timer $name is active but not enabled for boot"
+  fi
+}
+
+check_source_runtime_sync() {
+  local relative source_file runtime_file mismatches=0
+  local -a files=(
+    "ubuntu-backend-deploy/webui.py"
+    "ubuntu-backend-deploy/comfyui_server.py"
+    "validate_comfy_workflows.py"
+    "brmmedia-verify-runtime.sh"
+  )
+  if [ ! -d "$SOURCE_ROOT" ]; then
+    bad "deployment source root is missing: $SOURCE_ROOT"
+    return
+  fi
+  for relative in "${files[@]}"; do
+    source_file="$SOURCE_ROOT/$relative"
+    runtime_file="$APP_ROOT/$relative"
+    if [ ! -f "$source_file" ] || [ ! -f "$runtime_file" ]; then
+      bad "source/runtime file is missing: $relative"
+      mismatches=$((mismatches + 1))
+    elif ! cmp -s "$source_file" "$runtime_file"; then
+      bad "deployment source differs from runtime: $relative"
+      mismatches=$((mismatches + 1))
+    fi
+  done
+  if [ "$mismatches" -eq 0 ]; then
+    ok "deployment source matches runtime for ${#files[@]} critical files"
   fi
 }
 
@@ -177,6 +206,7 @@ fi
 check_service baorong-backend
 check_service nginx
 check_timer brmmedia-healthcheck.timer
+check_source_runtime_sync
 
 highvram=false
 if systemctl is-active --quiet baorong-backend-highvram; then
