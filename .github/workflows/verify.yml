@@ -25,12 +25,14 @@ jobs:
             call_gradio_api.py \
             validate_comfy_workflows.py \
             tests/test_task_queue.py \
-            tests/test_validate_comfy_workflows.py
+            tests/test_validate_comfy_workflows.py \
+            tests/test_api_documentation.py
 
       - name: Verify application contracts
         run: |
           python tests/test_task_queue.py
           python tests/test_validate_comfy_workflows.py
+          python tests/test_api_documentation.py
 
       - name: Parse Shell sources
         run: |

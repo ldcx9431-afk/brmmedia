@@ -1602,8 +1602,10 @@ def build_ui():
                         reference_image2 = gr.Image(type="filepath", height=400)   # 关键:拿到磁盘路径才能上传
                         uploaded_name2   = gr.State("")                # 存上传后 ComfyUI 给的文件名
                         submit_btn2 = gr.Button("提交", variant="primary")
-                reference_image2.upload(fn=on_ref_upload, inputs=reference_image2, outputs=uploaded_name2)
-                reference_image2.clear(fn=lambda: "", outputs=uploaded_name2)   # 清空时一并清掉
+                reference_image2.upload(fn=on_ref_upload, inputs=reference_image2, outputs=uploaded_name2,
+                                         api_visibility="private")
+                reference_image2.clear(fn=lambda: "", outputs=uploaded_name2,
+                                       api_visibility="private")   # 清空时一并清掉
                 submit_btn2.click(
                     fn=submit_workflow_2,
                     inputs=[prompt2, uploaded_name2],
@@ -1638,8 +1640,10 @@ def build_ui():
                         reference_image4 = gr.Image(type="filepath", height=400)   # 关键:拿到磁盘路径才能上传
                         uploaded_name4   = gr.State("")                # 存上传后 ComfyUI 给的文件名
                         submit_btn4 = gr.Button("提交", variant="primary")
-                reference_image4.upload(fn=on_ref_upload, inputs=reference_image4, outputs=uploaded_name4)
-                reference_image4.clear(fn=lambda: "", outputs=uploaded_name4)   # 清空时一并清掉
+                reference_image4.upload(fn=on_ref_upload, inputs=reference_image4, outputs=uploaded_name4,
+                                         api_visibility="private")
+                reference_image4.clear(fn=lambda: "", outputs=uploaded_name4,
+                                       api_visibility="private")   # 清空时一并清掉
                 submit_btn4.click(
                     fn=submit_workflow_4,
                     inputs=[prompt4, uploaded_name4, seconds4],
@@ -1663,11 +1667,15 @@ def build_ui():
                         uploaded_name5_2   = gr.State("")                # 存上传后 ComfyUI 给的文件名
                 submit_btn5 = gr.Button("提交", variant="primary")
 
-                reference_image5_1.upload(fn=on_ref_upload, inputs=reference_image5_1, outputs=uploaded_name5_1)
-                reference_image5_1.clear(fn=lambda: "", outputs=uploaded_name5_1)   # 清空时一并清掉
+                reference_image5_1.upload(fn=on_ref_upload, inputs=reference_image5_1, outputs=uploaded_name5_1,
+                                           api_visibility="private")
+                reference_image5_1.clear(fn=lambda: "", outputs=uploaded_name5_1,
+                                         api_visibility="private")   # 清空时一并清掉
 
-                reference_image5_2.upload(fn=on_ref_upload, inputs=reference_image5_2, outputs=uploaded_name5_2)
-                reference_image5_2.clear(fn=lambda: "", outputs=uploaded_name5_2)   # 清空时一并清掉
+                reference_image5_2.upload(fn=on_ref_upload, inputs=reference_image5_2, outputs=uploaded_name5_2,
+                                           api_visibility="private")
+                reference_image5_2.clear(fn=lambda: "", outputs=uploaded_name5_2,
+                                         api_visibility="private")   # 清空时一并清掉
 
                 submit_btn5.click(
                     fn=submit_workflow_5,
@@ -1694,11 +1702,15 @@ def build_ui():
 
                 submit_btn6 = gr.Button("提交", variant="primary")
 
-                reference_audio6_1.upload(fn=on_ref_upload, inputs=reference_audio6_1, outputs=uploaded_name6_1)
-                reference_audio6_1.clear(fn=lambda: "", outputs=uploaded_name6_1)   # 清空时一并清掉
+                reference_audio6_1.upload(fn=on_ref_upload, inputs=reference_audio6_1, outputs=uploaded_name6_1,
+                                           api_visibility="private")
+                reference_audio6_1.clear(fn=lambda: "", outputs=uploaded_name6_1,
+                                         api_visibility="private")   # 清空时一并清掉
 
-                reference_audio6_2.upload(fn=on_audio_upload, inputs=reference_audio6_2, outputs=[uploaded_name6_2, uploaded_dur])
-                reference_audio6_2.clear(fn=lambda: ("", ""), outputs=[uploaded_name6_2, uploaded_dur])   # 清空时一并清掉
+                reference_audio6_2.upload(fn=on_audio_upload, inputs=reference_audio6_2,
+                                           outputs=[uploaded_name6_2, uploaded_dur], api_visibility="private")
+                reference_audio6_2.clear(fn=lambda: ("", ""), outputs=[uploaded_name6_2, uploaded_dur],
+                                         api_visibility="private")   # 清空时一并清掉
 
                 submit_btn6.click(
                     fn=submit_workflow_6,
@@ -1724,8 +1736,9 @@ def build_ui():
                                                      label="采样温度(越高越多样,越低越稳定)")
                         submit_btn7 = gr.Button("提交", variant="primary")
                 reference_audio7.upload(fn=on_audio_upload, inputs=reference_audio7,
-                                        outputs=[uploaded_name7, uploaded_dur7])
-                reference_audio7.clear(fn=lambda: ("", 0.0), outputs=[uploaded_name7, uploaded_dur7])
+                                        outputs=[uploaded_name7, uploaded_dur7], api_visibility="private")
+                reference_audio7.clear(fn=lambda: ("", 0.0), outputs=[uploaded_name7, uploaded_dur7],
+                                       api_visibility="private")
                 submit_btn7.click(
                     fn=submit_workflow_7,
                     inputs=[prompt7, uploaded_name7, temperature7],
@@ -1867,8 +1880,8 @@ def build_ui():
         gr.Markdown("", height=20)
 
         # 事件绑定。
-        clear_btn.click(fn=clear_pending, outputs=op_status)
-        interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status)
+        clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
+        interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status, api_visibility="private")
         completed_audio_selector.change(
             fn=play_completed_audio,
             inputs=completed_audio_selector,
@@ -1903,8 +1916,9 @@ def build_ui():
                 completed_audio_selector,
                 completed_gallery_paths,
             ],
+            api_visibility="private",
         )
-        gr.Timer(3.0).tick(fn=check_health)
+        gr.Timer(3.0).tick(fn=check_health, api_visibility="private")
 
         # Stable LAN API surface. These wrappers accept explicit values for
         # arguments that are State-only in the browser UI (uploaded filenames

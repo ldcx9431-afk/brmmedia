@@ -120,6 +120,10 @@ missing_endpoints = sorted(expected_endpoints - set(named_endpoints))
 if missing_endpoints:
     print("missing Gradio API endpoints: " + ", ".join(missing_endpoints), file=sys.stderr)
     raise SystemExit(1)
+unexpected_endpoints = sorted(set(named_endpoints) - expected_endpoints)
+if unexpected_endpoints:
+    print("unexpected public Gradio endpoints: " + ", ".join(unexpected_endpoints), file=sys.stderr)
+    raise SystemExit(1)
 
 ids = set()
 labels = set()
