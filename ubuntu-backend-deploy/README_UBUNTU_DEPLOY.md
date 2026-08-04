@@ -1,5 +1,10 @@
 # 包容万象数智启动器 Ubuntu 后端一体化部署文档
 
+> **Windows 11 + WSL2 当前生产 Profile：** 常规模式的 ComfyUI/Gradio 使用 GPU1
+> （RTX A4000），Qwen3.5-4B AWQ vLLM 使用 GPU0（RTX A5000）；高显存视频模式
+> 会让 ComfyUI 使用 GPU0 并停止 Qwen。实际服务、模型与锁定版本以仓库根目录的
+> `WSL_TEST_DEPLOY.md` 和 `runtime-locks/production-profile-2026-08-03.md` 为准。
+
 本文档合并了 Ubuntu 后端部署说明、自定义节点清单、模型清单和模型下载链接，方便后续直接发给 AI 或运维脚本进行快速拉取部署。
 
 当前部署包只包含 Gradio 后端、工作流和 Linux 版 ComfyUI 启动桥接，不包含 Windows Electron、Windows Python、模型大文件。

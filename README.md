@@ -6,7 +6,7 @@
 ubuntu-backend-deploy/
 ```
 
-Qwen3.6 27B vLLM 独立部署位于：
+Qwen vLLM 独立部署位于：
 
 ```text
 llm-backend-deploy/
@@ -17,6 +17,13 @@ llm-backend-deploy/
 ```text
 ubuntu-backend-deploy/README_UBUNTU_DEPLOY.md
 llm-backend-deploy/README_QWEN_VLLM_DEPLOY.md
+```
+
+Windows 11 + WSL2 局域网测试、运行时验收和恢复边界见：
+
+```text
+WSL_TEST_DEPLOY.md
+runtime-locks/production-profile-2026-08-03.md
 ```
 
 ## 重要说明
@@ -61,12 +68,14 @@ echo 'COMFYUI_ARGS=--highvram' >> .env
 ./tune_nvidia_performance.sh
 ```
 
-Qwen vLLM 默认使用第二张 A5000：
+当前生产 Profile 的 Qwen vLLM 使用 GPU0（RTX A5000）与本地
+`Qwen3.5-4B-AWQ-4bit`。ComfyUI 常规模式使用 GPU1（RTX A4000）；
+高显存视频模式会切换 ComfyUI 到 GPU0 并停止 Qwen。
 
 ```text
-QWEN_CUDA_VISIBLE_DEVICES=1
-QWEN_MODEL=cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit
-QWEN_LOCAL_MODEL_DIR=./models/Qwen3.6-35B-A3B-AWQ-4bit
+QWEN_CUDA_VISIBLE_DEVICES=0
+QWEN_MODEL=cyankiwi/Qwen3.5-4B-AWQ-4bit
+QWEN_LOCAL_MODEL_DIR=/srv/brmmedia/models/Qwen3.5-4B-AWQ-4bit
 QWEN_PREFER_LOCAL_MODEL=true
 QWEN_PORT=8000
 ```
