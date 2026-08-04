@@ -24,6 +24,19 @@ check_service() {
   fi
 }
 
+check_timer() {
+  local name="$1"
+  if ! systemctl is-active --quiet "$name"; then
+    bad "timer $name is not active ($(systemctl is-active "$name" 2>/dev/null || true))"
+    return
+  fi
+  if systemctl is-enabled --quiet "$name"; then
+    ok "timer $name is active and enabled"
+  else
+    bad "timer $name is active but not enabled for boot"
+  fi
+}
+
 http_code() {
   curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "$1" || true
 }
@@ -159,6 +172,7 @@ fi
 
 check_service baorong-backend
 check_service nginx
+check_timer brmmedia-healthcheck.timer
 
 highvram=false
 if systemctl is-active --quiet baorong-backend-highvram; then
