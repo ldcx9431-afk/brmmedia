@@ -3,7 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VLLM_PIP_SPEC="${VLLM_PIP_SPEC:-vllm}"
+# vLLM 0.26.0 is the production-verified build for the Qwen3.5 4B profile.
+# Do not silently resolve the newest vLLM on a recovery server.
+VLLM_PIP_SPEC="${VLLM_PIP_SPEC:-vllm==0.26.0}"
 VLLM_EXTRA_INDEX_URL="${VLLM_EXTRA_INDEX_URL:-}"
 
 cd "$SCRIPT_DIR"

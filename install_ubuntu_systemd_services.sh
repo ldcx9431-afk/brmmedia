@@ -41,6 +41,7 @@ install_service \
   "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh"
 
 install -m 0755 "$ROOT_DIR/brmmedia-healthcheck.sh" /usr/local/sbin/brmmedia-healthcheck
+install -m 0755 "$ROOT_DIR/brmmedia-verify-runtime.sh" /usr/local/sbin/brmmedia-verify-runtime
 install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.service.example" \
   /etc/systemd/system/brmmedia-healthcheck.service
 install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.timer.example" \
@@ -111,4 +112,5 @@ Logs:
   sudo journalctl -u baorong-backend -f
   sudo journalctl -u qwen-vllm -f
   sudo systemctl list-timers brmmedia-healthcheck.timer
+  sudo brmmedia-verify-runtime
 EOF

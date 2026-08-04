@@ -1,0 +1,37 @@
+name: Verify deployment sources
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile Python sources
+        run: |
+          python -m py_compile \
+            ubuntu-backend-deploy/webui.py \
+            ubuntu-backend-deploy/comfyui_server.py \
+            call_gradio_api.py \
+            validate_comfy_workflows.py
+
+      - name: Parse Shell sources
+        run: |
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git ls-files '*.sh')
+
+      - name: Reject tracked runtime credentials and artifacts
+        run: |
+          ! git ls-files | grep -E '(^|/)(\.env|\.htpasswd|id_[^/]+|.*\.(pem|key))$'
+          ! git ls-files | grep -E '(^|/)(outputs|artifacts|models|validation)/'

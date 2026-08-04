@@ -1,0 +1,6 @@
+# Validated Qwen3.5-4B-AWQ runtime, 2026-08-03.
+# The vLLM package resolves its CUDA 13 PyTorch wheel; keep this profile
+# together with the model settings in llm-backend-deploy/.env.qwen35-4b.example.
+vllm==0.26.0
+torch==2.11.0+cu130
+transformers==5.14.1
