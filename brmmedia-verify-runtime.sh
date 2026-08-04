@@ -42,6 +42,7 @@ check_source_runtime_sync() {
   local relative source_file runtime_file mismatches=0
   local -a files=(
     "ubuntu-backend-deploy/webui.py"
+    "ubuntu-backend-deploy/lan_api.py"
     "ubuntu-backend-deploy/comfyui_server.py"
     "validate_comfy_workflows.py"
     "brmmedia-verify-runtime.sh"
@@ -204,6 +205,7 @@ else
 fi
 
 check_service baorong-backend
+check_service brmmedia-lan-api
 check_service nginx
 check_timer brmmedia-healthcheck.timer
 check_source_runtime_sync
@@ -217,6 +219,7 @@ else
 fi
 
 check_http gradio http://127.0.0.1:9000/gradio_api/info
+check_http lan_api http://127.0.0.1:9100/api/v1/health
 check_http comfyui http://127.0.0.1:8188/system_stats
 check_gradio_ui_contract
 check_comfy_workflows

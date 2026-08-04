@@ -11,6 +11,25 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# The Windows SSH login is not necessarily a Linux account inside WSL.  Reuse
+# the user of an already-running backend when an operator passed such a login;
+# otherwise fail before installing units that systemd can never start.
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  existing_pid="$(systemctl show --property=MainPID --value baorong-backend 2>/dev/null || true)"
+  existing_user=""
+  if [ "${existing_pid:-0}" -gt 0 ] 2>/dev/null; then
+    existing_user="$(ps -o user= -p "$existing_pid" 2>/dev/null | xargs || true)"
+  fi
+  if [ -n "$existing_user" ] && id "$existing_user" >/dev/null 2>&1; then
+    echo "[WARN] Linux user '$SERVICE_USER' does not exist; reusing active backend user '$existing_user'."
+    SERVICE_USER="$existing_user"
+  else
+    echo "[ERROR] Linux service user '$SERVICE_USER' does not exist."
+    echo "[ERROR] Pass a valid WSL user, for example: sudo $0 brm [runtime-app-root]"
+    exit 1
+  fi
+fi
+
 echo "[INFO] Installing services for user: $SERVICE_USER"
 echo "[INFO] Source root: $ROOT_DIR"
 echo "[INFO] Runtime app root: $APP_ROOT"
@@ -39,6 +58,12 @@ install_service \
   /etc/systemd/system/baorong-backend.service \
   "$APP_ROOT/ubuntu-backend-deploy" \
   "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh"
+
+install_service \
+  "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-lan-api.service.example" \
+  /etc/systemd/system/brmmedia-lan-api.service \
+  "$APP_ROOT/ubuntu-backend-deploy" \
+  "$APP_ROOT/ubuntu-backend-deploy/.venv/bin/python -m uvicorn lan_api:app --host 127.0.0.1 --port 9100 --proxy-headers"
 
 install -m 0755 "$ROOT_DIR/brmmedia-healthcheck.sh" /usr/local/sbin/brmmedia-healthcheck
 install -m 0755 "$ROOT_DIR/brmmedia-verify-runtime.sh" /usr/local/sbin/brmmedia-verify-runtime
@@ -78,9 +103,11 @@ fi
 
 systemctl daemon-reload
 systemctl enable baorong-backend
+systemctl enable --now brmmedia-lan-api
 systemctl enable --now brmmedia-healthcheck.timer
 systemd-analyze verify \
   /etc/systemd/system/baorong-backend.service \
+  /etc/systemd/system/brmmedia-lan-api.service \
   /etc/systemd/system/baorong-backend-highvram.service \
   /etc/systemd/system/qwen-vllm.service \
   /etc/systemd/system/brmmedia-healthcheck.service \
@@ -93,6 +120,9 @@ cat <<EOF
 
 Start the normal image/music backend:
   sudo systemctl start baorong-backend
+
+LAN automation API:
+  sudo systemctl status brmmedia-lan-api
 
 Start Qwen only after its model has been imported:
   sudo systemctl enable --now qwen-vllm

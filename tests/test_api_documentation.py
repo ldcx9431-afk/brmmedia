@@ -20,6 +20,15 @@ class ApiDocumentationTests(unittest.TestCase):
         self.assertIn("/submit_workflow_8", text)
         self.assertIn("call_gradio_api.py", text)
 
+    def test_documents_rest_automation_closure(self) -> None:
+        text = DOC_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("/api/v1/openapi.json", text)
+        self.assertIn("POST /files", text)
+        self.assertIn("POST /tasks", text)
+        self.assertIn("download_url", text)
+        self.assertIn("asset_id", text)
+
     def test_does_not_reintroduce_retired_direct_lan_routes(self) -> None:
         text = DOC_PATH.read_text(encoding="utf-8")
 

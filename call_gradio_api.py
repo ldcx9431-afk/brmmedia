@@ -10,11 +10,28 @@ actual queued/running/completed/cancelled/failed lifecycle.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+def basic_auth_headers(username: str | None, password: str | None) -> dict[str, str]:
+    """Return a Basic Auth header without ever accepting a CLI password.
+
+    A command-line password is easy to leak through shell history or process
+    listings, so LAN callers supply the password through an environment
+    variable (``BRM_PASSWORD`` by default) instead.
+    """
+    if not username:
+        return {}
+    if password is None:
+        raise ValueError("username was provided but the password environment variable is unset")
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def main() -> int:
@@ -26,7 +43,21 @@ def main() -> int:
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:9000")
     parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--username", default=os.environ.get("BRM_USER"))
+    parser.add_argument(
+        "--password-env", default="BRM_PASSWORD",
+        help="environment variable containing the Basic Auth password (default: BRM_PASSWORD)",
+    )
     args = parser.parse_args()
+
+    try:
+        auth_headers = basic_auth_headers(
+            args.username,
+            os.environ.get(args.password_env) if args.username else None,
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     try:
         raw_data = Path(args.data[1:]).read_text(encoding="utf-8") if args.data.startswith("@") else args.data
@@ -40,7 +71,7 @@ def main() -> int:
 
     base = args.base_url.rstrip("/")
     try:
-        with urlopen(f"{base}/gradio_api/info", timeout=30) as response:
+        with urlopen(Request(f"{base}/gradio_api/info", headers=auth_headers), timeout=30) as response:
             endpoint_info = json.load(response).get("named_endpoints", {}).get(f"/{args.endpoint}")
         if not endpoint_info:
             raise RuntimeError(f"unknown public Gradio endpoint: {args.endpoint}")
@@ -64,7 +95,7 @@ def main() -> int:
     request = Request(
         f"{base}/gradio_api/call/v2/{args.endpoint}",
         data=json.dumps(request_payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **auth_headers},
         method="POST",
     )
     try:
@@ -76,7 +107,7 @@ def main() -> int:
         print(f"EVENT_ID={event_id}", flush=True)
         stream_request = Request(
             f"{base}/gradio_api/call/v2/{args.endpoint}/{event_id}",
-            headers={"Accept": "text/event-stream"},
+            headers={"Accept": "text/event-stream", **auth_headers},
         )
         event = None
         with urlopen(stream_request, timeout=args.timeout) as response:
