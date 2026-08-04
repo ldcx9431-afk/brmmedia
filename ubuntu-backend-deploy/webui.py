@@ -65,6 +65,26 @@ PERSISTABLE_MEDIA_EXTS = {
     ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg",
 }
 
+
+def persisted_output_path(value) -> Path | None:
+    """Return a regular media file inside ``OUTPUT_DIR``, else ``None``.
+
+    Task history is durable state and must never become a way to surface an
+    arbitrary filesystem path after a manual edit, a stale migration record,
+    or a symlink in the output directory.  Resolve both sides before the
+    containment check so a link pointing outside the output root is rejected.
+    """
+    try:
+        path = Path(value).resolve(strict=True)
+        output_root = OUTPUT_DIR.resolve(strict=False)
+    except (OSError, TypeError, ValueError):
+        return None
+    if path.suffix.lower() not in PERSISTABLE_MEDIA_EXTS:
+        return None
+    if path != output_root and output_root not in path.parents:
+        return None
+    return path if path.is_file() else None
+
 DONE_GALLERY_MAX = 30       # 已完成画廊最多展示多少张
 DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时间运行后无限增长)
 
@@ -234,9 +254,9 @@ class TaskQueue:
             if status not in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.ERROR):
                 return None
             result = [
-                str(Path(path))
-                for path in record.get("result", [])
-                if isinstance(path, str) and Path(path).is_file()
+                str(path)
+                for value in record.get("result", [])
+                if isinstance(value, str) and (path := persisted_output_path(value))
             ]
             if status == TaskStatus.DONE and not result:
                 return None
@@ -259,8 +279,8 @@ class TaskQueue:
         """为旧版本已经生成、但尚无任务索引的媒体创建一次可恢复历史。"""
         try:
             media_files = [
-                path for path in OUTPUT_DIR.iterdir()
-                if path.is_file() and path.suffix.lower() in PERSISTABLE_MEDIA_EXTS
+                resolved for path in OUTPUT_DIR.iterdir()
+                if (resolved := persisted_output_path(path))
             ]
         except OSError:
             return []
@@ -1235,14 +1255,7 @@ def _md_cell(text: str) -> str:
 
 def _completed_output_path(value) -> Path | None:
     """只允许任务历史中位于输出目录的文件进入预览或播放器。"""
-    try:
-        path = Path(value).resolve()
-        output_root = OUTPUT_DIR.resolve()
-    except (OSError, TypeError, ValueError):
-        return None
-    if path.is_file() and (path == output_root or output_root in path.parents):
-        return path
-    return None
+    return persisted_output_path(value)
 
 
 def open_completed_media_viewer(gallery_paths, evt: gr.SelectData):
@@ -1342,11 +1355,14 @@ def render_queue():
     for t in done:
         if isinstance(t.result, list):
             for p in t.result:
-                suffix = Path(p).suffix.lower()
+                path = _completed_output_path(p)
+                if path is None:
+                    continue
+                suffix = path.suffix.lower()
                 if suffix in GALLERY_EXTS:
-                    imgs.append(p)
+                    imgs.append(str(path))
                 elif suffix in AUDIO_EXTS:
-                    audios.append(p)
+                    audios.append(str(path))
     gallery_paths = imgs[:DONE_GALLERY_MAX]
     audio_paths = audios[:DONE_TASKS_MAX]
     audio_choices = [(Path(path).name, path) for path in audio_paths]

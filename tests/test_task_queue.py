@@ -136,6 +136,33 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(status["output_files"], ["generated.png"])
         self.assertNotIn(str(self.output_dir), json.dumps(status, ensure_ascii=False))
 
+    def test_history_rejects_path_outside_outputs(self):
+        external_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(external_dir.cleanup)
+        external_file = Path(external_dir.name) / "unrelated.png"
+        external_file.write_bytes(b"outside the workspace output directory")
+        history = {
+            "version": 1,
+            "tasks": [{
+                "id": "outside-1",
+                "name": "outside",
+                "workflow_name": "unit",
+                "status": self.webui.TaskStatus.DONE.value,
+                "submit_ts": 1,
+                "start_ts": 1,
+                "done_ts": 1,
+                "result": [str(external_file)],
+                "error": "",
+            }],
+        }
+        (self.output_dir / "task-history.json").write_text(
+            json.dumps(history), encoding="utf-8"
+        )
+
+        restored = self.webui.TaskQueue(lambda task: None, max_done=5)
+
+        self.assertEqual(restored.task_status("outside-1")["state"], "not_found")
+
     def test_unknown_task_is_explicit(self):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
         self.assertEqual(queue.task_status("not-here")["state"], "not_found")
