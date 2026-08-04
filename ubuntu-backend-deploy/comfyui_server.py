@@ -108,13 +108,14 @@ def get_view_file(filename: str, subfolder: str = "", folder_type: str = "output
     return r.content
 
 
-def interrupt() -> str:
+def interrupt() -> tuple[bool, str]:
+    """Ask ComfyUI to interrupt and report whether it accepted the request."""
     try:
         response = requests.post(f"{BASE}/interrupt", timeout=5)
         response.raise_for_status()
-        return "已发送 ComfyUI 中断信号。"
+        return True, "已发送 ComfyUI 中断信号。"
     except requests.RequestException as e:
-        return f"中断失败: {e}"
+        return False, f"中断失败: {e}"
 
 
 def wait_for_outputs(

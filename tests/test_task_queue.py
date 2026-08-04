@@ -48,7 +48,7 @@ def _install_import_stubs() -> None:
     comfy.is_alive = lambda: True
     comfy.run_workflow = lambda *args, **kwargs: {}
     comfy.get_view_file = lambda *args, **kwargs: b""
-    comfy.interrupt = lambda: "mock interrupt"
+    comfy.interrupt = lambda: (True, "mock interrupt")
     comfy.BASE = "http://127.0.0.1:8188"
     comfy.WORKFLOW_DIR = REPO_ROOT / "ubuntu-backend-deploy" / "workflows"
     comfy.upload_image = lambda *args, **kwargs: "mock-input"
@@ -126,6 +126,44 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(status["status"], "已中断")
         self.assertEqual(status["error"], "队列已清空")
         self.assertIsNone(status["queue_position"])
+
+    def test_interrupt_marks_only_snapshot_tasks_after_comfy_accepts(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("running-1", "running", "unit", {})
+        with queue._lock:
+            task.status = self.webui.TaskStatus.RUNNING
+            queue._running[task.id] = task
+
+        original_queue = self.webui.task_queue
+        original_interrupt = self.webui.interrupt
+        self.addCleanup(setattr, self.webui, "task_queue", original_queue)
+        self.addCleanup(setattr, self.webui, "interrupt", original_interrupt)
+        self.webui.task_queue = queue
+        self.webui.interrupt = lambda: (True, "已发送 ComfyUI 中断信号。")
+
+        result = self.webui.interrupt_running_tasks()
+
+        self.assertIn("已请求中断 1 个运行任务", result)
+        self.assertTrue(task.cancel_event.is_set())
+
+    def test_interrupt_failure_keeps_workspace_task_running(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("running-2", "running", "unit", {})
+        with queue._lock:
+            task.status = self.webui.TaskStatus.RUNNING
+            queue._running[task.id] = task
+
+        original_queue = self.webui.task_queue
+        original_interrupt = self.webui.interrupt
+        self.addCleanup(setattr, self.webui, "task_queue", original_queue)
+        self.addCleanup(setattr, self.webui, "interrupt", original_interrupt)
+        self.webui.task_queue = queue
+        self.webui.interrupt = lambda: (False, "中断失败: connection refused")
+
+        result = self.webui.interrupt_running_tasks()
+
+        self.assertIn("当前工作台任务仍保持原状态", result)
+        self.assertFalse(task.cancel_event.is_set())
 
     def test_history_restores_completed_task_without_leaking_paths(self):
         artifact = self.output_dir / "generated.png"

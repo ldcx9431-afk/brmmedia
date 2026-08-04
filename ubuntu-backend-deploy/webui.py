@@ -367,10 +367,13 @@ class TaskQueue:
                 self._save_history()
             return len(cancelled)
 
-    def cancel_running(self) -> list[Task]:
-        """请求取消当前运行任务；worker 会把它们记录为失败/已中断。"""
+    def cancel_running(self, task_ids: set[str] | None = None) -> list[Task]:
+        """请求取消指定的运行任务；未指定时取消当前全部运行任务。"""
         with self._lock:
-            running = list(self._running.values())
+            running = [
+                task for task_id, task in self._running.items()
+                if task_ids is None or task_id in task_ids
+            ]
             for task in running:
                 task.cancel_event.set()
             return running
@@ -1219,12 +1222,21 @@ def api_task_status(task_id: str) -> dict:
 
 
 def interrupt_running_tasks():
-    """中断 ComfyUI 并同步取消本工作台当前运行任务。"""
-    running = task_queue.cancel_running()
+    """确认 ComfyUI 已接收中断后，再标记本工作台对应任务。"""
+    _, running, _ = task_queue.snapshot()
     if not running:
         return "当前没有工作台运行任务；未向 ComfyUI 发送中断信号。"
 
-    signal_result = interrupt()
+    accepted, signal_result = interrupt()
+    if not accepted:
+        return (
+            f"❌ {signal_result} 当前工作台任务仍保持原状态；"
+            "请检查 ComfyUI 服务后再尝试中断。"
+        )
+
+    # 只标记用户点击按钮时已经在运行的任务，避免在请求发送后刚被 worker
+    # 取走的新任务被错误写成已中断。
+    running = task_queue.cancel_running({task.id for task in running})
     names = "、".join(task.name for task in running[:3])
     if len(running) > 3:
         names += f" 等 {len(running)} 个任务"
