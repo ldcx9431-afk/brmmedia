@@ -114,6 +114,19 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(status["status"], "已中断")
         self.assertEqual(status["error"], "用户请求中断")
 
+    def test_cleared_pending_task_remains_queryable_as_cancelled(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("cleared-1", "cleared", "unit", {})
+        queue.enqueue(task)
+
+        self.assertEqual(queue.clear_pending(), 1)
+        status = queue.task_status(task.id)
+
+        self.assertEqual(status["state"], "cancelled")
+        self.assertEqual(status["status"], "已中断")
+        self.assertEqual(status["error"], "队列已清空")
+        self.assertIsNone(status["queue_position"])
+
     def test_history_restores_completed_task_without_leaking_paths(self):
         artifact = self.output_dir / "generated.png"
         artifact.write_bytes(b"not an image, only a queue fixture")

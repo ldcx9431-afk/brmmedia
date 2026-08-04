@@ -347,11 +347,25 @@ class TaskQueue:
         return position
 
     def clear_pending(self) -> int:
-        """清空排队中的任务(不影响正在执行和已完成的)。"""
+        """取消排队中的任务，并保留可查询的终态历史。
+
+        A caller receives a ``task_id`` immediately after submission.  Dropping
+        queued items outright would later turn that ID into ``not_found`` and
+        make an intentional operator action indistinguishable from data loss.
+        """
         with self._lock:
-            n = len(self._pending)
+            cancelled = list(self._pending)
             self._pending.clear()
-            return n
+            now = time.time()
+            for task in cancelled:
+                task.status = TaskStatus.CANCELLED
+                task.done_ts = now
+                task.error = "队列已清空"
+                self._done.insert(0, task)
+            del self._done[self._max_done:]
+            if cancelled:
+                self._save_history()
+            return len(cancelled)
 
     def cancel_running(self) -> list[Task]:
         """请求取消当前运行任务；worker 会把它们记录为失败/已中断。"""
