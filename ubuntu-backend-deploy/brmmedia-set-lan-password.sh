@@ -3,7 +3,7 @@
 # 从标准输入读取“当前密码\n新密码\n”，避免把任何密码暴露在进程参数或日志中。
 set -eu
 
-HTPASSWD_FILE="/etc/nginx/.htpasswd"
+HTPASSWD_FILE="/etc/nginx/.htpasswd-brmmedia"
 HTPASSWD_BIN="/usr/bin/htpasswd"
 NGINX_BIN="/usr/sbin/nginx"
 USERNAME="brmadmin"

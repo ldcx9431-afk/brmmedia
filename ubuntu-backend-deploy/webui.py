@@ -486,9 +486,9 @@ footer {
 }
 #media-viewer .brm-media-viewer-stage {
     width: min(1200px, calc(100vw - 10vw));
-    height: calc(100vh - 252px) !important;
-    max-height: calc(100dvh - 252px) !important;
-    min-height: 240px;
+    height: auto !important;
+    min-height: 0;
+    max-height: 100%;
     overflow: auto;
     display: flex;
     align-items: center;
@@ -500,7 +500,7 @@ footer {
     width: auto !important;
     height: auto !important;
     max-width: min(1200px, calc(100vw - 10vw)) !important;
-    max-height: calc(100vh - 252px) !important;
+    max-height: 100% !important;
     object-fit: contain;
     border-radius: 10px;
     box-shadow: 0 16px 64px rgba(0, 0, 0, 0.48);
@@ -559,13 +559,13 @@ footer {
     }
     #media-viewer .brm-media-viewer-stage {
         width: 94vw;
-        height: calc(100vh - 212px) !important;
-        max-height: calc(100dvh - 212px) !important;
+        height: auto !important;
+        max-height: 100%;
     }
     #media-viewer img,
     #media-viewer video {
         max-width: 94vw !important;
-        max-height: calc(100vh - 212px) !important;
+        max-height: 100% !important;
     }
 }
 """
@@ -631,27 +631,34 @@ def extract_result(outputs: dict, task: Task) -> list:
 # ---------------------------------------------------------------------------
 def submit_workflow_1(prompt, size, batch):
     # 工作流 JSON 的文件名(不含 .json)
+    if not (prompt or "").strip():
+        raise gr.Error("请输入图片提示词")
     submit("image_z_image_turbo", {"prompt": prompt, "size": size, "batch": batch})
 
 
 def submit_workflow_2(prompt, input_filename):
     # 工作流 JSON 的文件名(不含 .json)
     if not prompt or not input_filename:
-        gr.Error("请输入提示词 并且 上传要编辑的图片")
-        return
+        raise gr.Error("请输入提示词并上传要编辑的图片")
     submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
 
 def submit_workflow_3(prompt, size, seconds):
     # 工作流 JSON 的文件名(不含 .json)
+    if not (prompt or "").strip():
+        raise gr.Error("请输入视频提示词")
     submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
 
 def submit_workflow_4(prompt, input_filename, seconds):
     # 工作流 JSON 的文件名(不含 .json)
+    if not (prompt or "").strip() or not input_filename:
+        raise gr.Error("请输入提示词并上传源图片")
     submit("LTX23-图生视频", {"prompt": prompt, "seconds": seconds, "input_filename": input_filename})
 
 
 def submit_workflow_5(prompt, input_filename1, input_filename2, seconds):
     # 工作流 JSON 的文件名(不含 .json)
+    if not (prompt or "").strip() or not input_filename1 or not input_filename2:
+        raise gr.Error("请输入提示词并上传首帧、尾帧图片")
     submit(
         "LTX23-首尾帧视频",
         {
@@ -664,6 +671,10 @@ def submit_workflow_5(prompt, input_filename1, input_filename2, seconds):
 
 def submit_workflow_6(prompt, image, audio, uploaded_dur, size):
     # 工作流 JSON 的文件名(不含 .json)
+    if not (prompt or "").strip() or not image or not audio:
+        raise gr.Error("请输入提示词并上传驱动图片、音频")
+    if not uploaded_dur or float(uploaded_dur) <= 0:
+        raise gr.Error("无法读取音频时长，请重新上传有效音频")
     submit(
         "LTX23-单图数字人-语音驱动",
         {
@@ -1286,7 +1297,7 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
             f"{QWEN_API_BASE}/chat/completions",
             json=payload,
             stream=True,
-            timeout=(8, 300),
+            timeout=(8, 30),
         ) as response:
             response.raise_for_status()
             for raw_line in response.iter_lines(decode_unicode=True):
@@ -1320,6 +1331,9 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
                         "".join(reasoning_parts) if enable_thinking else "",
                         "".join(answer_parts),
                     )
+    except requests.ReadTimeout:
+        yield "⚠️ Qwen 已连续 30 秒没有返回内容，连接已停止。请重试或缩短问题。"
+        return
     except requests.RequestException as exc:
         yield (
             f"❌ 无法连接 Qwen 服务：{exc}\n\n"
@@ -1656,7 +1670,7 @@ def build_ui():
                 q_table = gr.Markdown(elem_id="q-table-md")
             with gr.Column(scale=1, min_width=160):
                 clear_btn = gr.Button("清空排队任务")
-                interrupt_btn = gr.Button("中断当前任务")
+                interrupt_btn = gr.Button("中断 ComfyUI 执行（影响全部任务）", variant="stop")
         op_status = gr.Markdown("")
         q_audio = gr.File(label="已完成音频（累计，可下载）", file_count="multiple", height=110)
         with gr.Row():
@@ -1682,7 +1696,7 @@ def build_ui():
             object_fit="cover",
             allow_preview=False,
             preview=False,
-            buttons=["download", "download_all", "fullscreen"],
+            buttons=["download", "download_all"],
             elem_id="q-gallery",
         )
         completed_gallery_paths = gr.State([])

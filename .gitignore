@@ -26,6 +26,17 @@ llm-backend-deploy/models/
 .DS_Store
 Thumbs.db
 
+# Credentials and machine-local deployment state
+.env
+.env.*
+!.env*.example
+*.pem
+*.key
+id_*
+.htpasswd*
+secrets/
+artifacts/
+
 # Large installers and scratch files
 VC_redist.x64.exe
 _*.json

@@ -36,7 +36,7 @@ fi
 
 ARGS=(
   serve "$MODEL_ID"
-  --host "${QWEN_HOST:-0.0.0.0}"
+  --host "${QWEN_HOST:-127.0.0.1}"
   --port "${QWEN_PORT:-8000}"
   --served-model-name "${QWEN_SERVED_MODEL_NAME:-qwen}"
   --tensor-parallel-size "${QWEN_TENSOR_PARALLEL_SIZE:-1}"
@@ -45,6 +45,13 @@ ARGS=(
   --max-num-seqs "${QWEN_MAX_NUM_SEQS:-4}"
   --max-num-batched-tokens "${QWEN_MAX_NUM_BATCHED_TOKENS:-8192}"
 )
+
+# Qwen 只应通过 Nginx 的 Basic Auth 局域网入口暴露。只有管理员显式
+# 设置开关时，才允许绕过该入口监听所有网卡。
+if [ "${QWEN_HOST:-127.0.0.1}" = "0.0.0.0" ] && [ "${QWEN_ALLOW_PUBLIC_BIND:-false}" != "true" ]; then
+  echo "[ERROR] Refusing public Qwen bind. Use Nginx or set QWEN_ALLOW_PUBLIC_BIND=true deliberately."
+  exit 2
+fi
 
 if [ -n "${QWEN_REASONING_PARSER:-qwen3}" ]; then
   ARGS+=(--reasoning-parser "${QWEN_REASONING_PARSER:-qwen3}")

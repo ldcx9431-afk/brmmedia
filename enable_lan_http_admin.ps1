@@ -57,7 +57,22 @@ function Get-CurrentWslIp {
     throw "Unable to determine the IPv4 address for $Distro. Expected reporter file: $WslIpFile"
 }
 
+function Get-CurrentLanIp {
+    # 以默认路由所在网卡为准，自动兼容 DHCP 地址变化并排除 WSL 虚拟网卡。
+    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
+        Sort-Object RouteMetric, InterfaceMetric |
+        Select-Object -First 1
+    $address = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop |
+        Where-Object { $_.IPAddress -notlike '127.*' } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    if (-not (Test-IPv4Address $address)) {
+        throw "Unable to determine the Windows LAN IPv4 address from the default route."
+    }
+    return $address
+}
+
 $wslIp = Get-CurrentWslIp
+$lanIp = Get-CurrentLanIp
 
 # Keep only the single, stable Windows LAN endpoint. Recreate the mapping so a
 # changed WSL NAT address never leaves a stale listener behind.
@@ -75,7 +90,7 @@ if ($InstallBootTask) {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 }
 
-Write-Host "BRMMedia LAN HTTP is forwarded: http://192.168.1.106/ -> $wslIp:80"
+Write-Host "BRMMedia LAN HTTP is forwarded: http://${lanIp}/ -> $wslIp:80"
 Write-Host "Firewall scope: 192.168.1.0/24 only"
 if ($InstallBootTask) {
     Write-Host "Boot refresh task installed: $TaskName"
