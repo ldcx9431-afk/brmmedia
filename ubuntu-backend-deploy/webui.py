@@ -33,8 +33,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
-from urllib.parse import quote
-
 import gradio as gr
 import requests
 
@@ -563,8 +561,20 @@ footer {
 #q-table-md table {
     width: 100%;                  /* 表格占满整个容器宽度 */
 }
+/*
+ * 素材查看器与全局设置都使用「无样式的可见性外壳 + 固定/卡片内层」。
+ * Gradio 在 visible=False 时会隐藏组件的内容节点；若在外壳上设置 padding
+ * 或尺寸，旧浏览器会留下一个空白块。样式因此只能放在内层。
+ */
+#media-viewer-shell,
+#global-settings-panel {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+}
+
 /* 独立的浏览器主体素材查看器，不再依赖 Gallery 内部的小预览区域。 */
-#media-viewer {
+#media-viewer-card {
     position: fixed !important;
     inset: 0 !important;
     z-index: 2000 !important;
@@ -574,7 +584,7 @@ footer {
     overflow: hidden;
     background: rgba(15, 23, 42, 0.88);
 }
-#media-viewer .brm-media-viewer-content {
+#media-viewer-card > .wrap {
     width: 100%;
     height: 100%;
     min-height: 0;
@@ -582,7 +592,7 @@ footer {
     flex-direction: column;
     gap: 12px;
 }
-#media-viewer .brm-media-viewer-toolbar {
+#media-viewer-toolbar {
     width: min(1200px, 100%);
     flex: 0 0 auto;
     display: flex;
@@ -591,21 +601,25 @@ footer {
     color: #f8fafc;
     gap: 12px;
 }
-#media-viewer .brm-media-viewer-name {
+#media-viewer-title {
+    color: #f8fafc;
+    margin: 0 !important;
+}
+#media-viewer-title p {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-#media-viewer .brm-media-download {
-    flex: 0 0 auto;
-    padding: 8px 14px;
-    border-radius: 8px;
-    background: #fff;
-    color: #312e81;
-    font-weight: 600;
-    text-decoration: none;
+#media-viewer-title > * {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
-#media-viewer .brm-media-viewer-stage {
+#media-viewer-download {
+    flex: 0 0 auto;
+    min-width: 108px !important;
+}
+#media-viewer-stage {
     width: min(1200px, calc(100vw - 10vw));
     /* `height: 0` gives this flex child a definite content box; the flex
        allocation then equals the viewport height left after the toolbar.
@@ -619,8 +633,14 @@ footer {
     align-items: center;
     justify-content: center;
 }
-#media-viewer img,
-#media-viewer video {
+#media-viewer-stage .image-container,
+#media-viewer-stage .video-container,
+#media-viewer-stage .block,
+#media-viewer-stage .wrap {
+    max-height: 100% !important;
+}
+#media-viewer-stage img,
+#media-viewer-stage video {
     display: block;
     width: auto !important;
     height: auto !important;
@@ -630,14 +650,6 @@ footer {
     border-radius: 10px;
     box-shadow: 0 16px 64px rgba(0, 0, 0, 0.48);
 }
-#media-viewer-close {
-    position: fixed !important;
-    z-index: 2001 !important;
-    top: 16px;
-    right: 24px;
-    width: auto !important;
-    min-width: 0 !important;
-}
 #media-viewer-close button {
     width: auto !important;
     min-width: 116px !important;
@@ -646,9 +658,7 @@ footer {
     color: #1e293b !important;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
 }
-#global-settings-panel {
-    position: relative !important;
-    z-index: auto !important;
+#global-settings-card {
     width: 100% !important;
     height: auto !important;
     max-height: none !important;
@@ -665,7 +675,7 @@ footer {
     align-items: center;
     margin-bottom: 6px;
 }
-#global-settings-panel {
+#global-settings-card {
     font-size: 1.05rem;
 }
 #global-settings-close {
@@ -675,19 +685,19 @@ footer {
     min-width: 116px !important;
 }
 @media (max-width: 720px) {
-    #global-settings-panel {
+    #global-settings-card {
         width: 100% !important;
         padding: 18px;
     }
-    #media-viewer {
+    #media-viewer-card {
         padding: 64px 3vw max(132px, env(safe-area-inset-bottom));
     }
-    #media-viewer .brm-media-viewer-stage {
+    #media-viewer-stage {
         width: 94vw;
         height: 0 !important;
     }
-    #media-viewer img,
-    #media-viewer video {
+    #media-viewer-stage img,
+    #media-viewer-stage video {
         max-width: 94vw !important;
         max-height: 100% !important;
     }
@@ -1293,28 +1303,30 @@ def open_completed_media_viewer(gallery_paths, evt: gr.SelectData):
         path = None
 
     if path is None:
-        return gr.update(visible=False), gr.update(visible=False)
+        return (
+            gr.update(visible=False), gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False), gr.update(value=None, visible=False),
+            gr.update(value=""),
+        )
 
-    url = f"/gradio_api/file={quote(str(path), safe='/')}"
-    filename = escape(path.name)
-    if path.suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".avi"}:
-        media = f'<video controls autoplay playsinline src="{url}"></video>'
-    else:
-        media = f'<img src="{url}" alt="{filename}">'
-    viewer_html = (
-        '<div class="brm-media-viewer-content">'
-        '<div class="brm-media-viewer-toolbar">'
-        f'<span class="brm-media-viewer-name">{filename}</span>'
-        f'<a class="brm-media-download" href="{url}" download>下载</a>'
-        '</div>'
-        f'<div class="brm-media-viewer-stage">{media}</div>'
-        '</div>'
+    is_video = path.suffix.lower() in {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+    # 使用 Gradio 原生 Image / Video / DownloadButton 处理受控文件路径，避免
+    # 自定义 HTML 在组件重连后被清空或被其宿主节点裁切。
+    return (
+        gr.update(visible=True),
+        gr.update(value=None if is_video else str(path), visible=not is_video),
+        gr.update(value=str(path) if is_video else None, visible=is_video),
+        gr.update(value=str(path), visible=True),
+        gr.update(value=f"**{escape(path.name)}**"),
     )
-    return gr.update(value=viewer_html, visible=True), gr.update(visible=True)
 
 
 def close_completed_media_viewer():
-    return gr.update(value="", visible=False), gr.update(visible=False)
+    return (
+        gr.update(visible=False), gr.update(value=None, visible=False),
+        gr.update(value=None, visible=False), gr.update(value=None, visible=False),
+        gr.update(value=""),
+    )
 
 
 def play_completed_audio(path):
@@ -1539,52 +1551,53 @@ def build_ui():
             with gr.Column(scale=1, min_width=140):
                 settings_btn = gr.Button("⚙ 全局设置", variant="secondary")
 
-        with gr.Group(visible=False, elem_id="global-settings-panel") as settings_panel:
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=10):
-                    gr.Markdown(
-                        "### 全局设置\n"
-                        "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
-                        "视频、数字人等高显存任务通常建议保持并发 **1**。"
+        with gr.Column(visible=False, elem_id="global-settings-panel") as settings_panel:
+            with gr.Group(elem_id="global-settings-card"):
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=10):
+                        gr.Markdown(
+                            "### 全局设置\n"
+                            "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
+                            "视频、数字人等高显存任务通常建议保持并发 **1**。"
+                        )
+                    with gr.Column(scale=1, min_width=116):
+                        settings_close_top_btn = gr.Button(
+                            "✕ 关闭", variant="secondary", elem_id="global-settings-close",
+                        )
+                with gr.Row():
+                    setting_concurrency = gr.Slider(
+                        1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
+                        label="任务并发数",
                     )
-                with gr.Column(scale=1, min_width=116):
-                    settings_close_top_btn = gr.Button(
-                        "✕ 关闭", variant="secondary", elem_id="global-settings-close",
+                    setting_done_tasks = gr.Slider(
+                        20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
+                        label="已完成任务保留数",
                     )
-            with gr.Row():
-                setting_concurrency = gr.Slider(
-                    1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
-                    label="任务并发数",
+                    setting_done_gallery = gr.Slider(
+                        10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
+                        label="画廊最多显示产物数",
+                    )
+                with gr.Row():
+                    save_settings_btn = gr.Button("保存并应用", variant="primary")
+                    close_settings_btn = gr.Button("关闭", variant="secondary")
+                settings_status = gr.Markdown("")
+                gr.Markdown("---\n#### 局域网访问密码")
+                gr.Markdown(
+                    "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
+                    "修改后当前浏览器需要用新密码重新登录。"
                 )
-                setting_done_tasks = gr.Slider(
-                    20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
-                    label="已完成任务保留数",
+                lan_current_password = gr.Textbox(
+                    label="当前访问密码", type="password", max_length=128,
                 )
-                setting_done_gallery = gr.Slider(
-                    10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
-                    label="画廊最多显示产物数",
-                )
-            with gr.Row():
-                save_settings_btn = gr.Button("保存并应用", variant="primary")
-                close_settings_btn = gr.Button("关闭", variant="secondary")
-            settings_status = gr.Markdown("")
-            gr.Markdown("---\n#### 局域网访问密码")
-            gr.Markdown(
-                "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
-                "修改后当前浏览器需要用新密码重新登录。"
-            )
-            lan_current_password = gr.Textbox(
-                label="当前访问密码", type="password", max_length=128,
-            )
-            with gr.Row():
-                lan_new_password = gr.Textbox(
-                    label="新访问密码", type="password", max_length=128,
-                )
-                lan_confirm_password = gr.Textbox(
-                    label="确认新访问密码", type="password", max_length=128,
-                )
-            change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
-            lan_password_status = gr.Markdown("")
+                with gr.Row():
+                    lan_new_password = gr.Textbox(
+                        label="新访问密码", type="password", max_length=128,
+                    )
+                    lan_confirm_password = gr.Textbox(
+                        label="确认新访问密码", type="password", max_length=128,
+                    )
+                change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
+                lan_password_status = gr.Markdown("")
 
         # ---- 每个工作流一个 Tab。新增工作流时,复制一个 gr.Tab 块即可。 ----
         with gr.Tabs():
@@ -1884,10 +1897,25 @@ def build_ui():
             elem_id="q-gallery",
         )
         completed_gallery_paths = gr.State([])
-        media_viewer = gr.HTML(value="", visible=False, elem_id="media-viewer")
-        media_viewer_close_btn = gr.Button(
-            "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
-        )
+        with gr.Column(visible=False, elem_id="media-viewer-shell") as media_viewer:
+            with gr.Group(elem_id="media-viewer-card"):
+                with gr.Row(elem_id="media-viewer-toolbar", equal_height=True):
+                    media_viewer_title = gr.Markdown("", elem_id="media-viewer-title", scale=8)
+                    media_viewer_download = gr.DownloadButton(
+                        "下载素材", visible=False, elem_id="media-viewer-download", scale=1,
+                    )
+                    media_viewer_close_btn = gr.Button(
+                        "关闭预览", variant="secondary", elem_id="media-viewer-close", scale=1,
+                    )
+                with gr.Column(elem_id="media-viewer-stage"):
+                    media_viewer_image = gr.Image(
+                        type="filepath", interactive=False, show_label=False, container=False,
+                        buttons=["download", "fullscreen"], visible=False,
+                    )
+                    media_viewer_video = gr.Video(
+                        interactive=False, show_label=False, container=False, autoplay=True,
+                        buttons=["download"], visible=False,
+                    )
         gr.Markdown("点击图片或视频缩略图会打开浏览器主体大预览；可在预览内下载。画廊工具栏可下载全部。")
         gr.Markdown("", height=20)
 
@@ -1908,12 +1936,18 @@ def build_ui():
         q_gallery.select(
             fn=open_completed_media_viewer,
             inputs=completed_gallery_paths,
-            outputs=[media_viewer, media_viewer_close_btn],
+            outputs=[
+                media_viewer, media_viewer_image, media_viewer_video,
+                media_viewer_download, media_viewer_title,
+            ],
             api_visibility="private",
         )
         media_viewer_close_btn.click(
             fn=close_completed_media_viewer,
-            outputs=[media_viewer, media_viewer_close_btn],
+            outputs=[
+                media_viewer, media_viewer_image, media_viewer_video,
+                media_viewer_download, media_viewer_title,
+            ],
             api_visibility="private",
         )
 

@@ -108,8 +108,10 @@ expected_ids = {
     "global-settings-close",
     "qwen-answer",
     "q-gallery",
-    "media-viewer",
+    "media-viewer-shell",
+    "media-viewer-card",
     "media-viewer-close",
+    "media-viewer-download",
 }
 
 expected_labels = {
