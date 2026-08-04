@@ -7,6 +7,7 @@ COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-42d2aa55432b57371ddc9d4078ae250b54227641}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 QWEN_DIR="$APP_ROOT/llm-backend-deploy"
+WORKFLOW_VALIDATOR="$APP_ROOT/validate_comfy_workflows.py"
 HTTP_READY_WAIT_SECONDS="${BRMMEDIA_VERIFY_HTTP_WAIT_SECONDS:-45}"
 HTTP_READY_POLL_SECONDS="${BRMMEDIA_VERIFY_HTTP_POLL_SECONDS:-2}"
 failures=0
@@ -68,6 +69,7 @@ expected_ids = {
     "media-viewer",
     "media-viewer-close",
 }
+
 expected_labels = {
     "当前访问密码",
     "选择要试听的已完成音频",
@@ -108,6 +110,24 @@ PY
   fi
 }
 
+check_comfy_workflow_nodes() {
+  local result summary
+  if [ ! -x "$BACKEND_DIR/.venv/bin/python" ] || [ ! -f "$WORKFLOW_VALIDATOR" ]; then
+    bad "cannot validate ComfyUI workflow nodes: validator or backend Python is missing"
+    return
+  fi
+  if result="$("$BACKEND_DIR/.venv/bin/python" "$WORKFLOW_VALIDATOR" \
+    --url http://127.0.0.1:8188 \
+    --workflows "$BACKEND_DIR/workflows" \
+    --timeout 10)"; then
+    summary="${result##*$'\n'}"
+    ok "ComfyUI workflow-node preflight passed (${summary})"
+  else
+    printf '%s\n' "$result" >&2
+    bad "one or more workflow node types are unavailable"
+  fi
+}
+
 printf '== BRMMedia runtime verification ==\n'
 printf 'app_root=%s\n' "$APP_ROOT"
 
@@ -131,6 +151,7 @@ fi
 check_http gradio http://127.0.0.1:9000/gradio_api/info
 check_http comfyui http://127.0.0.1:8188/system_stats
 check_gradio_ui_contract
+check_comfy_workflow_nodes
 
 if [ "$highvram" = false ]; then
   check_http qwen http://127.0.0.1:8000/v1/models
