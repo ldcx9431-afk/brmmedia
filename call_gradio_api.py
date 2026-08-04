@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Call one Gradio API endpoint and wait for its SSE completion event."""
+"""Call one Gradio API endpoint and wait for its handler SSE completion event.
+
+For BRMMedia's asynchronous workflow submission endpoints, ``COMPLETE`` means
+the task was accepted by the workspace queue, not that model inference has
+finished.  Read the returned ``task_id`` and call ``task_status`` to track the
+actual queued/running/completed/cancelled/failed lifecycle.
+"""
 
 from __future__ import annotations
 

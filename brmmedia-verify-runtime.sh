@@ -75,6 +75,11 @@ expected_labels = {
     "选择要试听的已完成音频",
     "音频试听",
 }
+expected_endpoints = {
+    "/submit_workflow_1", "/submit_workflow_2", "/submit_workflow_3",
+    "/submit_workflow_4", "/submit_workflow_5", "/submit_workflow_6",
+    "/submit_workflow_7", "/submit_workflow_8", "/task_status",
+}
 
 try:
     with urllib.request.urlopen("http://127.0.0.1:9000/config", timeout=15) as response:
@@ -86,6 +91,21 @@ except Exception as exc:
 components = config.get("components")
 if not isinstance(components, list):
     print("/config has no components list", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:9000/gradio_api/info", timeout=15) as response:
+        api_info = json.load(response)
+except Exception as exc:
+    print(f"unable to read /gradio_api/info: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+named_endpoints = api_info.get("named_endpoints")
+if not isinstance(named_endpoints, dict):
+    print("/gradio_api/info has no named_endpoints map", file=sys.stderr)
+    raise SystemExit(1)
+missing_endpoints = sorted(expected_endpoints - set(named_endpoints))
+if missing_endpoints:
+    print("missing Gradio API endpoints: " + ", ".join(missing_endpoints), file=sys.stderr)
     raise SystemExit(1)
 
 ids = set()
@@ -101,7 +121,7 @@ missing = sorted((expected_ids - ids) | (expected_labels - labels))
 if missing:
     print("missing UI components: " + ", ".join(missing), file=sys.stderr)
     raise SystemExit(1)
-print(f"{len(components)} components")
+print(f"{len(components)} components, {len(expected_endpoints)} required API endpoints")
 PY
   )"; then
     ok "Gradio UI contract present (${result})"

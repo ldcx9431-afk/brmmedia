@@ -158,6 +158,7 @@ class TaskStatus(str, enum.Enum):
     PENDING = "排队中"
     RUNNING = "处理中"
     DONE    = "已完成"
+    CANCELLED = "已中断"
     ERROR   = "失败"
 
 
@@ -225,7 +226,7 @@ class TaskQueue:
         """从落盘历史恢复已经结束的任务；丢失的产物不会显示为可下载素材。"""
         try:
             status = TaskStatus(record["status"])
-            if status not in (TaskStatus.DONE, TaskStatus.ERROR):
+            if status not in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.ERROR):
                 return None
             result = [
                 str(Path(path))
@@ -335,6 +336,54 @@ class TaskQueue:
                 task.cancel_event.set()
             return running
 
+    def task_status(self, task_id: str) -> dict:
+        """Return a safe, JSON-ready status record without leaking output paths."""
+        task_id = str(task_id or "").strip()
+        state_by_status = {
+            TaskStatus.PENDING: "queued",
+            TaskStatus.RUNNING: "running",
+            TaskStatus.DONE: "completed",
+            TaskStatus.CANCELLED: "cancelled",
+            TaskStatus.ERROR: "failed",
+        }
+        with self._lock:
+            task = self._running.get(task_id)
+            queue_position = None
+            if task is None:
+                for index, pending in enumerate(self._pending, start=1):
+                    if pending.id == task_id:
+                        task = pending
+                        queue_position = index
+                        break
+            if task is None:
+                task = next((done for done in self._done if done.id == task_id), None)
+            if task is None:
+                return {
+                    "task_id": task_id,
+                    "state": "not_found",
+                    "status": "未找到",
+                    "queue_position": None,
+                    "output_files": [],
+                }
+            outputs = [
+                Path(str(path)).name
+                for path in (task.result if isinstance(task.result, list) else [])
+                if isinstance(path, str)
+            ]
+            return {
+                "task_id": task.id,
+                "task_name": task.name,
+                "workflow": task.workflow_name,
+                "state": state_by_status[task.status],
+                "status": task.status.value,
+                "queue_position": queue_position,
+                "submitted_at": task.submit_ts,
+                "started_at": task.start_ts or None,
+                "finished_at": task.done_ts or None,
+                "output_files": outputs,
+                "error": task.error or None,
+            }
+
     def snapshot(self):
         """取一份当前状态快照,供界面渲染。"""
         with self._lock:
@@ -415,8 +464,12 @@ class TaskQueue:
                 self._processor(task)
                 task.status = TaskStatus.DONE
             except Exception as e:
-                task.status, task.error = TaskStatus.ERROR, str(e)
-                print(f"[Queue] 任务「{task.name}」失败: {e}")
+                if task.cancel_event.is_set():
+                    task.status, task.error = TaskStatus.CANCELLED, "用户请求中断"
+                    print(f"[Queue] 任务「{task.name}」已中断")
+                else:
+                    task.status, task.error = TaskStatus.ERROR, str(e)
+                    print(f"[Queue] 任务「{task.name}」失败: {e}")
             finally:
                 task.done_ts = time.time()
                 with self._lock:
@@ -662,33 +715,33 @@ def submit_workflow_1(prompt, size, batch):
     # 工作流 JSON 的文件名(不含 .json)
     if not (prompt or "").strip():
         raise gr.Error("请输入图片提示词")
-    submit("image_z_image_turbo", {"prompt": prompt, "size": size, "batch": batch})
+    return submit("image_z_image_turbo", {"prompt": prompt, "size": size, "batch": batch})
 
 
 def submit_workflow_2(prompt, input_filename):
     # 工作流 JSON 的文件名(不含 .json)
     if not prompt or not input_filename:
         raise gr.Error("请输入提示词并上传要编辑的图片")
-    submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
+    return submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
 
 def submit_workflow_3(prompt, size, seconds):
     # 工作流 JSON 的文件名(不含 .json)
     if not (prompt or "").strip():
         raise gr.Error("请输入视频提示词")
-    submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
+    return submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
 
 def submit_workflow_4(prompt, input_filename, seconds):
     # 工作流 JSON 的文件名(不含 .json)
     if not (prompt or "").strip() or not input_filename:
         raise gr.Error("请输入提示词并上传源图片")
-    submit("LTX23-图生视频", {"prompt": prompt, "seconds": seconds, "input_filename": input_filename})
+    return submit("LTX23-图生视频", {"prompt": prompt, "seconds": seconds, "input_filename": input_filename})
 
 
 def submit_workflow_5(prompt, input_filename1, input_filename2, seconds):
     # 工作流 JSON 的文件名(不含 .json)
     if not (prompt or "").strip() or not input_filename1 or not input_filename2:
         raise gr.Error("请输入提示词并上传首帧、尾帧图片")
-    submit(
+    return submit(
         "LTX23-首尾帧视频",
         {
             "prompt": prompt, "seconds": seconds,
@@ -704,7 +757,7 @@ def submit_workflow_6(prompt, image, audio, uploaded_dur, size):
         raise gr.Error("请输入提示词并上传驱动图片、音频")
     if not uploaded_dur or float(uploaded_dur) <= 0:
         raise gr.Error("无法读取音频时长，请重新上传有效音频")
-    submit(
+    return submit(
         "LTX23-单图数字人-语音驱动",
         {
             "prompt": prompt, "size": size,
@@ -721,7 +774,7 @@ def submit_workflow_7(prompt, ref_audio, temperature=0.8):
         raise gr.Error("请输入要合成的文本")
     if not ref_audio:
         raise gr.Error("请上传参考音频(克隆音色来源)")
-    submit("TTS-语音克隆", {
+    return submit("TTS-语音克隆", {
         "prompt": prompt,
         "ref_audio": ref_audio,
         "temperature": temperature,
@@ -732,7 +785,7 @@ def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model
     # 音乐生成(ACE-Step 1.5)。
     if not tags or not tags.strip():
         raise gr.Error("请输入音乐风格标签(tags)")
-    submit("音乐生成", {
+    return submit("音乐生成", {
         "tags": tags,
         "lyrics": lyrics,
         "duration": duration,
@@ -746,42 +799,42 @@ def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model
 # gr.State.  Gradio omits State components from generated public APIs, which
 # would otherwise make the file-name arguments for edit/video/TTS workflows
 # impossible to pass from a LAN client.
-def api_submit_workflow_1(prompt: str, size: str, batch: int) -> None:
-    submit_workflow_1(prompt, size, batch)
+def api_submit_workflow_1(prompt: str, size: str, batch: int) -> dict:
+    return submit_workflow_1(prompt, size, batch)
 
 
-def api_submit_workflow_2(prompt: str, input_filename: str) -> None:
-    submit_workflow_2(prompt, input_filename)
+def api_submit_workflow_2(prompt: str, input_filename: str) -> dict:
+    return submit_workflow_2(prompt, input_filename)
 
 
-def api_submit_workflow_3(prompt: str, size: str, seconds: int) -> None:
-    submit_workflow_3(prompt, size, seconds)
+def api_submit_workflow_3(prompt: str, size: str, seconds: int) -> dict:
+    return submit_workflow_3(prompt, size, seconds)
 
 
-def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> None:
-    submit_workflow_4(prompt, input_filename, seconds)
+def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> dict:
+    return submit_workflow_4(prompt, input_filename, seconds)
 
 
 def api_submit_workflow_5(
     prompt: str, input_filename1: str, input_filename2: str, seconds: int
-) -> None:
-    submit_workflow_5(prompt, input_filename1, input_filename2, seconds)
+) -> dict:
+    return submit_workflow_5(prompt, input_filename1, input_filename2, seconds)
 
 
 def api_submit_workflow_6(
     prompt: str, image: str, audio: str, duration: float, size: str
-) -> None:
-    submit_workflow_6(prompt, image, audio, duration, size)
+) -> dict:
+    return submit_workflow_6(prompt, image, audio, duration, size)
 
 
-def api_submit_workflow_7(prompt: str, ref_audio: str, temperature: float) -> None:
-    submit_workflow_7(prompt, ref_audio, temperature)
+def api_submit_workflow_7(prompt: str, ref_audio: str, temperature: float) -> dict:
+    return submit_workflow_7(prompt, ref_audio, temperature)
 
 
 def api_submit_workflow_8(
     tags: str, lyrics: str, duration: float, bpm: int, language: str, model: str
-) -> None:
-    submit_workflow_8(tags, lyrics, duration, bpm, language, model)
+) -> dict:
+    return submit_workflow_8(tags, lyrics, duration, bpm, language, model)
 
 
 # ---------------------------------------------------------------------------
@@ -1093,7 +1146,7 @@ def change_lan_access_password(current_password, new_password, confirm_password)
 
 
 def submit(wfname, args):
-    """点击提交:把任务放进队列,立即返回。队列空时会被 worker 立即取走执行。"""
+    """入队并返回供 LAN API/自动化跟踪的安全任务标识。"""
     try:
         usage = shutil.disk_usage(OUTPUT_DIR)
         free_percent = usage.free * 100 / usage.total
@@ -1108,10 +1161,22 @@ def submit(wfname, args):
     task = Task(id=uuid.uuid4().hex, name=make_task_name(_name), workflow_name=wfname, args=args)
     position = task_queue.enqueue(task)
     gr.Info(f"已提交：{task.name}（提交时排队位置 {position}）", duration=3)
+    return {
+        "task_id": task.id,
+        "task_name": task.name,
+        "workflow": task.workflow_name,
+        "state": "accepted",
+        "queue_position": position,
+    }
 
 
 def clear_pending():
     return f"已清空排队任务 {task_queue.clear_pending()} 个。"
+
+
+def api_task_status(task_id: str) -> dict:
+    """LAN API: obtain one workspace task's state without exposing file paths."""
+    return task_queue.task_status(task_id)
 
 
 def interrupt_running_tasks():
@@ -1153,6 +1218,7 @@ STATUS_ICONS = {
     TaskStatus.PENDING: "⚪",
     TaskStatus.RUNNING: "🔵",
     TaskStatus.DONE:    "🟢",
+    TaskStatus.CANCELLED: "⚫",
     TaskStatus.ERROR:   "🔴",
 }
 
@@ -1223,6 +1289,8 @@ def render_queue():
     pending, running, done = task_queue.snapshot()
 
     def note(t: Task) -> str:
+        if t.status == TaskStatus.CANCELLED:
+            return t.error or "用户请求中断"
         if t.status == TaskStatus.ERROR:
             return t.error
         if t.status == TaskStatus.DONE and isinstance(t.result, list):
@@ -1231,7 +1299,7 @@ def render_queue():
 
     def cost(t: Task) -> str:
         # 只有已完成的任务显示耗时,其余一律用短横代替。
-        if t.status == TaskStatus.DONE and t.start_ts and t.done_ts:
+        if t.status in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.ERROR) and t.start_ts and t.done_ts:
             return _fmt_duration(t.done_ts - t.start_ts)
         return "-"
 
@@ -1257,10 +1325,11 @@ def render_queue():
     table_md = "\n".join(rows)
 
     ok = sum(1 for t in done if t.status == TaskStatus.DONE)
+    cancelled = sum(1 for t in done if t.status == TaskStatus.CANCELLED)
     err = sum(1 for t in done if t.status == TaskStatus.ERROR)
     backend = "在线" if is_alive() else "离线"
     summary = (f"ComfyUI:{backend}　｜　并发 {QUEUE_CONCURRENCY}　｜　排队 {len(pending)}　｜　"
-               f"处理中 {len(running)}　｜　完成 {ok}　｜　失败 {err}")
+               f"处理中 {len(running)}　｜　完成 {ok}　｜　中断 {cancelled}　｜　失败 {err}")
 
     # 图片与视频保持紧凑缩略图，点击后交给独立全屏查看器；音频提供下载列表和播放器选择器。
     imgs = []
@@ -1814,6 +1883,7 @@ def build_ui():
         gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
         gr.api(api_submit_workflow_7, api_name="submit_workflow_7")
         gr.api(api_submit_workflow_8, api_name="submit_workflow_8")
+        gr.api(api_task_status, api_name="task_status")
 
         # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
         settings_btn.click(fn=show_global_settings, outputs=settings_panel, api_visibility="private")
