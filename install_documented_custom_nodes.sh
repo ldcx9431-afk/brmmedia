@@ -4,36 +4,52 @@ set -euo pipefail
 COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
 PYTHON_BIN="${PYTHON_BIN:-/srv/brmmedia/app/ubuntu-backend-deploy/.venv/bin/python}"
 NODE_ROOT="$COMFY_ROOT/custom_nodes"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NODE_LOCK_FILE="${BRMMEDIA_NODE_LOCK_FILE:-$SCRIPT_DIR/runtime-locks/comfyui-custom-nodes.lock.tsv}"
 
 install_node() {
   local name="$1"
   local repo="$2"
+  local ref="$3"
   if [ -d "$NODE_ROOT/$name/.git" ]; then
-    echo "[INFO] Reusing existing $name (skipping network update)"
+    local current
+    current="$(git -C "$NODE_ROOT/$name" rev-parse HEAD)"
+    if [ "$current" != "$ref" ]; then
+      echo "[ERROR] $name is at $current, but the production lock requires $ref."
+      echo "        Preserve it for investigation or explicitly restore the locked revision."
+      return 1
+    fi
+    echo "[INFO] Reusing locked $name ($ref)"
   elif [ -e "$NODE_ROOT/$name" ]; then
     echo "[WARN] $NODE_ROOT/$name exists but is not a Git checkout; preserving it."
+    return 1
   else
-    echo "[INFO] Cloning $name"
-    git clone --depth 1 "$repo" "$NODE_ROOT/$name"
+    echo "[INFO] Cloning locked $name ($ref)"
+    git clone --filter=blob:none "$repo" "$NODE_ROOT/$name"
+    git -C "$NODE_ROOT/$name" checkout --detach "$ref"
   fi
 }
 
 mkdir -p "$NODE_ROOT"
-install_node ComfyUI-Index-TTS https://github.com/chenpipi0807/ComfyUI-Index-TTS.git
-install_node ComfyUI-PromptRelay https://github.com/kijai/ComfyUI-PromptRelay.git
-install_node rgthree-comfy https://github.com/rgthree/rgthree-comfy.git
-install_node WhatDreamsCost-ComfyUI https://github.com/WhatDreamsCost/WhatDreamsCost-ComfyUI.git
-install_node comfyui-easy-use https://github.com/yolain/ComfyUI-Easy-Use.git
-install_node ComfyUI-GGUF https://github.com/city96/ComfyUI-GGUF.git
-install_node comfyui-kjnodes https://github.com/kijai/ComfyUI-KJNodes.git
-install_node ComfyUI-MelBandRoFormer https://github.com/kijai/ComfyUI-MelBandRoFormer.git
-install_node comfyui-videohelpersuite https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
-install_node comfyui_essentials https://github.com/cubiq/ComfyUI_essentials.git
-install_node comfyui_layerstyle https://github.com/chflame163/ComfyUI_LayerStyle.git
+if [ ! -f "$NODE_LOCK_FILE" ]; then
+  echo "[ERROR] Custom-node lock file not found: $NODE_LOCK_FILE"
+  exit 1
+fi
 
-for requirements in "$NODE_ROOT"/{ComfyUI-Index-TTS,ComfyUI-PromptRelay,rgthree-comfy,WhatDreamsCost-ComfyUI,comfyui-easy-use,ComfyUI-GGUF,comfyui-kjnodes,ComfyUI-MelBandRoFormer,comfyui-videohelpersuite,comfyui_essentials,comfyui_layerstyle}/requirements.txt; do
+node_names=()
+declare -A node_refs=()
+while IFS=$'\t' read -r name repo ref; do
+  [ -z "$name" ] && continue
+  case "$name" in \#*) continue ;; esac
+  install_node "$name" "$repo" "$ref"
+  node_names+=("$name")
+  node_refs["$name"]="$ref"
+done < "$NODE_LOCK_FILE"
+
+for name in "${node_names[@]}"; do
+  requirements="$NODE_ROOT/$name/requirements.txt"
   if [ -f "$requirements" ]; then
-    marker="$(dirname "$requirements")/.brm-requirements-installed"
+    marker="$(dirname "$requirements")/.brm-requirements-installed-${node_refs[$name]}"
     if [ -f "$marker" ]; then
       echo "[INFO] Requirements already installed for $(dirname "$requirements")"
     else

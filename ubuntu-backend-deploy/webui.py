@@ -173,6 +173,9 @@ class Task:
     done_ts: float = 0.0        # 执行结束的时间戳(无论成功或失败)
     result: object = None       # 最终结果,这里是已保存产物的文件路径列表
     error: str = ""
+    # 每个任务独立的取消信号。不能复用队列生命周期的 stop 事件，否则一次
+    # 用户中断会让 worker 退出并影响之后的新任务。
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 def make_task_name(wfname: str) -> str:
@@ -308,12 +311,14 @@ class TaskQueue:
         except OSError as exc:
             print(f"[Queue] 保存任务历史失败: {exc}")
 
-    def enqueue(self, task: Task) -> None:
-        """把任务追加到队尾,并唤醒 worker。"""
+    def enqueue(self, task: Task) -> int:
+        """把任务追加到队尾并返回提交时的排队位置。"""
         with self._lock:
             task.status = TaskStatus.PENDING
             self._pending.append(task)
+            position = len(self._pending)
         self._wake.set()
+        return position
 
     def clear_pending(self) -> int:
         """清空排队中的任务(不影响正在执行和已完成的)。"""
@@ -321,6 +326,14 @@ class TaskQueue:
             n = len(self._pending)
             self._pending.clear()
             return n
+
+    def cancel_running(self) -> list[Task]:
+        """请求取消当前运行任务；worker 会把它们记录为失败/已中断。"""
+        with self._lock:
+            running = list(self._running.values())
+            for task in running:
+                task.cancel_event.set()
+            return running
 
     def snapshot(self):
         """取一份当前状态快照,供界面渲染。"""
@@ -980,7 +993,7 @@ def process_task(task: Task) -> None:
     if builder is None:
         raise ValueError(f"未登记的工作流:{task.workflow_name}")
     workflow = builder[0](task.workflow_name, task.args)
-    outputs = run_workflow(workflow, stop_event=task_queue.stop_event)
+    outputs = run_workflow(workflow, stop_event=task.cancel_event)
     task.result = extract_result(outputs, task)
 
 
@@ -1090,12 +1103,28 @@ def submit(wfname, args):
         )
     _name = WORKFLOW_BUILDERS[wfname][1]
     task = Task(id=uuid.uuid4().hex, name=make_task_name(_name), workflow_name=wfname, args=args)
-    task_queue.enqueue(task)
-    gr.Info(f"已提交", duration=2)
+    position = task_queue.enqueue(task)
+    gr.Info(f"已提交：{task.name}（提交时排队位置 {position}）", duration=3)
 
 
 def clear_pending():
     return f"已清空排队任务 {task_queue.clear_pending()} 个。"
+
+
+def interrupt_running_tasks():
+    """中断 ComfyUI 并同步取消本工作台当前运行任务。"""
+    running = task_queue.cancel_running()
+    if not running:
+        return "当前没有工作台运行任务；未向 ComfyUI 发送中断信号。"
+
+    signal_result = interrupt()
+    names = "、".join(task.name for task in running[:3])
+    if len(running) > 3:
+        names += f" 等 {len(running)} 个任务"
+    return (
+        f"已请求中断 {len(running)} 个运行任务（{names}）。{signal_result} "
+        "任务会在下一次 ComfyUI 状态轮询时记录为已中断；已进入 ComfyUI 队列的其他请求请在 ComfyUI 侧确认。"
+    )
 
 
 def _fmt_ts(ts: float) -> str:
@@ -1693,7 +1722,7 @@ def build_ui():
                 q_table = gr.Markdown(elem_id="q-table-md")
             with gr.Column(scale=1, min_width=160):
                 clear_btn = gr.Button("清空排队任务")
-                interrupt_btn = gr.Button("中断 ComfyUI 执行（影响全部任务）", variant="stop")
+                interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
         op_status = gr.Markdown("")
         q_audio = gr.File(label="已完成音频（累计，可下载）", file_count="multiple", height=110)
         with gr.Row():
@@ -1732,7 +1761,7 @@ def build_ui():
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status)
-        interrupt_btn.click(fn=interrupt, outputs=op_status)
+        interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status)
         completed_audio_selector.change(
             fn=play_completed_audio,
             inputs=completed_audio_selector,

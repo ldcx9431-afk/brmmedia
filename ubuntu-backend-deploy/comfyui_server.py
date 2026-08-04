@@ -110,8 +110,9 @@ def get_view_file(filename: str, subfolder: str = "", folder_type: str = "output
 
 def interrupt() -> str:
     try:
-        requests.post(f"{BASE}/interrupt", timeout=5)
-        return "已发送中断信号。"
+        response = requests.post(f"{BASE}/interrupt", timeout=5)
+        response.raise_for_status()
+        return "已发送 ComfyUI 中断信号。"
     except requests.RequestException as e:
         return f"中断失败: {e}"
 

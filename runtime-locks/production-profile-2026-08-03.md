@@ -28,3 +28,4 @@
 1. 先按两个 `*.lock` 文件恢复 Python 环境，再导入模型与自定义节点。
 2. ComfyUI 必须 checkout 到上述 commit；升级应建立新 profile 并通过 smoke workflow。
 3. 恢复后执行 `brmmedia-healthcheck`、局域网工作台、`/qwen/v1/models` 与最小工作流验收。
+4. 自定义节点必须按 `comfyui-custom-nodes.lock.tsv` 的 commit 恢复；恢复脚本会拒绝静默使用漂移版本。
