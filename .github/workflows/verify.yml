@@ -24,10 +24,13 @@ jobs:
             ubuntu-backend-deploy/comfyui_server.py \
             call_gradio_api.py \
             validate_comfy_workflows.py \
-            tests/test_task_queue.py
+            tests/test_task_queue.py \
+            tests/test_validate_comfy_workflows.py
 
-      - name: Verify task queue behavior
-        run: python tests/test_task_queue.py
+      - name: Verify application contracts
+        run: |
+          python tests/test_task_queue.py
+          python tests/test_validate_comfy_workflows.py
 
       - name: Parse Shell sources
         run: |

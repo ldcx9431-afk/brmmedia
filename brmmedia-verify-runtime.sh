@@ -130,10 +130,10 @@ PY
   fi
 }
 
-check_comfy_workflow_nodes() {
+check_comfy_workflows() {
   local result summary
   if [ ! -x "$BACKEND_DIR/.venv/bin/python" ] || [ ! -f "$WORKFLOW_VALIDATOR" ]; then
-    bad "cannot validate ComfyUI workflow nodes: validator or backend Python is missing"
+    bad "cannot validate ComfyUI workflows: validator or backend Python is missing"
     return
   fi
   if result="$("$BACKEND_DIR/.venv/bin/python" "$WORKFLOW_VALIDATOR" \
@@ -141,10 +141,10 @@ check_comfy_workflow_nodes() {
     --workflows "$BACKEND_DIR/workflows" \
     --timeout 10)"; then
     summary="${result##*$'\n'}"
-    ok "ComfyUI workflow-node preflight passed (${summary})"
+    ok "ComfyUI workflow preflight passed (${summary})"
   else
     printf '%s\n' "$result" >&2
-    bad "one or more workflow node types are unavailable"
+    bad "one or more workflow nodes or static assets are unavailable"
   fi
 }
 
@@ -171,7 +171,7 @@ fi
 check_http gradio http://127.0.0.1:9000/gradio_api/info
 check_http comfyui http://127.0.0.1:8188/system_stats
 check_gradio_ui_contract
-check_comfy_workflow_nodes
+check_comfy_workflows
 
 if [ "$highvram" = false ]; then
   check_http qwen http://127.0.0.1:8000/v1/models

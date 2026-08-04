@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Validate that a ComfyUI instance exposes every node used by local workflows.
+"""Validate that ComfyUI exposes each workflow node and static enum asset.
 
-This intentionally does not submit jobs or allocate a model.  It is the safe
-runtime preflight before the actual image, video, voice and music smoke tests.
+This intentionally does not submit jobs or allocate a model.  In addition to
+node class availability, it checks direct string values supplied to ComfyUI
+combo inputs (for example model/checkpoint names) against the live choices.
+It is the safe runtime preflight before image, video, voice and music smoke
+tests.
 """
 
 from __future__ import annotations
@@ -35,20 +38,58 @@ def required_nodes(workflow_path: Path) -> set[str]:
     return nodes
 
 
-def node_exists(base_url: str, node_type: str, timeout: float) -> bool:
+def get_node_info(base_url: str, node_type: str, timeout: float) -> dict:
     endpoint = f"{base_url.rstrip('/')}/object_info/{quote(node_type, safe='')}"
     try:
         with urlopen(endpoint, timeout=timeout) as response:
             if response.status != 200:
-                return False
+                return {}
             payload = json.load(response)
-            return node_type in payload
+            value = payload.get(node_type)
+            return value if isinstance(value, dict) else {}
     except HTTPError as exc:
         if exc.code == 404:
-            return False
+            return {}
         raise RuntimeError(f"{node_type}: HTTP {exc.code}") from exc
     except URLError as exc:
         raise RuntimeError(f"cannot reach ComfyUI at {base_url}: {exc.reason}") from exc
+
+
+def enum_input_issues(workflow_path: Path, node_info: dict[str, dict]) -> list[str]:
+    """Return invalid static combo choices without mistaking graph links for names."""
+    with workflow_path.open(encoding="utf-8") as stream:
+        workflow = json.load(stream)
+    issues = []
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        node_type = node.get("class_type")
+        inputs = node.get("inputs")
+        definition = node_info.get(node_type, {})
+        required = definition.get("input", {}).get("required", {})
+        if not isinstance(inputs, dict) or not isinstance(required, dict):
+            continue
+        for input_name, value in inputs.items():
+            # A graph edge is a list such as ["12", 0], while a selectable
+            # asset/model name is a direct string.
+            if not isinstance(value, str):
+                continue
+            spec = required.get(input_name)
+            if not isinstance(spec, list) or not spec:
+                continue
+            choices = spec[0]
+            if not isinstance(choices, list):
+                continue
+            options = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            # Upload-capable fields enumerate files already present in ComfyUI's
+            # input folder, but an API/UI submission may replace them.  A sample
+            # filename in a checked-in workflow is therefore not a deployment
+            # requirement; model selectors do not carry these upload flags.
+            if any(key.endswith("_upload") and value is True for key, value in options.items()):
+                continue
+            if value not in choices:
+                issues.append(f"{node_type}.{input_name}={value!r}")
+    return issues
 
 
 def main() -> int:
@@ -71,24 +112,32 @@ def main() -> int:
         print(f"ERROR: {path}: {exc}", file=sys.stderr)
         return 2
 
-    availability: dict[str, bool] = {}
+    definitions: dict[str, dict] = {}
     try:
         for node_type in sorted(set().union(*workflow_nodes.values())):
-            availability[node_type] = node_exists(args.url, node_type, args.timeout)
+            definitions[node_type] = get_node_info(args.url, node_type, args.timeout)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
     missing_any = False
     for path, node_types in workflow_nodes.items():
-        missing = sorted(node for node in node_types if not availability[node])
-        if missing:
+        missing_nodes = sorted(node for node in node_types if not definitions[node])
+        try:
+            missing_assets = enum_input_issues(path, definitions)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: {path}: {exc}", file=sys.stderr)
+            return 2
+        if missing_nodes or missing_assets:
             missing_any = True
-            print(f"MISSING  {path.name}: {', '.join(missing)}")
+            if missing_nodes:
+                print(f"MISSING_NODE   {path.name}: {', '.join(missing_nodes)}")
+            if missing_assets:
+                print(f"MISSING_ASSET  {path.name}: {', '.join(missing_assets)}")
         else:
             print(f"READY    {path.name}: {len(node_types)} node types")
 
-    print(f"SUMMARY workflows={len(paths)} node_types={len(availability)}")
+    print(f"SUMMARY workflows={len(paths)} node_types={len(definitions)}")
     return 1 if missing_any else 0
 
 
