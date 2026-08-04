@@ -7,6 +7,8 @@ COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-42d2aa55432b57371ddc9d4078ae250b54227641}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 QWEN_DIR="$APP_ROOT/llm-backend-deploy"
+HTTP_READY_WAIT_SECONDS="${BRMMEDIA_VERIFY_HTTP_WAIT_SECONDS:-45}"
+HTTP_READY_POLL_SECONDS="${BRMMEDIA_VERIFY_HTTP_POLL_SECONDS:-2}"
 failures=0
 
 ok() { printf 'OK   %s\n' "$*"; }
@@ -21,14 +23,26 @@ check_service() {
   fi
 }
 
+http_code() {
+  curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "$1" || true
+}
+
 check_http() {
-  local name="$1" url="$2"
-  local code
-  code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "$url" || true)"
+  local name="$1" url="$2" code deadline
+  # A backend restart starts ComfyUI and Gradio sequentially.  Treat an
+  # immediate 000 during that warm-up as pending rather than a false failed
+  # deployment. Operators can set the wait to 0 for a strictly instant probe.
+  deadline=$((SECONDS + HTTP_READY_WAIT_SECONDS))
+  while :; do
+    code="$(http_code "$url")"
+    [ "$code" = "200" ] && break
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep "$HTTP_READY_POLL_SECONDS"
+  done
   if [ "$code" = "200" ]; then
     ok "$name HTTP 200"
   else
-    bad "$name expected HTTP 200, got ${code:-000}"
+    bad "$name expected HTTP 200 after ${HTTP_READY_WAIT_SECONDS}s, got ${code:-000}"
   fi
 }
 
