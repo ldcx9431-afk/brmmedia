@@ -562,13 +562,6 @@ footer {
 #q-table-md table {
     width: 100%;                  /* 表格占满整个容器宽度 */
 }
-/* Gradio 的 visible 状态只作用于外壳，外壳本身不承担任何视觉尺寸。 */
-#global-settings-panel {
-    margin: 0 !important;
-    padding: 0 !important;
-    min-height: 0 !important;
-}
-
 /* 独立的浏览器主体素材查看器，HTML 直接在固定层中渲染。 */
 #media-viewer {
     position: fixed !important;
@@ -614,10 +607,11 @@ footer {
 }
 #media-viewer .brm-media-viewer-stage {
     width: min(1200px, calc(100vw - 10vw));
-    /* 为竖版素材分配确定的可滚动内容区，始终露出顶部操作栏。 */
-    height: 0 !important;
-    min-height: 0 !important;
-    flex: 1 1 auto;
+    /* 不能使用 flex + height:0：HTML 组件的宿主没有确定高度，会导致
+       图片和视频的 max-height 解析为 0。改为由视口直接确定内容区。 */
+    height: calc(100vh - 242px) !important;
+    min-height: 240px !important;
+    flex: 0 0 auto;
     overflow: auto;
     display: flex;
     align-items: center;
@@ -650,7 +644,7 @@ footer {
     color: #1e293b !important;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
 }
-#global-settings-card {
+#global-settings-panel {
     width: min(1120px, 100%) !important;
     height: auto !important;
     max-height: none !important;
@@ -668,16 +662,16 @@ footer {
     align-items: center;
     margin-bottom: 6px;
 }
-#global-settings-card {
+#global-settings-panel {
     font-size: 1rem;
     color: #1f2937;
 }
-#global-settings-card .block,
-#global-settings-card .form,
-#global-settings-card .wrap {
+#global-settings-panel .block,
+#global-settings-panel .form,
+#global-settings-panel .wrap {
     background: transparent !important;
 }
-#global-settings-card label span {
+#global-settings-panel label span {
     color: #155e75 !important;
     background: #e8f4f2 !important;
     border-radius: 999px;
@@ -685,14 +679,14 @@ footer {
     font-size: 0.88rem;
     font-weight: 700;
 }
-#global-settings-card input {
+#global-settings-panel input {
     background: #f8fafc !important;
     border-color: #cbd5e1 !important;
 }
-#global-settings-card button {
+#global-settings-panel button {
     border-radius: 9px !important;
 }
-#global-settings-card button.primary {
+#global-settings-panel button.primary {
     background: #155e75 !important;
     border-color: #155e75 !important;
 }
@@ -703,7 +697,7 @@ footer {
     min-width: 116px !important;
 }
 @media (max-width: 720px) {
-    #global-settings-card {
+    #global-settings-panel {
         width: 100% !important;
         padding: 18px;
     }
@@ -712,7 +706,8 @@ footer {
     }
     #media-viewer .brm-media-viewer-stage {
         width: 94vw;
-        height: 0 !important;
+        height: calc(100vh - 202px) !important;
+        min-height: 200px !important;
     }
     #media-viewer img,
     #media-viewer video {
@@ -1568,52 +1563,51 @@ def build_ui():
                 settings_btn = gr.Button("⚙ 全局设置", variant="secondary")
 
         with gr.Column(visible=False, elem_id="global-settings-panel") as settings_panel:
-            with gr.Group(elem_id="global-settings-card"):
-                with gr.Row(equal_height=True):
-                    with gr.Column(scale=10):
-                        gr.Markdown(
-                            "### 全局设置\n"
-                            "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
-                            "视频、数字人等高显存任务通常建议保持并发 **1**。"
-                        )
-                    with gr.Column(scale=1, min_width=116):
-                        settings_close_top_btn = gr.Button(
-                            "✕ 关闭", variant="secondary", elem_id="global-settings-close",
-                        )
-                with gr.Row():
-                    setting_concurrency = gr.Slider(
-                        1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
-                        label="任务并发数",
+            with gr.Row(equal_height=True):
+                with gr.Column(scale=10):
+                    gr.Markdown(
+                        "### 全局设置\n"
+                        "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
+                        "视频、数字人等高显存任务通常建议保持并发 **1**。"
                     )
-                    setting_done_tasks = gr.Slider(
-                        20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
-                        label="已完成任务保留数",
+                with gr.Column(scale=1, min_width=116):
+                    settings_close_top_btn = gr.Button(
+                        "✕ 关闭", variant="secondary", elem_id="global-settings-close",
                     )
-                    setting_done_gallery = gr.Slider(
-                        10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
-                        label="画廊最多显示产物数",
-                    )
-                with gr.Row():
-                    save_settings_btn = gr.Button("保存并应用", variant="primary")
-                    close_settings_btn = gr.Button("关闭", variant="secondary")
-                settings_status = gr.Markdown("")
-                gr.Markdown("---\n#### 局域网访问密码")
-                gr.Markdown(
-                    "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
-                    "修改后当前浏览器需要用新密码重新登录。"
+            with gr.Row():
+                setting_concurrency = gr.Slider(
+                    1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
+                    label="任务并发数",
                 )
-                lan_current_password = gr.Textbox(
-                    label="当前访问密码", type="password", max_length=128,
+                setting_done_tasks = gr.Slider(
+                    20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
+                    label="已完成任务保留数",
                 )
-                with gr.Row():
-                    lan_new_password = gr.Textbox(
-                        label="新访问密码", type="password", max_length=128,
-                    )
-                    lan_confirm_password = gr.Textbox(
-                        label="确认新访问密码", type="password", max_length=128,
-                    )
-                change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
-                lan_password_status = gr.Markdown("")
+                setting_done_gallery = gr.Slider(
+                    10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
+                    label="画廊最多显示产物数",
+                )
+            with gr.Row():
+                save_settings_btn = gr.Button("保存并应用", variant="primary")
+                close_settings_btn = gr.Button("关闭", variant="secondary")
+            settings_status = gr.Markdown("")
+            gr.Markdown("---\n#### 局域网访问密码")
+            gr.Markdown(
+                "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
+                "修改后当前浏览器需要用新密码重新登录。"
+            )
+            lan_current_password = gr.Textbox(
+                label="当前访问密码", type="password", max_length=128,
+            )
+            with gr.Row():
+                lan_new_password = gr.Textbox(
+                    label="新访问密码", type="password", max_length=128,
+                )
+                lan_confirm_password = gr.Textbox(
+                    label="确认新访问密码", type="password", max_length=128,
+                )
+            change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
+            lan_password_status = gr.Markdown("")
 
         # ---- 每个工作流一个 Tab。新增工作流时,复制一个 gr.Tab 块即可。 ----
         with gr.Tabs():
