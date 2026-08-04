@@ -46,6 +46,68 @@ check_http() {
   fi
 }
 
+check_gradio_ui_contract() {
+  local result
+  if [ ! -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    bad "cannot inspect Gradio UI contract: backend Python is missing"
+    return
+  fi
+  # /config is the server-side source of truth for rendered Gradio components.
+  # Check the controls that protect the user journeys repeatedly adjusted in
+  # this project, without opening a browser or submitting a generation task.
+  if result="$("$BACKEND_DIR/.venv/bin/python" - <<'PY'
+import json
+import sys
+import urllib.request
+
+expected_ids = {
+    "global-settings-panel",
+    "global-settings-close",
+    "qwen-answer",
+    "q-gallery",
+    "media-viewer",
+    "media-viewer-close",
+}
+expected_labels = {
+    "当前访问密码",
+    "选择要试听的已完成音频",
+    "音频试听",
+}
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:9000/config", timeout=15) as response:
+        config = json.load(response)
+except Exception as exc:
+    print(f"unable to read /config: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+components = config.get("components")
+if not isinstance(components, list):
+    print("/config has no components list", file=sys.stderr)
+    raise SystemExit(1)
+
+ids = set()
+labels = set()
+for component in components:
+    props = component.get("props") or {}
+    if props.get("elem_id"):
+        ids.add(props["elem_id"])
+    if props.get("label"):
+        labels.add(props["label"])
+
+missing = sorted((expected_ids - ids) | (expected_labels - labels))
+if missing:
+    print("missing UI components: " + ", ".join(missing), file=sys.stderr)
+    raise SystemExit(1)
+print(f"{len(components)} components")
+PY
+  )"; then
+    ok "Gradio UI contract present (${result})"
+  else
+    bad "Gradio UI contract is incomplete"
+  fi
+}
+
 printf '== BRMMedia runtime verification ==\n'
 printf 'app_root=%s\n' "$APP_ROOT"
 
@@ -68,6 +130,7 @@ fi
 
 check_http gradio http://127.0.0.1:9000/gradio_api/info
 check_http comfyui http://127.0.0.1:8188/system_stats
+check_gradio_ui_contract
 
 if [ "$highvram" = false ]; then
   check_http qwen http://127.0.0.1:8000/v1/models
