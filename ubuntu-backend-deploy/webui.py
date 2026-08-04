@@ -483,13 +483,13 @@ footer {
     width: 100%;
     height: 100%;
     min-height: 0;
-    display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
-    align-items: center;
+    display: flex;
+    flex-direction: column;
     gap: 12px;
 }
 #media-viewer .brm-media-viewer-toolbar {
     width: min(1200px, 100%);
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -512,9 +512,13 @@ footer {
 }
 #media-viewer .brm-media-viewer-stage {
     width: min(1200px, calc(100vw - 10vw));
-    height: auto !important;
-    min-height: 0;
-    max-height: 100%;
+    /* `height: 0` gives this flex child a definite content box; the flex
+       allocation then equals the viewport height left after the toolbar.
+       This prevents max-height:100% on a portrait image/video from resolving
+       against an auto-sized Grid item and running under the macOS Dock. */
+    height: 0 !important;
+    min-height: 0 !important;
+    flex: 1 1 auto;
     overflow: auto;
     display: flex;
     align-items: center;
@@ -585,8 +589,7 @@ footer {
     }
     #media-viewer .brm-media-viewer-stage {
         width: 94vw;
-        height: auto !important;
-        max-height: 100%;
+        height: 0 !important;
     }
     #media-viewer img,
     #media-viewer video {
