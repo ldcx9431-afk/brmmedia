@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Hermetic behavioral checks for the workspace task queue.
+
+The production UI imports Gradio and ComfyUI bridge modules.  This test stubs
+only their import-time surface and exercises the real Task/TaskQueue classes
+against a temporary output directory, so it remains runnable in GitHub Actions
+without GPU, models, or the production Python environment.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WEBUI_PATH = REPO_ROOT / "ubuntu-backend-deploy" / "webui.py"
+
+
+def _install_import_stubs() -> None:
+    requests = types.ModuleType("requests")
+    requests.RequestException = Exception
+    sys.modules["requests"] = requests
+
+    gradio = types.ModuleType("gradio")
+
+    class Error(Exception):
+        pass
+
+    class SelectData:
+        pass
+
+    gradio.Error = Error
+    gradio.SelectData = SelectData
+    gradio.Info = lambda *args, **kwargs: None
+    gradio.set_static_paths = lambda **kwargs: None
+    sys.modules["gradio"] = gradio
+
+    comfy = types.ModuleType("comfyui_server")
+    comfy.start_comfyui = lambda *args, **kwargs: None
+    comfy.stop_comfyui = lambda *args, **kwargs: None
+    comfy.is_alive = lambda: True
+    comfy.run_workflow = lambda *args, **kwargs: {}
+    comfy.get_view_file = lambda *args, **kwargs: b""
+    comfy.interrupt = lambda: "mock interrupt"
+    comfy.BASE = "http://127.0.0.1:8188"
+    comfy.WORKFLOW_DIR = REPO_ROOT / "ubuntu-backend-deploy" / "workflows"
+    comfy.upload_image = lambda *args, **kwargs: "mock-input"
+    comfy.audio_duration = lambda *args, **kwargs: 0.0
+    sys.modules["comfyui_server"] = comfy
+
+
+def _load_webui(output_dir: Path):
+    _install_import_stubs()
+    os.environ["BRM_OUTPUT_DIR"] = str(output_dir)
+    spec = importlib.util.spec_from_file_location("brmmedia_webui_under_test", WEBUI_PATH)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TaskQueueTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.output_dir = Path(cls.temp_dir.name)
+        cls.webui = _load_webui(cls.output_dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp_dir.cleanup()
+        os.environ.pop("BRM_OUTPUT_DIR", None)
+
+    def test_pending_task_has_queue_position(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("pending-1", "pending", "unit", {})
+
+        self.assertEqual(queue.enqueue(task), 1)
+        status = queue.task_status(task.id)
+
+        self.assertEqual(status["state"], "queued")
+        self.assertEqual(status["queue_position"], 1)
+        self.assertEqual(status["output_files"], [])
+
+    def test_cancelled_task_is_not_reported_as_failed(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("cancel-1", "cancel", "unit", {})
+        queue.enqueue(task)
+        with queue._lock:
+            queue._pending.clear()
+            task.status = self.webui.TaskStatus.RUNNING
+            queue._running[task.id] = task
+
+        self.assertEqual(queue.cancel_running(), [task])
+        self.assertTrue(task.cancel_event.is_set())
+        self.assertFalse(queue.stop_event.is_set())
+
+        task.status = self.webui.TaskStatus.CANCELLED
+        task.error = "用户请求中断"
+        with queue._lock:
+            queue._running.clear()
+            queue._done.append(task)
+
+        status = queue.task_status(task.id)
+        self.assertEqual(status["state"], "cancelled")
+        self.assertEqual(status["status"], "已中断")
+        self.assertEqual(status["error"], "用户请求中断")
+
+    def test_history_restores_completed_task_without_leaking_paths(self):
+        artifact = self.output_dir / "generated.png"
+        artifact.write_bytes(b"not an image, only a queue fixture")
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        completed = self.webui.Task(
+            "done-1",
+            "done",
+            "unit",
+            {},
+            status=self.webui.TaskStatus.DONE,
+            result=[str(artifact)],
+        )
+        queue._done = [completed]
+        queue._save_history()
+
+        restored = self.webui.TaskQueue(lambda task: None, max_done=5)
+        status = restored.task_status(completed.id)
+
+        self.assertEqual(status["state"], "completed")
+        self.assertEqual(status["output_files"], ["generated.png"])
+        self.assertNotIn(str(self.output_dir), json.dumps(status, ensure_ascii=False))
+
+    def test_unknown_task_is_explicit(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        self.assertEqual(queue.task_status("not-here")["state"], "not_found")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

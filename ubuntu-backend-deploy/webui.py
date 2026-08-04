@@ -18,8 +18,11 @@ webui.py
   pip install gradio requests
 """
 
+from __future__ import annotations
+
 import re
 import enum
+import os
 import uuid
 import time
 import random
@@ -48,7 +51,9 @@ from comfyui_server import (
 # 先拿到本文件所在目录,后续若需要写文件都基于它推导。
 BASE_DIR = Path(__file__).resolve().parent
 
-OUTPUT_DIR = BASE_DIR / "outputs"   # 所有产物统一保存到这里
+# Tests and recovery tools can override this with an isolated directory. The
+# production default remains next to webui.py, preserving existing assets.
+OUTPUT_DIR = Path(os.environ.get("BRM_OUTPUT_DIR", BASE_DIR / "outputs")).expanduser().resolve()
 TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
 gr.set_static_paths(paths=[OUTPUT_DIR])
@@ -65,7 +70,7 @@ DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时�
 
 
 ################################ YZY启动器配置专用 开始 ##########################################
-import socket, json, os, sys
+import socket, json, sys
 _no_proxy_hosts = "localhost,127.0.0.1,0.0.0.0"
 for _proxy_key in ("NO_PROXY", "no_proxy"):
     _proxy_value = os.environ.get(_proxy_key, "")
