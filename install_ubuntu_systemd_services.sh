@@ -3,15 +3,22 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_USER="${1:-$USER}"
+APP_ROOT="${2:-$ROOT_DIR}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[ERROR] Run with sudo:"
-  echo "  sudo $0 $SERVICE_USER"
+  echo "  sudo $0 <service-user> [runtime-app-root]"
   exit 1
 fi
 
 echo "[INFO] Installing services for user: $SERVICE_USER"
-echo "[INFO] Repo root: $ROOT_DIR"
+echo "[INFO] Source root: $ROOT_DIR"
+echo "[INFO] Runtime app root: $APP_ROOT"
+
+if [ ! -x "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh" ] || [ ! -x "$APP_ROOT/llm-backend-deploy/start_qwen_vllm.sh" ]; then
+  echo "[ERROR] Runtime app root is incomplete: $APP_ROOT"
+  exit 1
+fi
 
 install_service() {
   local src="$1"
@@ -19,7 +26,9 @@ install_service() {
   local workdir="$3"
   local execstart="$4"
 
-  cp "$src" "$dst"
+  # Unit 文件必须是普通配置文件；若目标曾被误设为可执行，cp 会保留
+  # 目标权限并导致 systemd 发出警告。
+  install -m 0644 "$src" "$dst"
   sed -i "s#YOUR_USER#$SERVICE_USER#g" "$dst"
   sed -i "s#WorkingDirectory=.*#WorkingDirectory=$workdir#g" "$dst"
   sed -i "s#ExecStart=.*#ExecStart=$execstart#g" "$dst"
@@ -28,20 +37,28 @@ install_service() {
 install_service \
   "$ROOT_DIR/ubuntu-backend-deploy/baorong-backend.service.example" \
   /etc/systemd/system/baorong-backend.service \
-  "$ROOT_DIR/ubuntu-backend-deploy" \
-  "$ROOT_DIR/ubuntu-backend-deploy/start_backend.sh"
+  "$APP_ROOT/ubuntu-backend-deploy" \
+  "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh"
+
+install -m 0755 "$ROOT_DIR/brmmedia-healthcheck.sh" /usr/local/sbin/brmmedia-healthcheck
+install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.service.example" \
+  /etc/systemd/system/brmmedia-healthcheck.service
+install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.timer.example" \
+  /etc/systemd/system/brmmedia-healthcheck.timer
+install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-logrotate.conf.example" \
+  /etc/logrotate.d/brmmedia
 
 install_service \
   "$ROOT_DIR/llm-backend-deploy/qwen-vllm.service.example" \
   /etc/systemd/system/qwen-vllm.service \
-  "$ROOT_DIR/llm-backend-deploy" \
-  "$ROOT_DIR/llm-backend-deploy/start_qwen_vllm.sh"
+  "$APP_ROOT/llm-backend-deploy" \
+  "$APP_ROOT/llm-backend-deploy/start_qwen_vllm.sh"
 
 install_service \
   "$ROOT_DIR/ubuntu-backend-deploy/baorong-backend-highvram.service.example" \
   /etc/systemd/system/baorong-backend-highvram.service \
-  "$ROOT_DIR/ubuntu-backend-deploy" \
-  "$ROOT_DIR/ubuntu-backend-deploy/start_backend.sh"
+  "$APP_ROOT/ubuntu-backend-deploy" \
+  "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh"
 
 if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" ]; then
   cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" \
@@ -60,6 +77,14 @@ fi
 
 systemctl daemon-reload
 systemctl enable baorong-backend
+systemctl enable --now brmmedia-healthcheck.timer
+systemd-analyze verify \
+  /etc/systemd/system/baorong-backend.service \
+  /etc/systemd/system/baorong-backend-highvram.service \
+  /etc/systemd/system/qwen-vllm.service \
+  /etc/systemd/system/brmmedia-healthcheck.service \
+  /etc/systemd/system/brmmedia-healthcheck.timer
+logrotate --debug /etc/logrotate.d/brmmedia >/dev/null
 
 cat <<EOF
 
@@ -85,4 +110,5 @@ Return to normal mode:
 Logs:
   sudo journalctl -u baorong-backend -f
   sudo journalctl -u qwen-vllm -f
+  sudo systemctl list-timers brmmedia-healthcheck.timer
 EOF

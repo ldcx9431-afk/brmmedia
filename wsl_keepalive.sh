@@ -30,6 +30,13 @@ while true; do
       printf 'gpu_memory_used_mib='
       nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | paste -sd, -
     fi
+    printf 'baorong_backend_state=%s\n' "$(systemctl is-active baorong-backend 2>/dev/null || true)"
+    printf 'highvram_backend_state=%s\n' "$(systemctl is-active baorong-backend-highvram 2>/dev/null || true)"
+    printf 'nginx_state=%s\n' "$(systemctl is-active nginx 2>/dev/null || true)"
+    printf 'qwen_state=%s\n' "$(systemctl is-active qwen-vllm 2>/dev/null || true)"
+    printf 'gradio_http=%s\n' "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 http://127.0.0.1:9000/gradio_api/info || true)"
+    printf 'comfy_http=%s\n' "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 http://127.0.0.1:8188/system_stats || true)"
+    printf 'qwen_http=%s\n' "$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 http://127.0.0.1:8000/v1/models || true)"
   } > "$health_tmp"
   mv -f "$health_tmp" "$HEALTH_FILE"
   sleep 15

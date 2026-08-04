@@ -1,0 +1,10 @@
+[Unit]
+Description=BRMMedia local API health check and controlled recovery
+After=network-online.target baorong-backend.service nginx.service qwen-vllm.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/brmmedia-healthcheck
+TimeoutStartSec=90

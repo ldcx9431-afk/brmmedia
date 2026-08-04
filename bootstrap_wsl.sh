@@ -22,7 +22,7 @@ apt-get update
 apt-get install -y \
   systemd systemd-sysv sudo git git-lfs curl ca-certificates \
   ffmpeg build-essential python3 python3-venv python3-pip \
-  rsync nginx apache2-utils libsndfile1 libgl1 libglib2.0-0
+  rsync nginx apache2-utils logrotate libsndfile1 libgl1 libglib2.0-0
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash "$SERVICE_USER"

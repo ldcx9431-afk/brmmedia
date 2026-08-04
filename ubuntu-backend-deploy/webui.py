@@ -23,6 +23,7 @@ import enum
 import uuid
 import time
 import random
+import shutil
 import threading
 import subprocess
 from collections import deque
@@ -136,6 +137,18 @@ def config_int(name, default=1, min_value=1, max_value=4):
 QUEUE_CONCURRENCY = config_int("queue_concurrency", default=1, min_value=1, max_value=4)
 DONE_TASKS_MAX = config_int("done_tasks_max", default=DONE_TASKS_MAX, min_value=20, max_value=500)
 DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=10, max_value=100)
+
+
+def configured_free_disk_percent(default=10.0) -> float:
+    """返回允许接收新任务前必须保留的最小磁盘空间百分比。"""
+    try:
+        value = float(os.environ.get("BRM_MIN_FREE_DISK_PERCENT", default))
+    except (TypeError, ValueError):
+        value = default
+    return max(1.0, min(value, 50.0))
+
+
+MIN_FREE_DISK_PERCENT = configured_free_disk_percent()
 ################################ YZY启动器配置专用 结束 ##########################################
 
 # ============================================================================
@@ -1065,6 +1078,16 @@ def change_lan_access_password(current_password, new_password, confirm_password)
 
 def submit(wfname, args):
     """点击提交:把任务放进队列,立即返回。队列空时会被 worker 立即取走执行。"""
+    try:
+        usage = shutil.disk_usage(OUTPUT_DIR)
+        free_percent = usage.free * 100 / usage.total
+    except OSError as exc:
+        raise gr.Error(f"无法检查产物磁盘空间：{exc}")
+    if free_percent < MIN_FREE_DISK_PERCENT:
+        raise gr.Error(
+            f"磁盘可用空间仅 {free_percent:.1f}%，低于保护阈值 "
+            f"{MIN_FREE_DISK_PERCENT:.1f}%。请先归档或清理历史素材后再提交。"
+        )
     _name = WORKFLOW_BUILDERS[wfname][1]
     task = Task(id=uuid.uuid4().hex, name=make_task_name(_name), workflow_name=wfname, args=args)
     task_queue.enqueue(task)
