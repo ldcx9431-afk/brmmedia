@@ -28,6 +28,17 @@ class ApiDocumentationTests(unittest.TestCase):
         self.assertNotIn("/render_queue", text)
         self.assertNotIn("/clear_pending", text)
 
+    def test_legacy_deployment_documents_are_explicitly_labeled(self) -> None:
+        root = DOC_PATH.parent
+        expected_labels = {
+            "对接经验.md": "历史参考",
+            "TTS工作流集成方案.md": "历史选型与 Windows 集成记录",
+            "ubuntu-backend-deploy/README_UBUNTU_DEPLOY.md": "不可直接用于当前服务器",
+        }
+        for relative_path, marker in expected_labels.items():
+            with self.subTest(path=relative_path):
+                self.assertIn(marker, (root / relative_path).read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

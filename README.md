@@ -28,6 +28,10 @@ runtime-locks/production-profile-2026-08-03.md
 
 ## 重要说明
 
+- **当前服务器部署只执行 `WSL_TEST_DEPLOY.md`。** 该 Profile 使用 `/srv/brmmedia`、
+  ComfyUI GPU1、Qwen3.5-4B GPU0，并只经 Nginx Basic Auth 的 TCP 80 对局域网提供服务。
+  本 README 下方的 `/opt/baorongwanxiang` 通用 Ubuntu 安装和旧离线包说明仅作历史/迁移参考，
+  不得覆盖当前运行目录或 `.env`。
 - Git 仓库不提交模型权重、Windows 便携运行时、Electron 打包产物和离线大包。
 - 本地已生成包含模型的离线包：
 

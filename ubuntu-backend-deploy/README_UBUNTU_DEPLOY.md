@@ -5,19 +5,25 @@
 > 会让 ComfyUI 使用 GPU0 并停止 Qwen。实际服务、模型与锁定版本以仓库根目录的
 > `WSL_TEST_DEPLOY.md` 和 `runtime-locks/production-profile-2026-08-03.md` 为准。
 
+> **重要：本页后续大量内容是 2026-06 的通用/旧 GPU 参考，不可直接用于当前服务器。**
+> 当前 Windows 11 + WSL2 的生产与恢复步骤只执行 `WSL_TEST_DEPLOY.md`；局域网访问只走
+> Nginx Basic Auth 的 TCP 80，不能直连或开放 Gradio 9000、ComfyUI 8188、Qwen 8000。
+> 下文出现的 Qwen3.6、GPU0 ComfyUI/GPU1 Qwen、`/opt/baorongwanxiang`、`H:` 路径和
+> `http://服务器IP:9000` 均为历史参考，不能覆盖现网 `/srv/brmmedia` Profile。
+
 本文档合并了 Ubuntu 后端部署说明、自定义节点清单、模型清单和模型下载链接，方便后续直接发给 AI 或运维脚本进行快速拉取部署。
 
 当前部署包只包含 Gradio 后端、工作流和 Linux 版 ComfyUI 启动桥接，不包含 Windows Electron、Windows Python、模型大文件。
 
 如果使用 `ubuntu-backend-deploy-offline-models.tar` 离线包，则包内已经包含 `models/` 目录。执行 `./install_ubuntu.sh` 时会自动把这些模型同步到 `$COMFYUI_ROOT/models/`，通常不需要再从 Hugging Face 下载。
 
-Qwen3.6 27B LLM 不放在本后端进程里，已单独整合到：
+（历史参考）Qwen3.6 27B LLM 不放在旧后端进程里，曾单独整合到：
 
 ```text
 ../llm-backend-deploy/
 ```
 
-推荐 GPU 分配：
+（历史参考）旧 GPU 分配：
 
 ```text
 GPU0: ComfyUI/Gradio
