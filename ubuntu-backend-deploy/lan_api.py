@@ -49,7 +49,7 @@ SIZE_VALUES = [
     "2560 × 1440", "1440 × 2560", "3840 × 2160", "2160 × 3840",
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
-MUSIC_MODEL_VALUES = ["turbo", "base", "sft"]
+MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
 
 
 @dataclass(frozen=True)
@@ -119,6 +119,23 @@ def _choice(value: Any, field: str, choices: list[str], default: str | None = No
     if value not in choices:
         _fail(422, f"{field} must be one of: {', '.join(choices)}")
     return str(value)
+
+
+def _available_music_models() -> list[str]:
+    """Discover installed ACE-Step DiT variants from ComfyUI's live schema."""
+    try:
+        payload = requests.get(f"{COMFY_BASE}/object_info/UNETLoader", timeout=5).json()
+        values = payload["UNETLoader"]["input"]["required"]["unet_name"][0]
+        if not isinstance(values, list):
+            return []
+    except (KeyError, TypeError, ValueError, requests.RequestException):
+        return []
+    available = []
+    for model in MUSIC_MODEL_CANDIDATES:
+        filename = f"acestep/acestep_v1.5_xl_{model}_bf16.safetensors"
+        if filename in values:
+            available.append(model)
+    return available
 
 
 def _load_assets() -> dict[str, AssetRecord]:
@@ -230,7 +247,7 @@ def _normal_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> lis
         _number(params.get("duration", 30), "duration", minimum=1, maximum=600),
         _number(params.get("bpm", 120), "bpm", minimum=30, maximum=300, integer=True),
         _choice(params.get("language"), "language", LANGUAGE_VALUES, "zh"),
-        _choice(params.get("model"), "model", MUSIC_MODEL_VALUES, "turbo"),
+        _choice(params.get("model"), "model", _available_music_models(), "turbo"),
     ]
 
 
@@ -341,7 +358,7 @@ def capabilities() -> dict[str, Any]:
         "asset_ttl_seconds": ASSET_TTL_SECONDS,
         "size_values": SIZE_VALUES,
         "music_languages": LANGUAGE_VALUES,
-        "music_models": MUSIC_MODEL_VALUES,
+        "music_models": _available_music_models(),
         "workflows": {
             slug: {
                 "description": spec.description,

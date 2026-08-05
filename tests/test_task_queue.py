@@ -218,6 +218,20 @@ class TaskQueueTests(unittest.TestCase):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
         self.assertEqual(queue.task_status("not-here")["state"], "not_found")
 
+    def test_acestep_model_choices_follow_installed_weights(self):
+        model_root = self.output_dir / "fake-comfy"
+        turbo = model_root / "models" / "diffusion_models" / "acestep" / "acestep_v1.5_xl_turbo_bf16.safetensors"
+        turbo.parent.mkdir(parents=True)
+        turbo.write_bytes(b"fixture")
+        old_root = os.environ.get("COMFYUI_ROOT")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("COMFYUI_ROOT", old_root)
+            if old_root is not None else os.environ.pop("COMFYUI_ROOT", None)
+        )
+        os.environ["COMFYUI_ROOT"] = str(model_root)
+
+        self.assertEqual(self.webui.installed_acestep_models(), ["turbo"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

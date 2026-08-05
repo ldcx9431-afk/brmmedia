@@ -732,6 +732,36 @@ VIDEO_EXTS   = {".mp4", ".webm", ".mov", ".mkv", ".avi"}   # .gif 已在 IMAGE_E
 AUDIO_EXTS   = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}
 GALLERY_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
+# ACE-Step 的下拉选项必须反映实际存在的 DiT 权重。此前固定展示
+# base/sft，即使服务器只有 turbo，也会让用户提交后才得到 ComfyUI 400。
+ACE_STEP_MODEL_FILENAMES = {
+    "turbo": "acestep/acestep_v1.5_xl_turbo_bf16.safetensors",
+    "base": "acestep/acestep_v1.5_xl_base_bf16.safetensors",
+    "sft": "acestep/acestep_v1.5_xl_sft_bf16.safetensors",
+}
+
+
+def installed_acestep_models() -> list[str]:
+    """Return only ACE-Step model variants installed in ComfyUI's model root."""
+    comfy_root = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expanduser()
+    model_root = comfy_root / "models" / "diffusion_models"
+    return [
+        model for model, relative_path in ACE_STEP_MODEL_FILENAMES.items()
+        if (model_root / relative_path).is_file()
+    ]
+
+
+def require_installed_acestep_model(model: str) -> str:
+    """Reject unavailable model choices before a task reaches ComfyUI."""
+    installed = installed_acestep_models()
+    if model not in installed:
+        readable = "、".join(installed) if installed else "无"
+        raise gr.Error(
+            f"ACE-Step 模型“{model}”未安装，当前可用：{readable}。"
+            "请在部署对应权重后重启后端，或选择可用模型。"
+        )
+    return model
+
 def _parse_size(size: str) -> tuple[int, int]:
     """把下拉框里 '宽 × 高' 形式的整体值解析成 (宽, 高)。"""
     m = re.search(r"(\d+)\s*[×xX*]\s*(\d+)", size or "")
@@ -850,6 +880,7 @@ def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model
     # 音乐生成(ACE-Step 1.5)。
     if not tags or not tags.strip():
         raise gr.Error("请输入音乐风格标签(tags)")
+    model = require_installed_acestep_model(str(model or "turbo"))
     return submit("音乐生成", {
         "tags": tags,
         "lyrics": lyrics,
@@ -1067,8 +1098,8 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
     wf = json.loads(path.read_text(encoding="utf-8"))
 
     # 选择模型版本(turbo/base/sft),对应不同的采样参数
-    model = args.get("model", "turbo")
-    wf["104"]["inputs"]["unet_name"] = f"acestep/acestep_v1.5_xl_{model}_bf16.safetensors"
+    model = require_installed_acestep_model(str(args.get("model", "turbo")))
+    wf["104"]["inputs"]["unet_name"] = ACE_STEP_MODEL_FILENAMES[model]
     if model == "turbo":
         wf["3"]["inputs"]["steps"] = 8        # turbo: 8步极速
         wf["3"]["inputs"]["cfg"] = 1.0
@@ -1783,6 +1814,12 @@ def build_ui():
 
             # ========== Tab 8 ==========
             with gr.Tab("音乐生成ACE-Step 1.5"):
+                ace_step_models = installed_acestep_models()
+                if not ace_step_models:
+                    gr.Markdown(
+                        "⚠️ 未检测到 ACE-Step DiT 权重，音乐生成暂不可用。"
+                        "请先完成模型部署后重启后端。"
+                    )
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         tags8 = gr.Textbox(
@@ -1811,8 +1848,9 @@ def build_ui():
                             )
                             model8 = gr.Dropdown(
                                 label="模型",
-                                choices=["turbo", "base", "sft"],
-                                value="turbo",
+                                choices=ace_step_models,
+                                value=ace_step_models[0] if ace_step_models else None,
+                                info="仅显示服务器已安装的 ACE-Step 权重；安装新模型并重启后端后才会出现。",
                             )
                         submit_btn8 = gr.Button("提交", variant="primary")
                 submit_btn8.click(

@@ -49,6 +49,7 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn('"http://127.0.0.1:9000"', text)
         self.assertIn('"asset_id"', text)
         self.assertIn('"download_url"', text)
+        self.assertIn("_available_music_models", text)
         self.assertNotIn("0.0.0.0", text)
 
     def test_proxy_and_service_are_loopback_only(self) -> None:
