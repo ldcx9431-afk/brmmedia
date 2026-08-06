@@ -6,7 +6,9 @@ set -euo pipefail
 COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
 PYTHON_BIN="${COMFYUI_PYTHON:-$APP_ROOT/ubuntu-backend-deploy/.venv/bin/python}"
-H3_COMFY_REF="${BRMMEDIA_H3_COMFYUI_REF:-15989f87ca89bfe2e7c47763252c559e96d97551}"
+# Verified against the official ComfyUI master on 2026-08-05.  This commit
+# includes comfy_extras/nodes_minimax_h3.py and its native FL2VA nodes.
+H3_COMFY_REF="${BRMMEDIA_H3_COMFYUI_REF:-563b98eefbe643a4cd510ee7f0b43e79880d5a3f}"
 BACKUP_DIR="$APP_ROOT/runtime-locks/comfyui-h3-backups"
 
 if [ ! -d "$COMFY_ROOT/.git" ]; then

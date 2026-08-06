@@ -34,10 +34,13 @@ class DeploymentProfileTests(unittest.TestCase):
 
     def test_h3_activation_uses_candidate_env_and_restores_on_start_failure(self):
         activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
+        preparation = (REPO_ROOT / "prepare_minimax_h3_comfyui.sh").read_text(encoding="utf-8")
         self.assertIn("dotenv_value COMFYUI_ROOT", activation)
         self.assertIn("restore_after_failed_activation", activation)
         self.assertIn("trap restore_after_failed_activation ERR", activation)
         self.assertIn("rollback_minimax_h3_comfyui.sh", activation)
+        self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
+        self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
 
     def test_qwen_acceptance_is_loopback_and_records_non_secret_evidence(self):
         acceptance = (REPO_ROOT / "accept_qwen_vllm.sh").read_text(encoding="utf-8")

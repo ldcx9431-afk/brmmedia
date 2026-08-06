@@ -13,7 +13,7 @@
 
 ## H3 固定组件
 
-- ComfyUI commit：`15989f87ca89bfe2e7c47763252c559e96d97551`（原生 H3 节点）。
+- ComfyUI commit：`563b98eefbe643a4cd510ee7f0b43e79880d5a3f`（原生 H3 节点；已验证包含 `nodes_minimax_h3.py`、FL2VA 与 Sigma Shift）。
 - Hugging Face：`Comfy-Org/MiniMax-H3@0bd506d2e895983a9663037febda27aa3948cf48`。
 - 本地组件：FL2VA INT8、Qwen3-VL-32B NVFP4 AWQ、视频 VAE、音频 VAE，约 42GB。
 - D: 只作权重源；E: WSL ext4 是运行副本。H3 仅替换文生视频和图生视频；首尾帧、
