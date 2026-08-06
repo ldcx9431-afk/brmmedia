@@ -4,7 +4,12 @@
 # running backend service and the ComfyUI checkout.
 set -euo pipefail
 
-APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
+# Activation is executed from the staged release during cutover.  Defaulting
+# to the legacy recovery checkout here would validate one release and start
+# another, so derive the runtime root from this script unless an explicit
+# override is supplied for an unusual layout.
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ROOT="${BRMMEDIA_APP_ROOT:-$SCRIPT_ROOT}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 BACKEND_ENV="$BACKEND_DIR/.env"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
