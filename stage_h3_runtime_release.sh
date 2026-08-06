@@ -49,6 +49,6 @@ done
 
 chown -R brm:brm "$TARGET_ROOT"
 printf '[OK] Staged H3 runtime release: %s\n' "$TARGET_ROOT"
-printf '     source_commit=%s\n' "$(git -C "$SOURCE_RELEASE" rev-parse --short HEAD)"
+printf '     source_commit=%s\n' "$(git -c safe.directory="$SOURCE_RELEASE" -C "$SOURCE_RELEASE" rev-parse --short HEAD)"
 printf '     old_runtime_preserved=%s\n' "$ACTIVE_ROOT"
 printf "Next: after model import, stop media services and run this release's install_ubuntu_systemd_services.sh with %s.\n" "$TARGET_ROOT"
