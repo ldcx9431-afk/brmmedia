@@ -60,6 +60,8 @@ sudo systemctl start baorong-backend
 
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
+确认没有媒体任务运行、H3 权重导入完成后，使用 `sudo ./activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活后先跑文生视频、图生视频各一次 preview，并用 `ffprobe` 确认 MP4 含音频流；再各跑三次 preview、一次 quality，最后才运行完整回归验收。
+
 恢复服务后，先在 WSL 内执行以下无推理预检；它会逐一检查项目工作流需要的 ComfyUI 节点，缺少的节点会按工作流名称列出：
 
 ```bash

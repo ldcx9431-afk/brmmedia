@@ -21,4 +21,12 @@ fi
 previous_ref="$(tr -d '[:space:]' < "$backup_file")"
 git -C "$COMFY_ROOT" checkout --detach "$previous_ref"
 "$PYTHON_BIN" -m pip install -r "$COMFY_ROOT/requirements.txt"
-echo "[OK] ComfyUI restored to $previous_ref. Start baorong-backend, then run brmmedia-verify-runtime."
+backend_env="$APP_ROOT/ubuntu-backend-deploy/.env"
+if [ -f "$backend_env" ]; then
+  if grep -q '^BRMMEDIA_VIDEO_ENGINE=' "$backend_env"; then
+    sed -i 's/^BRMMEDIA_VIDEO_ENGINE=.*/BRMMEDIA_VIDEO_ENGINE=ltx23/' "$backend_env"
+  else
+    printf '\nBRMMEDIA_VIDEO_ENGINE=ltx23\n' >> "$backend_env"
+  fi
+fi
+echo "[OK] ComfyUI restored to $previous_ref and video engine set to ltx23. Start baorong-backend, then run brmmedia-verify-runtime."
