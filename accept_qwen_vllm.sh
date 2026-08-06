@@ -5,7 +5,18 @@ set -euo pipefail
 
 API_BASE="${BRMMEDIA_QWEN_API_BASE:-http://127.0.0.1:8000/v1}"
 RUNS="${BRMMEDIA_QWEN_ACCEPTANCE_RUNS:-10}"
-REPORT_DIR="${BRMMEDIA_ACCEPTANCE_REPORT_DIR:-/srv/brmmedia/artifacts/acceptance}"
+RUNTIME_ENV_FILE="${BRMMEDIA_RUNTIME_ENV_FILE:-/etc/brmmedia/runtime.env}"
+runtime_env_value() {
+  local key="$1"
+  [ -r "$RUNTIME_ENV_FILE" ] || return 0
+  sed -n "s/^${key}=//p" "$RUNTIME_ENV_FILE" | tail -n1
+}
+APP_ROOT="${BRMMEDIA_APP_ROOT:-$(runtime_env_value BRMMEDIA_APP_ROOT)}"
+APP_ROOT="${APP_ROOT:-/srv/brmmedia/app}"
+# Keep evidence beside the shared backend outputs, which is owned by the
+# service account even when the release source itself lives on a mounted NTFS
+# drive.  An operator may still override this path explicitly.
+REPORT_DIR="${BRMMEDIA_ACCEPTANCE_REPORT_DIR:-$APP_ROOT/ubuntu-backend-deploy/outputs/acceptance}"
 
 if ! [[ "$RUNS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] BRMMEDIA_QWEN_ACCEPTANCE_RUNS must be a positive integer." >&2

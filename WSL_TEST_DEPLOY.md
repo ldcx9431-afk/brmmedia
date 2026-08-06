@@ -94,7 +94,7 @@ cd /srv/brmmedia/app
 python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 ```
 
-预检全部显示 `READY` 后，先完成 Qwen 连续 10 次对话；候选运行目录中的 `accept_qwen_vllm.sh` 会调用仅回环可见的 `/v1/models` 和 `/v1/chat/completions`，并在 `/srv/brmmedia/artifacts/acceptance/` 留下不含凭据的结果文件：
+预检全部显示 `READY` 后，先完成 Qwen 连续 10 次对话；候选运行目录中的 `accept_qwen_vllm.sh` 会调用仅回环可见的 `/v1/models` 和 `/v1/chat/completions`，并在当前候选运行目录共享的 `ubuntu-backend-deploy/outputs/acceptance/` 留下不含凭据的结果文件：
 
 ```bash
 sudo -u brm ./accept_qwen_vllm.sh
