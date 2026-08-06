@@ -54,6 +54,11 @@ if [ -n "$(git -C "$PRODUCTION_COMFY_ROOT" status --porcelain)" ]; then
   echo "[ERROR] Production ComfyUI has local changes; preserve them before creating a reproducible canary." >&2
   exit 1
 fi
+PRODUCTION_COMFY_ORIGIN="$(git -C "$PRODUCTION_COMFY_ROOT" remote get-url origin 2>/dev/null || true)"
+if [ -z "$PRODUCTION_COMFY_ORIGIN" ]; then
+  echo "[ERROR] Production ComfyUI has no origin remote for the pinned H3 revision." >&2
+  exit 1
+fi
 
 if [ ! -e "$CANARY_COMFY_ROOT" ]; then
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_COMFY_ROOT")"
@@ -62,6 +67,10 @@ elif [ ! -d "$CANARY_COMFY_ROOT/.git" ]; then
   echo "[ERROR] Existing canary path is not a Git checkout: $CANARY_COMFY_ROOT" >&2
   exit 1
 fi
+# `git clone <local-path>` would otherwise make the canary's origin point at
+# the mutable production working tree.  The pinned H3 preparer must fetch the
+# same upstream revision as production, not trust a local branch ref.
+runuser -u "$SERVICE_USER" -- git -C "$CANARY_COMFY_ROOT" remote set-url origin "$PRODUCTION_COMFY_ORIGIN"
 
 # Reuse immutable weights instead of duplicating the 42+ GB model store.
 # A new ComfyUI clone normally has no model directory.  Refuse to replace a

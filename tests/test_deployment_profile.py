@@ -88,6 +88,7 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("ComfyUI-h3-canary", prepare)
         self.assertIn("BRM_GRADIO_PORT 9001", prepare)
         self.assertIn("BRMMEDIA_VIDEO_ENGINE h3", prepare)
+        self.assertIn("remote set-url origin", prepare)
         self.assertIn("baorong-backend-h3-canary", starter)
         self.assertIn("--port 9101", starter)
         self.assertIn("Nginx is never repointed to the canary", guide)
