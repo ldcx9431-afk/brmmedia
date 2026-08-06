@@ -7,6 +7,10 @@ MODEL_SOURCE_ROOT="${BRMMEDIA_MODEL_SOURCE_ROOT:-/mnt/d/model}"
 MODEL_DIR="$MODEL_SOURCE_ROOT/MiniMax-H3"
 REPO="${BRMMEDIA_H3_REPO:-Comfy-Org/MiniMax-H3}"
 REVISION="${BRMMEDIA_H3_REVISION:-0bd506d2e895983a9663037febda27aa3948cf48}"
+# Keep the immutable revision and SHA-256 gate independent from transport so
+# a LAN proxy or a verified mirror can be used without changing model identity.
+H3_BASE_URL="${BRMMEDIA_H3_BASE_URL:-https://huggingface.co}"
+H3_BASE_URL="${H3_BASE_URL%/}"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 # The corporate proxy has been observed to close long Xet transfers early.
 # Keep each request small enough to finish, then append only a header-checked
@@ -92,7 +96,7 @@ download_component() {
       --dump-header "$headers" \
       --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
       --speed-time 90 --speed-limit 1024 --output "$tmp" \
-      "https://huggingface.co/$REPO/resolve/$REVISION/$relative" || true
+      "$H3_BASE_URL/$REPO/resolve/$REVISION/$relative" || true
     received="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
     content_range="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {line=$0} END {gsub(/\r/, "", line); print line}' "$headers" 2>/dev/null || true)"
     if [ "$received" -eq "$chunk" ] && printf '%s\n' "$content_range" | grep -qi "^content-range: bytes $actual-$end/$expected$"; then
@@ -170,6 +174,7 @@ for name in diffusion text video audio; do
       --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
       --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
       --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
+      --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
   fi
@@ -185,6 +190,7 @@ for name in diffusion text video audio; do
     --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
     --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
     --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
+    --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
 show_status
