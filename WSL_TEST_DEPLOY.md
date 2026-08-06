@@ -88,6 +88,8 @@ sudo env \
   ./start_minimax_h3_download.sh
 ```
 
+若 WSL2 的网络吞吐显著低于 Windows 宿主机，可停止**仅**未完成的 `brmmedia-h3-download-*` transient worker，改用仓库中的 `windows_h3_range_download.ps1` 在 Windows 上对同一 `D:\model\MiniMax-H3` 文件续传。该脚本每段先写入同目录临时文件，严格检查 `206`、`Content-Range` 与长度后才 append；不得同时由 WSL 与 Windows 写同一权重。Windows 下载完成后仍必须由 H3 stage 对四个完整文件执行固定 SHA-256 校验并导入 E: 运行目录，不能用“下载进度为 100%”替代完整性验收。
+
 经无写入 Range 吞吐测试后，低带宽代理可临时设置 `BRMMEDIA_H3_PARALLEL_RANGES=2`，使每个未完成组件按批并发取两段、再严格按偏移顺序验证并追加。只有在同一网络已通过对应连接数、每路 8MiB 的完整 `206` Range 测试后，才可逐级提高；默认硬上限为 `16`（两个未完成组件合计最多 32 条 Range 连接）。禁止跳过吞吐和完整性测试：默认值 `1` 更适合未验证的网络。所有并发段仍写入临时 `.chunk.*` 文件，任一段不完整时整批不会追加，随后自动缩小段大小重试。
 
 若已验证代理可稳定返回更大且完整的范围响应，可在 `brmmedia-h3-stage.service` 的 systemd drop-in 中显式设置 `BRMMEDIA_H3_CHUNK_BYTES`（例如 `8388608`）；该值会传给每个 transient worker。不要在没有范围响应验证时提高默认 1MiB 值。

@@ -128,6 +128,15 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY", downloader)
         self.assertIn('"${proxy_env_args[@]}"', downloader)
 
+    def test_windows_h3_resumer_validates_ranges_before_append(self):
+        resumer = (REPO_ROOT / "windows_h3_range_download.ps1").read_text(encoding="utf-8")
+        self.assertIn("RangeHeaderValue", resumer)
+        self.assertIn("PartialContent", resumer)
+        self.assertIn("ContentRange", resumer)
+        self.assertIn("FileMode]::Append", resumer)
+        self.assertIn("temporaryPath", resumer)
+        self.assertIn("received -ne $length", resumer)
+
     def test_parallel_h3_worker_appends_verified_ranges_and_exits_cleanly(self):
         """Exercise the Bash EXIT trap with a two-range, checksum-valid batch."""
         bash_major = int(
