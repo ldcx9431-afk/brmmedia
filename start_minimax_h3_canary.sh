@@ -32,10 +32,6 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "[ERROR] Linux service user does not exist: $SERVICE_USER" >&2
   exit 1
 fi
-if systemctl is-active --quiet baorong-backend; then
-  echo "[ERROR] Stop the production backend before starting the shared-A5000 canary." >&2
-  exit 1
-fi
 if ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] BRMMEDIA_H3_CANARY_STARTUP_TIMEOUT_SECONDS must be a positive integer." >&2
   exit 2
@@ -61,6 +57,17 @@ restore_health_timer_on_error() {
   fi
   rm -f "$HEALTH_TIMER_STATE"
 }
+
+# Quiesce the production watchdog before checking the backend state.  There is
+# otherwise a small but real race between the caller stopping production and
+# this canary acquiring the shared A5000: a timer tick can restart production
+# after the initial check, leaving two ComfyUI processes on GPU0.  If a caller
+# did not drain production, restore the exact prior timer state and fail.
+if systemctl is-active --quiet baorong-backend; then
+  restore_health_timer_on_error
+  echo "[ERROR] Stop the production backend before starting the shared-A5000 canary." >&2
+  exit 1
+fi
 
 dotenv_value() {
   sed -n "s/^$1=//p" "$CANARY_ENV" | tail -n1 | sed -e 's/^"//' -e 's/"$//'

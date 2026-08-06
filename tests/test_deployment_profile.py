@@ -233,6 +233,10 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('systemctl stop "$HEALTH_TIMER"', starter)
         self.assertIn('h3-canary-healthcheck-timer-state', starter)
         self.assertIn('systemctl start "$HEALTH_TIMER"', stopper)
+        self.assertLess(
+            starter.index('systemctl stop "$HEALTH_TIMER"'),
+            starter.index('if systemctl is-active --quiet baorong-backend;'),
+        )
 
     def test_h3_canary_uses_a_physical_python_venv(self):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
