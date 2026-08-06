@@ -27,7 +27,7 @@ git -C "$COMFY_ROOT" rev-parse HEAD > "$BACKUP_DIR/before-h3-$stamp.commit"
 # placeholders with a symlink to the verified shared E: model store.  Ignore
 # only that expected runtime indirection; all source and custom-node changes
 # remain a hard pre-upgrade failure.
-git -C "$COMFY_ROOT" status --short -- . ':(exclude)models/**' > "$BACKUP_DIR/before-h3-$stamp.status"
+git -C "$COMFY_ROOT" status --short -- . ':(exclude)models' > "$BACKUP_DIR/before-h3-$stamp.status"
 "$PYTHON_BIN" -m pip freeze > "$BACKUP_DIR/before-h3-$stamp.python-requirements.txt"
 if [ -s "$BACKUP_DIR/before-h3-$stamp.status" ]; then
   echo "[ERROR] ComfyUI checkout has local changes; resolve or snapshot them before upgrading." >&2
