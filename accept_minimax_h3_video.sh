@@ -79,9 +79,36 @@ wait_for_task() {
   done
 }
 
-verify_native_audio_mp4() {
-  local task_id="$1" label="$2" result filename encoded_filename artifact streams
+verify_effective_h3_settings() {
+  local task_id="$1" label="$2" profile="$3" seconds="$4" result
   result="$(<"$work_dir/$task_id.json")"
+  H3_TASK_JSON="$result" python3 - "$label" "$profile" "$seconds" <<'PY'
+import json, math, os, sys
+label, expected_profile, expected_seconds = sys.argv[1], sys.argv[2], int(sys.argv[3])
+payload = json.loads(os.environ["H3_TASK_JSON"])
+settings = payload.get("effective_settings")
+if not isinstance(settings, dict):
+    raise SystemExit(f"[ERROR] {label} omitted effective_settings: {payload}")
+if settings.get("profile") != expected_profile:
+    raise SystemExit(f"[ERROR] {label} profile mismatch: {settings}")
+if settings.get("requested_seconds") != expected_seconds:
+    raise SystemExit(f"[ERROR] {label} requested_seconds mismatch: {settings}")
+width, height, frames = settings.get("width"), settings.get("height"), settings.get("frames")
+if not all(isinstance(value, int) for value in (width, height, frames)):
+    raise SystemExit(f"[ERROR] {label} has invalid effective canvas/frame values: {settings}")
+if width < 32 or height < 32 or width % 32 or height % 32 or frames < 124 or frames % 17 != 5:
+    raise SystemExit(f"[ERROR] {label} violates the H3 canvas/frame grid: {settings}")
+expected_effective = round(frames / 24, 3)
+if not math.isclose(float(settings.get("effective_seconds")), expected_effective, abs_tol=0.001):
+    raise SystemExit(f"[ERROR] {label} has inconsistent effective duration: {settings}")
+print(f"[OK] {label} effective H3 settings: {width}x{height}, {frames} frames, {expected_effective}s")
+PY
+}
+
+verify_native_audio_mp4() {
+  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename encoded_filename artifact streams audio_channels
+  result="$(<"$work_dir/$task_id.json")"
+  verify_effective_h3_settings "$task_id" "$label" "$profile" "$seconds"
   filename="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["output_files"][0])')"
   artifact="$work_dir/$task_id-$filename"
   encoded_filename="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$filename")"
@@ -91,7 +118,12 @@ verify_native_audio_mp4() {
     echo "[ERROR] $label is not a native-audio MP4: $streams" >&2
     return 1
   fi
-  echo "[OK] $label MP4 has video + audio streams: $filename"
+  audio_channels="$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=nokey=1:noprint_wrappers=1 "$artifact")"
+  if [ "$audio_channels" != "2" ]; then
+    echo "[ERROR] $label audio is not stereo (channels=$audio_channels): $filename" >&2
+    return 1
+  fi
+  echo "[OK] $label MP4 has video + stereo audio streams: $filename"
 }
 
 make_fixture_image() {
@@ -124,11 +156,11 @@ if [ "$FULL" -eq 1 ]; then preview_runs=3; fi
 for index in $(seq 1 "$preview_runs"); do
   t2v="$(submit_task text-to-video '{"prompt":"A small paper boat gently moves across a quiet blue pond. Natural ripples and synchronized soft water ambience.","size":"16:9","seconds":4,"profile":"preview"}')"
   wait_for_task "$t2v" "T2V preview #$index"
-  verify_native_audio_mp4 "$t2v" "T2V preview #$index"
+  verify_native_audio_mp4 "$t2v" "T2V preview #$index" preview 4
 
   i2v="$(submit_task image-to-video "{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"The image comes alive with a subtle camera push-in and synchronized gentle ambient sound.\",\"size\":\"16:9\",\"seconds\":4,\"profile\":\"preview\"}")"
   wait_for_task "$i2v" "I2V preview #$index"
-  verify_native_audio_mp4 "$i2v" "I2V preview #$index"
+  verify_native_audio_mp4 "$i2v" "I2V preview #$index" preview 4
 done
 
 if [ "$FULL" -eq 1 ]; then
@@ -140,7 +172,7 @@ if [ "$FULL" -eq 1 ]; then
     fi
     task_id="$(submit_task "$workflow" "$payload")"
     wait_for_task "$task_id" "$workflow quality"
-    verify_native_audio_mp4 "$task_id" "$workflow quality"
+    verify_native_audio_mp4 "$task_id" "$workflow quality" quality 6
   done
 fi
 
