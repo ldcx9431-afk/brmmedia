@@ -80,8 +80,8 @@ download_component() {
   install -d "$(dirname "$file")"
   if ! [[ "$CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || ! [[ "$MIN_CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || \
      ! [[ "$CURL_RETRIES" =~ ^[0-9]+$ ]] || ! [[ "$CURL_RETRY_DELAY" =~ ^[0-9]+$ ]] || \
-     ! [[ "$PARALLEL_RANGES" =~ ^[1-8]$ ]]; then
-    echo "[ERROR] H3 chunk/retry settings must be valid and parallel ranges must be 1-8." >&2
+     ! [[ "$PARALLEL_RANGES" =~ ^([1-9]|1[0-6])$ ]]; then
+    echo "[ERROR] H3 chunk/retry settings must be valid and parallel ranges must be 1-16." >&2
     return 2
   fi
   effective_chunk="$CHUNK_BYTES"
