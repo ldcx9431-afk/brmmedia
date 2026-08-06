@@ -39,6 +39,9 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("restore_after_failed_activation", activation)
         self.assertIn("trap restore_after_failed_activation ERR", activation)
         self.assertIn("rollback_minimax_h3_comfyui.sh", activation)
+        self.assertIn("BRMMEDIA_H3_STARTUP_HEALTH_TIMEOUT_SECONDS", activation)
+        self.assertIn("/gradio_api/info", activation)
+        self.assertIn("/system_stats", activation)
         self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
         self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
 

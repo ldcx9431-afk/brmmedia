@@ -87,6 +87,10 @@ systemd 仍指向旧 `/srv/brmmedia/app` 的切换，并会重做 H3 资源预�
 脚本用 `ffprobe` 确认每个 MP4 同时含视频和双声道音频流，并核对 API 返回的实际尺寸、
 帧网格与时长，最后才运行完整回归验收。
 
+`activate_minimax_h3.sh` 不仅要求 systemd 已启动，还会在 420 秒内等待候选 Gradio 与
+ComfyUI 回环健康端点均返回 HTTP 200；超时、后端退出或其中任一端点未就绪时会自动还原
+候选引擎配置和 ComfyUI 快照。
+
 候选运行目录包含 `accept_minimax_h3_video.sh`：不带参数时执行一组 T2V/I2V preview 冒烟和 MP4 音视频流校验；`sudo -u brm ./accept_minimax_h3_video.sh --full` 会执行每类 3 个 preview 与两个 quality 任务，按照局域网 REST API 获取产物并以 `ffprobe` 验证视频与原生音频流。它只在 H3 已激活后运行，不会改变服务配置。
 
 受控升级会将旧 ComfyUI commit、工作区状态和后端 Python 依赖版本冻结到 `runtime-locks/comfyui-h3-backups/`；升级过程中失败会自动恢复旧 commit 与已冻结的 Python 包版本。

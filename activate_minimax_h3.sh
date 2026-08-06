@@ -28,8 +28,18 @@ COMFY_ROOT="$(dotenv_value COMFYUI_ROOT)"
 COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
 COMFY_PYTHON="$(dotenv_value COMFYUI_PYTHON)"
 COMFY_PYTHON="${COMFY_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
+COMFY_PORT="$(dotenv_value COMFYUI_PORT)"
+COMFY_PORT="${COMFY_PORT:-8188}"
+GRADIO_PORT="$(dotenv_value BRM_GRADIO_PORT)"
+GRADIO_PORT="${GRADIO_PORT:-9000}"
+HEALTH_TIMEOUT_SECONDS="${BRMMEDIA_H3_STARTUP_HEALTH_TIMEOUT_SECONDS:-420}"
 if [ ! -d "$COMFY_ROOT" ] || [ ! -x "$COMFY_PYTHON" ]; then
   echo "[ERROR] Candidate ComfyUI runtime is invalid (root=$COMFY_ROOT, python=$COMFY_PYTHON)." >&2
+  exit 1
+fi
+if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*$ ]] || \
+   ! [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[ERROR] Candidate health-check ports/timeout are invalid." >&2
   exit 1
 fi
 if ! grep -q 'MiniMaxH3-文生视频' "$BACKEND_DIR/webui.py" || \
@@ -104,5 +114,21 @@ engine_updated=1
 echo "[4/4] Starting backend; run H3 preview T2V and I2V smoke tests next..."
 systemctl start baorong-backend
 systemctl is-active --quiet baorong-backend
+deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+while :; do
+  gradio_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 \
+    "http://127.0.0.1:$GRADIO_PORT/gradio_api/info" || true)"
+  comfy_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 \
+    "http://127.0.0.1:$COMFY_PORT/system_stats" || true)"
+  if [ "$gradio_code" = "200" ] && [ "$comfy_code" = "200" ]; then
+    break
+  fi
+  if [ "$SECONDS" -ge "$deadline" ] || ! systemctl is-active --quiet baorong-backend; then
+    echo "[ERROR] Candidate backend did not become healthy (gradio=$gradio_code, comfy=$comfy_code)." >&2
+    exit 1
+  fi
+  sleep 3
+done
 trap - ERR
-echo "[OK] MiniMax H3 is active. Do not call this production-ready until the preview/quality and regression acceptance suite passes."
+echo "[OK] MiniMax H3 is active and both Gradio/ComfyUI health endpoints returned HTTP 200."
+echo "[WARN] Do not call this production-ready until the preview/quality and regression acceptance suite passes."
