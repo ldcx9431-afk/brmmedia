@@ -232,6 +232,20 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual((quality["width"], quality["height"]), (768, 1344))
         self.assertEqual(quality["frames"], 158)
 
+    def test_h3_mode_forces_single_media_queue(self):
+        previous_engine = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
+        try:
+            os.environ["BRMMEDIA_VIDEO_ENGINE"] = "h3"
+            with tempfile.TemporaryDirectory() as temp_dir:
+                h3_webui = _load_webui(Path(temp_dir))
+            self.assertEqual(h3_webui.MAX_MEDIA_QUEUE_CONCURRENCY, 1)
+            self.assertEqual(h3_webui.QUEUE_CONCURRENCY, 1)
+        finally:
+            if previous_engine is None:
+                os.environ.pop("BRMMEDIA_VIDEO_ENGINE", None)
+            else:
+                os.environ["BRMMEDIA_VIDEO_ENGINE"] = previous_engine
+
     def test_h3_workflow_builders_forward_actual_canvas_and_source_image(self):
         args = {
             "prompt": "rain falls on a city street", "width": 864, "height": 480,

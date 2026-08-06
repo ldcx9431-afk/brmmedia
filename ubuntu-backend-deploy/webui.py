@@ -164,7 +164,14 @@ def config_int(name, default=1, min_value=1, max_value=4):
     except Exception:
         value = default
     return max(min_value, min(max_value, value))
-QUEUE_CONCURRENCY = config_int("queue_concurrency", default=1, min_value=1, max_value=4)
+# MiniMax H3 dynamically swaps several large components on the A5000.  It
+# must never overlap another ComfyUI workflow on that GPU.  The regular LTX
+# mode keeps the existing user-configurable range, while H3 makes the queue a
+# deliberate single-worker queue rather than merely a UI recommendation.
+MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" else 4
+QUEUE_CONCURRENCY = config_int(
+    "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
+)
 DONE_TASKS_MAX = config_int("done_tasks_max", default=DONE_TASKS_MAX, min_value=20, max_value=500)
 DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=10, max_value=100)
 
@@ -1302,7 +1309,9 @@ def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_galle
     if queue_concurrency is None and done_tasks_max is None and done_gallery_max is None:
         return "当前全局设置未变更。"
 
-    concurrency = _setting_int(queue_concurrency, QUEUE_CONCURRENCY, 1, 4)
+    concurrency = _setting_int(
+        queue_concurrency, QUEUE_CONCURRENCY, 1, MAX_MEDIA_QUEUE_CONCURRENCY
+    )
     task_limit = _setting_int(done_tasks_max, DONE_TASKS_MAX, 20, 500)
     gallery_limit = _setting_int(done_gallery_max, DONE_GALLERY_MAX, 10, 100)
     try:
@@ -1318,8 +1327,9 @@ def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_galle
     DONE_TASKS_MAX = task_queue.set_max_done(task_limit)
     DONE_GALLERY_MAX = gallery_limit
     target_workers, active_workers = task_queue.set_max_workers(concurrency)
+    mode_note = "（MiniMax H3 模式固定单队列）" if VIDEO_ENGINE == "h3" else ""
     return (
-        f"✅ 全局设置已保存并生效：并发 {target_workers}（当前 worker {active_workers}），"
+        f"✅ 全局设置已保存并生效：并发 {target_workers}{mode_note}（当前 worker {active_workers}），"
         f"保留任务 {DONE_TASKS_MAX} 条，画廊显示 {DONE_GALLERY_MAX} 个产物。"
     )
 
@@ -1731,7 +1741,11 @@ def build_ui():
                     gr.Markdown(
                         "### 全局设置\n"
                         "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
-                        "视频、数字人等高显存任务通常建议保持并发 **1**。"
+                        + (
+                            "MiniMax H3 当前启用：为避免 A5000 显存争用，媒体队列固定为 **1**。"
+                            if VIDEO_ENGINE == "h3"
+                            else "视频、数字人等高显存任务通常建议保持并发 **1**。"
+                        )
                     )
                 with gr.Column(scale=1, min_width=116):
                     settings_close_top_btn = gr.Button(
@@ -1739,7 +1753,8 @@ def build_ui():
                     )
             with gr.Row():
                 setting_concurrency = gr.Slider(
-                    1, 4, value=QUEUE_CONCURRENCY, step=1, precision=0,
+                    1, MAX_MEDIA_QUEUE_CONCURRENCY, value=QUEUE_CONCURRENCY,
+                    step=1, precision=0, interactive=MAX_MEDIA_QUEUE_CONCURRENCY > 1,
                     label="任务并发数",
                 )
                 setting_done_tasks = gr.Slider(
