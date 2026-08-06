@@ -109,18 +109,16 @@ chmod +x check_ubuntu_ready.sh tune_nvidia_performance.sh
 | `COMFYUI_PYTHON` | 用来启动 ComfyUI 的 Python，建议使用本包 `.venv/bin/python` |
 | `COMFYUI_HOST` | ComfyUI 监听地址，默认 `127.0.0.1` |
 | `COMFYUI_PORT` | ComfyUI 端口，默认 `8188` |
-| `COMFYUI_ARGS` | 额外 ComfyUI 参数，例如 `--highvram` |
+| `COMFYUI_ARGS` | 额外 ComfyUI 参数；当前 H3 Profile 必须保持为空，禁止 `--highvram`、`--gpu-only` |
 | `COMFYUI_STARTUP_TIMEOUT` | ComfyUI 启动等待秒数 |
 | `COMFYUI_TASK_TIMEOUT` | 单个任务最大等待秒数 |
 
 ## 5. 性能模式
 
-默认是稳健的 `balanced`。如果服务器就是专用推理机，并且显存足够，建议打开最大性能模式：
-
-```bash
-echo 'BRM_PERF_PROFILE=max' >> .env
-echo 'COMFYUI_ARGS=--highvram' >> .env
-```
+当前 A5000 媒体优先 Profile 固定使用 `balanced` 与动态卸载。即使服务器专用于
+推理，也不要通过 `COMFYUI_ARGS` 启用 `--highvram` 或 `--gpu-only`：MiniMax H3
+需要在同一张 A5000 上按需装卸 Qwen3-VL 编码器，强制常驻会破坏任务稳定性。
+如需调优并发，只能通过工作台的“全局设置”或运行时配置调整队列数量；H3 保持单并发。
 
 启动脚本会自动设置这些运行期优化变量：
 

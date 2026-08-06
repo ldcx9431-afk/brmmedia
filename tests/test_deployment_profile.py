@@ -63,3 +63,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('--setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES"', downloader)
         self.assertIn("BRMMEDIA_H3_MIN_CHUNK_BYTES", downloader)
         self.assertIn("will retry with", downloader)
+
+    def test_current_ubuntu_guide_does_not_recommend_highvram(self):
+        guide = (REPO_ROOT / "ubuntu-backend-deploy" / "README_UBUNTU_DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn("禁止 `--highvram`、`--gpu-only`", guide)
+        self.assertNotIn("echo 'COMFYUI_ARGS=--highvram'", guide)
