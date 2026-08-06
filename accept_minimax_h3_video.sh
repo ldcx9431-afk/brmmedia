@@ -112,10 +112,16 @@ PY
 }
 
 verify_native_audio_mp4() {
-  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename artifact_url artifact streams audio_channels container_formats
+  local task_id="$1" label="$2" profile="$3" seconds="$4" result artifact_fields filename_b64 artifact_url_b64 extra_field filename artifact_url artifact streams audio_channels container_formats
   result="$(<"$work_dir/$task_id.json")"
   verify_effective_h3_settings "$task_id" "$label" "$profile" "$seconds"
-  read -r filename artifact_url < <(printf '%s' "$result" | python3 -c '
+  # Do not split the artifact record on shell whitespace.  Completed task
+  # names are user-visible and may contain spaces (including alongside
+  # Chinese characters), while download_url is normally a relative,
+  # percent-encoded API path.  Emit both fields as base64 tokens so a filename
+  # can never shift the URL into an unsupported position.
+  artifact_fields="$(printf '%s' "$result" | python3 -c '
+import base64
 import json, sys
 payload = json.load(sys.stdin)
 artifacts = payload.get("artifacts")
@@ -124,8 +130,25 @@ if not isinstance(artifacts, list) or not artifacts:
 first = artifacts[0]
 if not isinstance(first, dict) or not isinstance(first.get("name"), str) or not isinstance(first.get("download_url"), str):
     raise SystemExit("task response has an invalid artifact record")
-print(first["name"], first["download_url"])
-')
+for value in (first["name"], first["download_url"]):
+    print(base64.b64encode(value.encode("utf-8")).decode("ascii"), end=" ")
+')" || {
+    echo "[ERROR] $label returned an invalid artifact record." >&2
+    return 1
+  }
+  read -r filename_b64 artifact_url_b64 extra_field <<< "$artifact_fields"
+  if [ -z "${filename_b64:-}" ] || [ -z "${artifact_url_b64:-}" ] || [ -n "${extra_field:-}" ]; then
+    echo "[ERROR] $label returned malformed artifact fields." >&2
+    return 1
+  fi
+  filename="$(printf '%s' "$filename_b64" | base64 -d)" || {
+    echo "[ERROR] $label returned an undecodable artifact filename." >&2
+    return 1
+  }
+  artifact_url="$(printf '%s' "$artifact_url_b64" | base64 -d)" || {
+    echo "[ERROR] $label returned an undecodable artifact URL." >&2
+    return 1
+  }
   case "$artifact_url" in
     http://*|https://*) ;;
     /*) artifact_url="${API_BASE%/api/v1}$artifact_url" ;;

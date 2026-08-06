@@ -19,7 +19,7 @@ import unittest
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,7 @@ class _FixtureApi(BaseHTTPRequestHandler):
 
     media = b""
     requests: Counter[str] = Counter()
+    raw_requests: Counter[str] = Counter()
     task_ids: list[str] = []
 
     def log_message(self, _format: str, *_args: object) -> None:
@@ -46,6 +47,10 @@ class _FixtureApi(BaseHTTPRequestHandler):
 
     @classmethod
     def task_payload(cls, task_id: str) -> dict:
+        # A user-visible generated filename can contain whitespace.  The API
+        # path must remain percent encoded; this fixture catches shell parsers
+        # that split the name and mistake part of it for download_url.
+        artifact_name = f"任务 H3 视频 {task_id}.mp4"
         return {
             "task_id": task_id,
             "state": "completed",
@@ -60,15 +65,16 @@ class _FixtureApi(BaseHTTPRequestHandler):
             },
             "artifacts": [
                 {
-                    "name": f"{task_id}.mp4",
-                    "download_url": f"/api/v1/tasks/{task_id}/artifacts/{task_id}.mp4",
+                    "name": artifact_name,
+                    "download_url": f"/api/v1/tasks/{task_id}/artifacts/{quote(artifact_name)}",
                 }
             ],
         }
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-        path = urlparse(self.path).path
+        path = unquote(urlparse(self.path).path)
         type(self).requests[path] += 1
+        type(self).raw_requests[self.path] += 1
         if path == "/api/v1/health":
             self._json({"status": "ok"})
             return
@@ -132,6 +138,7 @@ class H3AcceptanceRecoveryTests(unittest.TestCase):
         )
         _FixtureApi.media = media.read_bytes()
         _FixtureApi.requests = Counter()
+        _FixtureApi.raw_requests = Counter()
         _FixtureApi.task_ids = []
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureApi)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -189,9 +196,12 @@ class H3AcceptanceRecoveryTests(unittest.TestCase):
             # the restart.  Its artifact was fetched before and after restart;
             # ffprobe in the real shell script had to accept it both times.
             first_task = "/api/v1/tasks/h3-task-1"
-            first_artifact = "/api/v1/tasks/h3-task-1/artifacts/h3-task-1.mp4"
+            first_artifact_name = "任务 H3 视频 h3-task-1.mp4"
+            first_artifact = f"/api/v1/tasks/h3-task-1/artifacts/{first_artifact_name}"
+            first_artifact_encoded = f"/api/v1/tasks/h3-task-1/artifacts/{quote(first_artifact_name)}"
             self.assertGreaterEqual(_FixtureApi.requests[first_task], 2)
             self.assertGreaterEqual(_FixtureApi.requests[first_artifact], 2)
+            self.assertGreaterEqual(_FixtureApi.raw_requests[first_artifact_encoded], 2)
             self.assertGreaterEqual(_FixtureApi.requests["/api/v1/tasks/h3-task-2"], 1)
 
 
