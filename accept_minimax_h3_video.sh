@@ -106,13 +106,27 @@ PY
 }
 
 verify_native_audio_mp4() {
-  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename encoded_filename artifact streams audio_channels
+  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename artifact_url artifact streams audio_channels
   result="$(<"$work_dir/$task_id.json")"
   verify_effective_h3_settings "$task_id" "$label" "$profile" "$seconds"
-  filename="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["output_files"][0])')"
+  read -r filename artifact_url < <(printf '%s' "$result" | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+artifacts = payload.get("artifacts")
+if not isinstance(artifacts, list) or not artifacts:
+    raise SystemExit("task response has no downloadable artifacts")
+first = artifacts[0]
+if not isinstance(first, dict) or not isinstance(first.get("name"), str) or not isinstance(first.get("download_url"), str):
+    raise SystemExit("task response has an invalid artifact record")
+print(first["name"], first["download_url"])
+')
+  case "$artifact_url" in
+    http://*|https://*) ;;
+    /*) artifact_url="${API_BASE%/api/v1}$artifact_url" ;;
+    *) echo "[ERROR] $label returned an unsupported artifact URL: $artifact_url" >&2; return 1 ;;
+  esac
   artifact="$work_dir/$task_id-$filename"
-  encoded_filename="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$filename")"
-  curl --fail --silent --show-error "$API_BASE/tasks/$task_id/artifacts/$encoded_filename" -o "$artifact"
+  curl --fail --silent --show-error "$artifact_url" -o "$artifact"
   streams="$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$artifact" | sort -u)"
   if ! printf '%s\n' "$streams" | grep -qx video || ! printf '%s\n' "$streams" | grep -qx audio; then
     echo "[ERROR] $label is not a native-audio MP4: $streams" >&2

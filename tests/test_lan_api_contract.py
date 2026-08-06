@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LAN_API = ROOT / "ubuntu-backend-deploy" / "lan_api.py"
 NGINX = ROOT / "ubuntu-backend-deploy" / "nginx-brmmedia.conf.example"
 SERVICE = ROOT / "ubuntu-backend-deploy" / "brmmedia-lan-api.service.example"
+H3_ACCEPTANCE = ROOT / "accept_minimax_h3_video.sh"
 
 
 def _load_lan_api():
@@ -175,6 +176,12 @@ class LanApiContractTests(unittest.TestCase):
         self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")
+
+    def test_h3_acceptance_follows_task_artifact_contract(self) -> None:
+        text = H3_ACCEPTANCE.read_text(encoding="utf-8")
+        self.assertIn('payload.get("artifacts")', text)
+        self.assertIn('first["download_url"]', text)
+        self.assertNotIn('json.load(sys.stdin)["output_files"][0]', text)
 
 
 if __name__ == "__main__":
