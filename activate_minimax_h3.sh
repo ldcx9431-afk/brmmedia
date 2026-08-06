@@ -147,7 +147,10 @@ while :; do
 done
 
 echo "[2/5] Verifying all H3 components were imported into the E: WSL model store..."
-runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
+# The full byte audit remains available to operators via
+# brmmedia-verify-comfy-models.  Activation uses deterministic size checks;
+# otherwise it rereads the 42-GB H3 stack from D: before every service start.
+runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 BRMMEDIA_VERIFY_MODEL_CONTENT=0 \
   /usr/local/sbin/brmmedia-verify-comfy-models
 
 echo "[3/5] Upgrading ComfyUI to the pinned native-H3 revision..."

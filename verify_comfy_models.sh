@@ -3,6 +3,12 @@ set -euo pipefail
 
 SOURCE_ROOT="${BRMMEDIA_MODEL_SOURCE_ROOT:-/mnt/d/model}"
 TARGET_ROOT="${BRMMEDIA_COMFYUI_MODEL_ROOT:-/srv/brmmedia/ComfyUI/models}"
+# A full byte comparison is useful for an import audit, but it rereads more
+# than 50 GB from D: on every activation.  The H3 cutover already has fixed
+# source-size checks and functional T2V/I2V acceptance; permit that activation
+# gate to perform an existence-and-size check only.  Keep the conservative
+# full-content behaviour as the standalone verifier default.
+verify_content="${BRMMEDIA_VERIFY_MODEL_CONTENT:-1}"
 failed=0
 
 verify_file() {
@@ -15,7 +21,9 @@ verify_file() {
     failed=1
     return
   fi
-  if cmp -s "$source" "$target"; then
+  if [ "$verify_content" = "0" ] && [ "$(stat -c%s "$source")" = "$(stat -c%s "$target")" ]; then
+    echo "[OK] $target_rel (size verified)"
+  elif cmp -s "$source" "$target"; then
     echo "[OK] $target_rel"
   else
     echo "[FAIL] Content mismatch: $target_rel"
@@ -27,7 +35,11 @@ verify_tree() {
   local source_rel="$1"
   local target_rel="$2"
   local result
-  result="$(rsync -rcn --out-format='%n' "$SOURCE_ROOT/$source_rel/" "$TARGET_ROOT/$target_rel/" || true)"
+  if [ "$verify_content" = "0" ]; then
+    result="$(rsync -rn --size-only --out-format='%n' "$SOURCE_ROOT/$source_rel/" "$TARGET_ROOT/$target_rel/" || true)"
+  else
+    result="$(rsync -rcn --out-format='%n' "$SOURCE_ROOT/$source_rel/" "$TARGET_ROOT/$target_rel/" || true)"
+  fi
   if [ -n "$result" ]; then
     echo "[FAIL] Tree mismatch: $target_rel"
     printf '%s\n' "$result"

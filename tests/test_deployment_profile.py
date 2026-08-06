@@ -62,6 +62,13 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("/usr/lib/wsl/lib/nvidia-smi", preflight)
         self.assertIn('"$nvidia_smi" --query-gpu=index,name,memory.total,uuid', preflight)
 
+    def test_h3_activation_uses_fast_size_gate_after_full_acceptance(self):
+        activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
+        verifier = (REPO_ROOT / "verify_comfy_models.sh").read_text(encoding="utf-8")
+        self.assertIn("BRMMEDIA_VERIFY_MODEL_CONTENT=0", activation)
+        self.assertIn('verify_content="${BRMMEDIA_VERIFY_MODEL_CONTENT:-1}"', verifier)
+        self.assertIn("rsync -rn --size-only", verifier)
+
     def test_h3_workflow_gate_is_required_for_canary_and_production_cutover(self):
         gate = (REPO_ROOT / "verify_h3_workflow_gate.sh").read_text(encoding="utf-8")
         activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
