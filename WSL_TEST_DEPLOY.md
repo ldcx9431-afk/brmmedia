@@ -42,18 +42,21 @@ ComfyUI 的基础模型已从 `D:\\model` 导入。启动完整推理栈前，�
 
 ## 工作流验证顺序
 
-切换 MiniMax H3 前必须执行以下受控步骤（任一项失败即停止，不下载或不切换）：
+切换 MiniMax H3 前必须执行以下受控步骤。下载、导入和服务切换是独立阶段：下载权重不改变当前 LTX 服务；只有 H3 预检与实测通过后才设置 `BRMMEDIA_VIDEO_ENGINE=h3` 并重启后端。
 
 ```bash
 cd /srv/brmmedia/app
-./check_h3_preflight.sh
-./prepare_minimax_h3_comfyui.sh
 ./download_minimax_h3_models.sh
 ./import_comfy_models.sh
 ./verify_comfy_models.sh
+sudo systemctl stop baorong-backend
+./prepare_minimax_h3_comfyui.sh
+sudo systemctl start baorong-backend
 ```
 
-预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。
+预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。如经运维确认主机容量足够但页面文件检查不可读，可一次性显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`；这会在预检日志中留下记录，不能作为常规默认配置。
+
+H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
 恢复服务后，先在 WSL 内执行以下无推理预检；它会逐一检查项目工作流需要的 ComfyUI 节点，缺少的节点会按工作流名称列出：
 

@@ -27,8 +27,19 @@ if [ -s "$BACKUP_DIR/before-h3-$stamp.status" ]; then
   exit 1
 fi
 
+previous_ref="$(cat "$BACKUP_DIR/before-h3-$stamp.commit")"
+upgraded=0
+rollback_checkout() {
+  if [ "$upgraded" -eq 1 ]; then
+    echo "[WARN] H3 preparation failed; restoring ComfyUI checkout $previous_ref" >&2
+    git -C "$COMFY_ROOT" checkout --detach "$previous_ref" || true
+  fi
+}
+trap rollback_checkout ERR
+
 git -C "$COMFY_ROOT" fetch --tags origin
 git -C "$COMFY_ROOT" checkout --detach "$H3_COMFY_REF"
+upgraded=1
 "$PYTHON_BIN" -m pip install -r "$COMFY_ROOT/requirements.txt"
 
 if ! COMFYUI_ROOT="$COMFY_ROOT" "$PYTHON_BIN" - <<'PY'
@@ -42,5 +53,6 @@ then
   echo "[ERROR] upgraded ComfyUI lacks native MiniMax H3 nodes" >&2
   exit 1
 fi
+trap - ERR
 
 echo "[OK] ComfyUI pinned to $H3_COMFY_REF; rollback reference: $(cat "$BACKUP_DIR/before-h3-$stamp.commit")"
