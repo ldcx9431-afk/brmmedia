@@ -81,4 +81,21 @@ EOF
 }
 verify_component_sizes
 
+verify_component_hashes() {
+  local relative expected actual
+  while IFS=':' read -r relative expected; do
+    actual="$(sha256sum "$MODEL_DIR/$relative" | awk '{print $1}')"
+    if [ "$actual" != "$expected" ]; then
+      echo "[ERROR] H3 component SHA-256 mismatch: $relative" >&2
+      return 1
+    fi
+  done <<'EOF'
+diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors:e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a
+text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors:35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6
+vae/minimax_h3_video_vae_fp16.safetensors:7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522
+vae/minimax_h3_audio_vae_fp32.safetensors:8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48
+EOF
+}
+verify_component_hashes
+
 echo "[OK] H3 source weights staged. Review the MiniMax H3 model license before production use."

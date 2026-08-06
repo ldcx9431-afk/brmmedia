@@ -32,12 +32,23 @@ expected_size() {
   esac
 }
 
+expected_sha256() {
+  case "$1" in
+    diffusion) echo e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a ;;
+    text) echo 35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6 ;;
+    video) echo 7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522 ;;
+    audio) echo 8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48 ;;
+    *) return 1 ;;
+  esac
+}
+
 download_component() {
-  local name="$1" relative file expected actual attempt end chunk tmp headers received content_range
+  local name="$1" relative file expected expected_hash actual actual_hash attempt end chunk tmp headers received content_range
   relative="${components[$name]:-}"
   [ -n "$relative" ] || { echo "[ERROR] Unknown component: $name" >&2; return 2; }
   file="$MODEL_DIR/$relative"
   expected="$(expected_size "$name")"
+  expected_hash="$(expected_sha256 "$name")"
   install -d "$(dirname "$file")"
 
   # Xet-backed Hugging Face redirects can occasionally close a long ranged
@@ -46,8 +57,14 @@ download_component() {
   for attempt in $(seq 1 10000); do
     actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
     if [ "$actual" -eq "$expected" ]; then
-      echo "[OK] $name complete: $actual bytes"
-      return 0
+      actual_hash="$(sha256sum "$file" | awk '{print $1}')"
+      if [ "$actual_hash" = "$expected_hash" ]; then
+        echo "[OK] $name complete and SHA-256 verified: $actual bytes"
+        return 0
+      fi
+      echo "[WARN] $name has expected size but invalid SHA-256; resetting only this component for redownload." >&2
+      truncate -s 0 "$file"
+      continue
     fi
     if [ "$actual" -gt "$expected" ]; then
       echo "[ERROR] $name exceeds expected byte count ($actual > $expected)" >&2
@@ -83,14 +100,18 @@ download_component() {
 }
 
 show_status() {
-  local name relative file expected actual
+  local name relative file expected actual complete_note
   for name in diffusion text video audio; do
     relative="${components[$name]}"
     file="$MODEL_DIR/$relative"
     expected="$(expected_size "$name")"
     actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
-    printf '%-10s %-12s %s/%s bytes  %s\n' "$name" \
-      "$(systemctl is-active "brmmedia-h3-download-$name" 2>/dev/null || true)" "$actual" "$expected" "$relative"
+    complete_note=""
+    if [ "$actual" -eq "$expected" ]; then
+      complete_note=" (size complete; SHA-256 is verified by the worker/import gate)"
+    fi
+    printf '%-10s %-12s %s/%s bytes  %s%s\n' "$name" \
+      "$(systemctl is-active "brmmedia-h3-download-$name" 2>/dev/null || true)" "$actual" "$expected" "$relative" "$complete_note"
   done
 }
 
@@ -120,7 +141,15 @@ for name in diffusion text video audio; do
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$file")"
   actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
   if [ "$actual" -eq "$expected" ]; then
-    echo "[INFO] $name is already complete."
+    # Start a short-lived worker even for a size-complete file.  It performs
+    # the immutable LFS SHA-256 gate before declaring this component reusable.
+    if systemctl is-active --quiet "brmmedia-h3-download-$name"; then
+      echo "[INFO] $name integrity verification is already active."
+      continue
+    fi
+    systemd-run --unit="brmmedia-h3-download-$name" --collect \
+      --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
+      /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
   fi
   if [ "$actual" -gt "$expected" ]; then
