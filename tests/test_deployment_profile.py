@@ -71,3 +71,9 @@ class DeploymentProfileTests(unittest.TestCase):
         guide = (REPO_ROOT / "ubuntu-backend-deploy" / "README_UBUNTU_DEPLOY.md").read_text(encoding="utf-8")
         self.assertIn("禁止 `--highvram`、`--gpu-only`", guide)
         self.assertNotIn("echo 'COMFYUI_ARGS=--highvram'", guide)
+
+    def test_h3_deployment_guide_matches_range_downloader(self):
+        guide = (REPO_ROOT / "WSL_TEST_DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn("`curl`", guide)
+        self.assertIn("HTTP Range", guide)
+        self.assertNotIn("下载器默认使用 HF CLI", guide)
