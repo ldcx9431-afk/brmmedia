@@ -24,6 +24,10 @@ if ! grep -q 'MiniMaxH3-文生视频' "$BACKEND_DIR/webui.py" || \
   echo "[ERROR] Runtime application does not contain the H3 release. Sync the reviewed source first." >&2
   exit 1
 fi
+if [ ! -x "$APP_ROOT/check_h3_preflight.sh" ]; then
+  echo "[ERROR] H3 preflight script is missing: $APP_ROOT/check_h3_preflight.sh" >&2
+  exit 1
+fi
 if systemctl is-active --quiet baorong-backend; then
   echo "[ERROR] Stop or drain media tasks before activating H3; this script will not interrupt a running job." >&2
   exit 1
@@ -38,6 +42,9 @@ if ! systemctl cat baorong-backend 2>/dev/null | grep -Fq "ExecStart=$expected_e
   echo "[ERROR] First run: sudo $APP_ROOT/install_ubuntu_systemd_services.sh $SERVICE_USER $APP_ROOT" >&2
   exit 1
 fi
+
+echo "[preflight] Verifying GPU, memory, page-file, and disk prerequisites..."
+BRMMEDIA_APP_ROOT="$APP_ROOT" "$APP_ROOT/check_h3_preflight.sh"
 
 echo "[1/4] Verifying all H3 components were imported into the E: WSL model store..."
 runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
