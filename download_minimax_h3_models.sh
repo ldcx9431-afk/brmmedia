@@ -64,4 +64,21 @@ case "$TRANSPORT" in
   *) echo "[ERROR] BRMMEDIA_H3_TRANSPORT must be auto, hf, or curl" >&2; exit 1 ;;
 esac
 
+verify_component_sizes() {
+  local relative expected size
+  while IFS=':' read -r relative expected; do
+    size="$(stat -c%s "$MODEL_DIR/$relative" 2>/dev/null || true)"
+    if [ "$size" != "$expected" ]; then
+      echo "[ERROR] H3 component size mismatch: $relative (expected $expected, got ${size:-missing})" >&2
+      return 1
+    fi
+  done <<'EOF'
+diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors:20970379616
+text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors:15687142551
+vae/minimax_h3_video_vae_fp16.safetensors:5207808496
+vae/minimax_h3_audio_vae_fp32.safetensors:605254808
+EOF
+}
+verify_component_sizes
+
 echo "[OK] H3 source weights staged. Review the MiniMax H3 model license before production use."

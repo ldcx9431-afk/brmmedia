@@ -48,7 +48,7 @@ install_service() {
   # Unit 文件必须是普通配置文件；若目标曾被误设为可执行，cp 会保留
   # 目标权限并导致 systemd 发出警告。
   install -m 0644 "$src" "$dst"
-  sed -i "s#YOUR_USER#$SERVICE_USER#g" "$dst"
+  sed -i "s#YOUR_USER#$SERVICE_USER#g; s#^User=.*#User=$SERVICE_USER#" "$dst"
   sed -i "s#WorkingDirectory=.*#WorkingDirectory=$workdir#g" "$dst"
   sed -i "s#ExecStart=.*#ExecStart=$execstart#g" "$dst"
 }
@@ -67,6 +67,8 @@ install_service \
 
 install -m 0755 "$ROOT_DIR/brmmedia-healthcheck.sh" /usr/local/sbin/brmmedia-healthcheck
 install -m 0755 "$ROOT_DIR/brmmedia-verify-runtime.sh" /usr/local/sbin/brmmedia-verify-runtime
+install -m 0755 "$ROOT_DIR/import_comfy_models.sh" /usr/local/sbin/brmmedia-import-comfy-models
+install -m 0755 "$ROOT_DIR/verify_comfy_models.sh" /usr/local/sbin/brmmedia-verify-comfy-models
 install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.service.example" \
   /etc/systemd/system/brmmedia-healthcheck.service
 install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.timer.example" \
@@ -86,8 +88,11 @@ install_service \
 systemctl disable --now baorong-backend-highvram.service 2>/dev/null || true
 
 if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" ]; then
-  cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" \
-    /etc/systemd/system/baorong-model-import.service
+  install_service \
+    "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" \
+    /etc/systemd/system/baorong-model-import.service \
+    "$APP_ROOT" \
+    "/usr/local/sbin/brmmedia-import-comfy-models"
 fi
 
 if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-custom-nodes-install.service.example" ]; then
@@ -96,8 +101,11 @@ if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-custom-nodes-install.service.ex
 fi
 
 if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-verify.service.example" ]; then
-  cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-verify.service.example" \
-    /etc/systemd/system/baorong-model-verify.service
+  install_service \
+    "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-verify.service.example" \
+    /etc/systemd/system/baorong-model-verify.service \
+    "$APP_ROOT" \
+    "/usr/local/sbin/brmmedia-verify-comfy-models"
 fi
 
 systemctl daemon-reload
@@ -126,7 +134,8 @@ Start Qwen only after its model has been imported:
   sudo systemctl enable --now qwen-vllm
 
 Import local models / documented custom nodes when their source is ready:
-  sudo systemctl enable --now baorong-model-import
+  sudo systemctl reset-failed baorong-model-import baorong-model-verify
+  sudo systemctl restart baorong-model-import
   sudo systemctl start baorong-custom-nodes-install
 
 Production GPU layout:

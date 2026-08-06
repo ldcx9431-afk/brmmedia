@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE_ROOT=/mnt/d/model
-TARGET_ROOT=/srv/brmmedia/ComfyUI/models
+SOURCE_ROOT="${BRMMEDIA_MODEL_SOURCE_ROOT:-/mnt/d/model}"
+TARGET_ROOT="${BRMMEDIA_COMFYUI_MODEL_ROOT:-/srv/brmmedia/ComfyUI/models}"
 
 copy_file() {
   local source_rel="$1"
@@ -55,13 +55,31 @@ copy_tree IndexTTS-2 IndexTTS-2
 # recovery imports remain usable before this optional model source arrives;
 # once any H3 source component is present, require all four atomically.
 H3_SOURCE="$SOURCE_ROOT/MiniMax-H3"
-if [ -d "$H3_SOURCE" ] || [ "${BRMMEDIA_REQUIRE_H3_MODELS:-0}" = "1" ]; then
+h3_source_ready() {
+  local relative expected size
+  while IFS=':' read -r relative expected; do
+    [ -n "$relative" ] || continue
+    size="$(stat -c%s "$H3_SOURCE/$relative" 2>/dev/null || true)"
+    [ "$size" = "$expected" ] || return 1
+  done <<'EOF'
+diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors:20970379616
+text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors:15687142551
+vae/minimax_h3_video_vae_fp16.safetensors:5207808496
+vae/minimax_h3_audio_vae_fp32.safetensors:605254808
+EOF
+}
+
+if h3_source_ready; then
   copy_file MiniMax-H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
   copy_file MiniMax-H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
   copy_file MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors vae/minimax_h3_video_vae_fp16.safetensors
   copy_file MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors vae/minimax_h3_audio_vae_fp32.safetensors
 else
-  echo "[INFO] MiniMax H3 source not staged; skipping optional H3 import."
+  if [ "${BRMMEDIA_REQUIRE_H3_MODELS:-0}" = "1" ]; then
+    echo "[ERROR] MiniMax H3 source is missing or incomplete; all four exact-size files are required." >&2
+    exit 1
+  fi
+  echo "[INFO] MiniMax H3 source is missing or incomplete; skipping optional H3 import."
 fi
 
 echo "[OK] ComfyUI model import complete."

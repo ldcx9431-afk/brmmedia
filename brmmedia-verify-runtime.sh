@@ -48,6 +48,11 @@ check_source_runtime_sync() {
     "ubuntu-backend-deploy/workflows/MiniMaxH3-图生视频.json"
     "validate_comfy_workflows.py"
     "check_h3_preflight.sh"
+    "download_minimax_h3_models.sh"
+    "import_comfy_models.sh"
+    "verify_comfy_models.sh"
+    "prepare_minimax_h3_comfyui.sh"
+    "rollback_minimax_h3_comfyui.sh"
     "brmmedia-verify-runtime.sh"
   )
   if [ ! -d "$SOURCE_ROOT" ]; then
@@ -245,6 +250,10 @@ if [ -f "$QWEN_DIR/.env" ]; then
   qwen_model="$(grep '^QWEN_SERVED_MODEL_NAME=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
   qwen_host="$(grep '^QWEN_HOST=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
   qwen_gpu="$(grep '^QWEN_CUDA_VISIBLE_DEVICES=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
+  qwen_memory="$(grep '^QWEN_GPU_MEMORY_UTILIZATION=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
+  qwen_context="$(grep '^QWEN_MAX_MODEL_LEN=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
+  qwen_seqs="$(grep '^QWEN_MAX_NUM_SEQS=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
+  qwen_batch_tokens="$(grep '^QWEN_MAX_NUM_BATCHED_TOKENS=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
   [ -n "$qwen_model" ] && ok "Qwen served model configured: $qwen_model" || bad "QWEN_SERVED_MODEL_NAME is missing"
   if [ "$qwen_host" = "127.0.0.1" ]; then
     ok "Qwen is bound to loopback"
@@ -252,8 +261,37 @@ if [ -f "$QWEN_DIR/.env" ]; then
     bad "Qwen host is not loopback: ${qwen_host:-unset}"
   fi
   [ "$qwen_gpu" = "1" ] && ok "Qwen is pinned to A4000/GPU1" || bad "Qwen GPU must be 1, got ${qwen_gpu:-unset}"
+  [ "$qwen_memory" = "0.70" ] && ok "Qwen GPU memory cap is 70%" || bad "Qwen GPU memory cap must be 0.70, got ${qwen_memory:-unset}"
+  [ "$qwen_context" = "4096" ] && ok "Qwen context is 4096" || bad "Qwen context must be 4096, got ${qwen_context:-unset}"
+  [ "$qwen_seqs" = "1" ] && ok "Qwen concurrency is 1" || bad "Qwen concurrency must be 1, got ${qwen_seqs:-unset}"
+  [ "$qwen_batch_tokens" = "2048" ] && ok "Qwen batch tokens are 2048" || bad "Qwen batch tokens must be 2048, got ${qwen_batch_tokens:-unset}"
 else
   bad "Qwen runtime .env is missing"
+fi
+
+if [ -f "$BACKEND_DIR/.env" ]; then
+  comfy_gpu="$(grep '^COMFYUI_CUDA_VISIBLE_DEVICES=' "$BACKEND_DIR/.env" | head -n1 | cut -d= -f2-)"
+  comfy_args="$(grep '^COMFYUI_ARGS=' "$BACKEND_DIR/.env" | head -n1 | cut -d= -f2-)"
+  video_engine="$(grep '^BRMMEDIA_VIDEO_ENGINE=' "$BACKEND_DIR/.env" | head -n1 | cut -d= -f2-)"
+  [ "$comfy_gpu" = "0" ] && ok "ComfyUI is pinned to A5000/GPU0" || bad "ComfyUI GPU must be 0, got ${comfy_gpu:-unset}"
+  case " $comfy_args " in
+    *" --highvram "*|*" --gpu-only "*) bad "ComfyUI must use dynamic model offload, not ${comfy_args}" ;;
+    *) ok "ComfyUI dynamic-offload arguments are safe" ;;
+  esac
+  [ "$video_engine" = "h3" ] && ok "MiniMax H3 is the active video engine" || bad "BRMMEDIA_VIDEO_ENGINE must be h3, got ${video_engine:-unset}"
+else
+  bad "Backend runtime .env is missing"
+fi
+
+if ! nvidia-smi --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^0, (NVIDIA )?RTX A5000, (2[4-9][0-9]{3}|[3-9][0-9]{4}) MiB,'; then
+  bad "GPU0 A5000/24GB is not visible to WSL"
+else
+  ok "GPU0 A5000/24GB is visible to WSL"
+fi
+if ! nvidia-smi --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^1, (NVIDIA )?RTX A4000, (1[6-9][0-9]{3}|[2-9][0-9]{4}) MiB,'; then
+  bad "GPU1 A4000/16GB is not visible to WSL"
+else
+  ok "GPU1 A4000/16GB is visible to WSL"
 fi
 
 if [ -x /usr/local/sbin/brmmedia-healthcheck ]; then

@@ -21,6 +21,14 @@ http_code() {
   curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$HTTP_TIMEOUT" "$1" || true
 }
 
+media_queue_active() {
+  # Never restart ComfyUI/Gradio merely because H3 is loading or generating.
+  # /queue is local-only and its lists are non-empty while work is active.
+  local queue
+  queue="$(curl --silent --max-time 5 http://127.0.0.1:8188/queue 2>/dev/null || true)"
+  printf '%s' "$queue" | grep -Eq '"queue_(running|pending)"[[:space:]]*:[[:space:]]*\[[[:space:]]*[^][:space:]]'
+}
+
 is_ok() {
   [ "$1" = "active" ]
 }
@@ -65,7 +73,9 @@ else
   if [ "$failures" -ge "$RESTART_AFTER" ]; then
     # Restart only the service that owns the failed dependency.  Both media
     # and Qwen are expected to be online in the split-GPU production profile.
-    if ! is_ok "$backend_state" || [ "$gradio_code" != "200" ] || [ "$comfy_code" != "200" ]; then
+    if { ! is_ok "$backend_state" || [ "$gradio_code" != "200" ] || [ "$comfy_code" != "200" ]; } && media_queue_active; then
+      restarted="deferred-active-media"
+    elif ! is_ok "$backend_state" || [ "$gradio_code" != "200" ] || [ "$comfy_code" != "200" ]; then
       systemctl restart "$backend_service"
       restarted="$backend_service"
     fi
@@ -96,6 +106,7 @@ report_tmp="${REPORT_FILE}.tmp"
   printf 'qwen_http=%s\n' "$qwen_code"
   printf 'consecutive_failures=%s\n' "$failures"
   printf 'restart_action=%s\n' "$restarted"
+  printf 'media_queue_active=%s\n' "$(media_queue_active && echo true || echo false)"
   printf 'problems=%s\n' "${problems[*]:-none}"
 } > "$report_tmp"
 mv -f "$report_tmp" "$REPORT_FILE"
