@@ -2,7 +2,9 @@
 # Read-only capacity gate before a 42 GB H3 download or service cutover.
 set -euo pipefail
 
-required_kib=$((64 * 1024 * 1024))
+# The operational requirement is 64 GB (decimal).  Linux reports KiB, so do
+# not reject a normal 64-GB Windows host merely because it appears as ~62 GiB.
+required_kib=$((64 * 1000 * 1000))
 required_model_bytes=$((50 * 1024 * 1024 * 1024))
 runtime_root="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
 model_source="${BRMMEDIA_MODEL_SOURCE_ROOT:-/mnt/d/model}"
@@ -22,7 +24,7 @@ fi
 
 mem_kib="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
 if [ "${mem_kib:-0}" -ge "$required_kib" ]; then
-  ok "WSL visible memory is at least 64 GiB"
+  ok "WSL visible memory is at least 64 GB"
 else
   bad "WSL visible memory is below 64 GiB (${mem_kib:-0} KiB)"
 fi
