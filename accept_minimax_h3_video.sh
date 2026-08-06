@@ -179,10 +179,13 @@ for value in (first["name"], first["download_url"]):
 }
 
 make_fixture_image() {
-  # Valid 1x1 PNG; H3 itself expands it to the selected canvas.  The fixture is
-  # local and removed by the trap, so I2V acceptance has no user asset effect.
+  # A standards-compliant 64x64 RGB PNG.  The 1x1 grayscale fixture previously
+  # used here is legal PNG, but recent ComfyUI/PyAV builds may reject it while
+  # opening image inputs through their video abstraction.  H3 expands this
+  # fixture to the selected canvas; it remains local and is removed by the
+  # trap, so I2V acceptance has no user asset effect.
   base64 -d > "$work_dir/h3-fixture.png" <<'PNG'
-iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JxWcAAAAASUVORK5CYII=
+iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwFfIkkY0kSH8OITBAtxm7fN1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYB5TcRaViDW+IAAAAASUVORK5CYII=
 PNG
 }
 
