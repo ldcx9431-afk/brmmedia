@@ -149,6 +149,7 @@ for name in diffusion text video audio; do
     fi
     systemd-run --unit="brmmedia-h3-download-$name" --collect \
       --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
+      --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
   fi
@@ -162,6 +163,7 @@ for name in diffusion text video audio; do
   fi
   systemd-run --unit="brmmedia-h3-download-$name" --collect \
     --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
+    --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
 show_status

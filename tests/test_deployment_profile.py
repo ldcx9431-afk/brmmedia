@@ -54,3 +54,7 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('do not refresh an active service path', refresh)
         self.assertIn("--exclude 'ubuntu-backend-deploy/.env'", refresh)
         self.assertIn("--exclude 'ubuntu-backend-deploy/outputs'", refresh)
+
+    def test_h3_worker_inherits_the_stage_chunk_size(self):
+        downloader = (REPO_ROOT / "start_minimax_h3_download.sh").read_text(encoding="utf-8")
+        self.assertIn('--setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES"', downloader)
