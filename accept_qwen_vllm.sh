@@ -58,10 +58,11 @@ PY
   response="$(curl --fail --silent --show-error --max-time 120 \
     -H 'Content-Type: application/json' \
     -d "$payload" "$API_BASE/chat/completions")"
-  printf '%s' "$response" | python3 - "$index" <<'PY'
+  QWEN_RESPONSE="$response" python3 - "$index" <<'PY'
 import json, sys
+import os
 index = sys.argv[1]
-payload = json.load(sys.stdin)
+payload = json.loads(os.environ["QWEN_RESPONSE"])
 try:
     content = payload["choices"][0]["message"]["content"]
 except (KeyError, IndexError, TypeError) as exc:
