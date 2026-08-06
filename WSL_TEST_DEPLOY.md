@@ -124,7 +124,13 @@ python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 sudo -u brm ./accept_qwen_vllm.sh
 ```
 
-再分别完成 H3 文生视频、图生视频各 3 次 `preview` 任务；通过后验证 `quality`。最后回归文生图、图片编辑、音乐、语音克隆、首尾帧视频、数字人、历史素材和 REST API。H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
+再分别完成 H3 文生视频、图生视频各 3 次 `preview` 任务；通过后验证 `quality`。最后在**已切换的生产候选运行目录**执行下面的完整 A5000 媒体回归；它先运行 Z-Image、ACE-Step 与 IndexTTS2 冒烟，再通过仅回环可见 REST API 验证 FLUX 图片编辑、LTX 首尾帧和数字人任务可完成、下载，且视频含视频流。该脚本会创建验收素材和不含凭据的报告，不能在 Canary 期间执行：
+
+```bash
+sudo ./accept_media_regression.sh
+```
+
+H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
 
 ## 内网访问
 

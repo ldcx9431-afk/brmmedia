@@ -68,6 +68,17 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('"$API_BASE/tasks/$task_id"', acceptance)
         self.assertIn("persisted H3 task recovery", acceptance)
 
+    def test_retained_media_regression_covers_smoke_and_rest_paths(self):
+        acceptance = (REPO_ROOT / "accept_media_regression.sh").read_text(encoding="utf-8")
+        self.assertIn('run_smoke_z_image.sh', acceptance)
+        self.assertIn('run_smoke_music.sh', acceptance)
+        self.assertIn('run_smoke_tts.sh', acceptance)
+        self.assertIn('submit_task image-edit', acceptance)
+        self.assertIn('submit_task first-last-frame-video', acceptance)
+        self.assertIn('submit_task talking-head', acceptance)
+        self.assertIn('ffprobe', acceptance)
+        self.assertIn('http://127.0.0.1:9100/api/v1', acceptance)
+
     def test_h3_candidate_refresh_rejects_active_service_paths(self):
         refresh = (REPO_ROOT / "refresh_h3_runtime_release.sh").read_text(encoding="utf-8")
         self.assertIn('/srv/brmmedia/releases/h3-*', refresh)
