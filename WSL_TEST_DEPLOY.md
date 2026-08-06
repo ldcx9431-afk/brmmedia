@@ -108,8 +108,11 @@ H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 Comf
 
 确认没有媒体任务运行、H3 权重导入完成后，先停止 `baorong-backend`，以候选目录运行
 `prepare_minimax_h3_canary.sh` 与 `start_minimax_h3_canary.sh`。Canary 使用独立的
-ComfyUI 工作副本、Gradio `127.0.0.1:9001` 和 REST `127.0.0.1:9101`，不会被 Nginx
-公开；其输出也与生产历史素材隔离。先在 Canary 上完成文生视频、图生视频各三次
+ComfyUI 工作副本、物理隔离的 Python venv（默认
+`<candidate-root>/runtime-locks/venvs/h3-canary`）、Gradio `127.0.0.1:9001` 和 REST
+`127.0.0.1:9101`，不会被 Nginx 公开；其输出也与生产历史素材隔离。该 venv 从现网
+环境做独立副本，H3 所需的 ComfyUI 依赖只会写入副本，绝不会修改生产 `.venv`。先在
+Canary 上完成文生视频、图生视频各三次
 preview、各一次 quality，以及 `--restart-recovery` 的任务恢复校验，再停止 Canary。
 只有全部通过，才以候选目录运行 `install_ubuntu_systemd_services.sh brm <candidate-root>`
 和 `activate_minimax_h3.sh` 执行生产切换。激活脚本会拒绝 systemd 仍指向旧

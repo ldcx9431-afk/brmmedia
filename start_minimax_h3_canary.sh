@@ -44,19 +44,27 @@ COMFY_ROOT="$(dotenv_value COMFYUI_ROOT)"
 COMFY_PORT="$(dotenv_value COMFYUI_PORT)"
 GRADIO_PORT="$(dotenv_value BRM_GRADIO_PORT)"
 OUTPUT_DIR="$(dotenv_value BRM_OUTPUT_DIR)"
+CANARY_VENV="$(dotenv_value BRMMEDIA_BACKEND_VENV)"
 COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
 COMFY_PORT="${COMFY_PORT:-8189}"
 GRADIO_PORT="${GRADIO_PORT:-9001}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BACKEND_DIR/outputs-h3-canary}"
+CANARY_VENV="${CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
+CANARY_PYTHON="$CANARY_VENV/bin/python"
 if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] Canary port configuration is invalid." >&2
   exit 2
+fi
+if [ -L "$CANARY_VENV" ] || [ ! -x "$CANARY_PYTHON" ]; then
+  echo "[ERROR] Canary requires its prepared physical Python venv: $CANARY_VENV" >&2
+  exit 1
 fi
 
 systemctl stop "$BACKEND_UNIT" "$API_UNIT" 2>/dev/null || true
 systemd-run --unit="$BACKEND_UNIT" --collect \
   --property="User=$SERVICE_USER" --property="WorkingDirectory=$BACKEND_DIR" \
   --property=Nice=5 --setenv="BRMMEDIA_ENV_FILE=$CANARY_ENV" \
+  --setenv="BRMMEDIA_BACKEND_VENV=$CANARY_VENV" \
   /usr/bin/env bash "$BACKEND_DIR/start_backend.sh"
 systemd-run --unit="$API_UNIT" --collect \
   --property="User=$SERVICE_USER" --property="WorkingDirectory=$BACKEND_DIR" \
@@ -64,7 +72,7 @@ systemd-run --unit="$API_UNIT" --collect \
   --setenv="COMFYUI_PORT=$COMFY_PORT" --setenv="BRMMEDIA_VIDEO_ENGINE=h3" \
   --setenv="BRM_GRADIO_API_BASE=http://127.0.0.1:$GRADIO_PORT" \
   --setenv="BRM_OUTPUT_DIR=$OUTPUT_DIR" \
-  "$BACKEND_DIR/.venv/bin/python" -m uvicorn lan_api:app --host 127.0.0.1 --port 9101 --proxy-headers
+  "$CANARY_PYTHON" -m uvicorn lan_api:app --host 127.0.0.1 --port 9101 --proxy-headers
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
 while :; do
@@ -84,6 +92,7 @@ done
 
 echo "[gate] Validating live H3/custom-node workflow compatibility before canary acceptance..."
 if ! runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  BRMMEDIA_H3_GATE_PYTHON="$CANARY_PYTHON" \
   "$APP_ROOT/verify_h3_workflow_gate.sh" \
   --url "http://127.0.0.1:$COMFY_PORT" \
   --workflows "$BACKEND_DIR/workflows" \

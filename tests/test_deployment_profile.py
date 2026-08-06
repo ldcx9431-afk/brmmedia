@@ -224,6 +224,20 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("--port 9101", starter)
         self.assertIn("Nginx is never repointed to the canary", guide)
 
+    def test_h3_canary_uses_a_physical_python_venv(self):
+        prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        backend = (REPO_ROOT / "ubuntu-backend-deploy" / "start_backend.sh").read_text(encoding="utf-8")
+        self.assertIn("BRMMEDIA_H3_CANARY_VENV", prepare)
+        self.assertIn("cp -a --reflink=auto", prepare)
+        self.assertIn('set_dotenv_value BRMMEDIA_BACKEND_VENV "$CANARY_VENV"', prepare)
+        self.assertIn('set_dotenv_value COMFYUI_PYTHON "$CANARY_PYTHON"', prepare)
+        self.assertIn('--setenv="BRMMEDIA_BACKEND_VENV=$CANARY_VENV"', starter)
+        self.assertIn('"$CANARY_PYTHON" -m uvicorn', starter)
+        self.assertIn('BRMMEDIA_H3_GATE_PYTHON="$CANARY_PYTHON"', starter)
+        self.assertIn('BACKEND_VENV="${BRMMEDIA_BACKEND_VENV:-$SCRIPT_DIR/.venv}"', backend)
+        self.assertIn('source "$BACKEND_VENV/bin/activate"', backend)
+
     def test_current_ubuntu_guide_does_not_recommend_highvram(self):
         guide = (REPO_ROOT / "ubuntu-backend-deploy" / "README_UBUNTU_DEPLOY.md").read_text(encoding="utf-8")
         self.assertIn("禁止 `--highvram`、`--gpu-only`", guide)

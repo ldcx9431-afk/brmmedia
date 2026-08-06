@@ -12,13 +12,20 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-if [ ! -x .venv/bin/python ]; then
-  echo "[ERROR] .venv not found. Run ./install_ubuntu.sh first."
+BACKEND_VENV="${BRMMEDIA_BACKEND_VENV:-$SCRIPT_DIR/.venv}"
+BACKEND_PYTHON="$BACKEND_VENV/bin/python"
+if [ ! -x "$BACKEND_PYTHON" ]; then
+  echo "[ERROR] Backend Python is unavailable: $BACKEND_PYTHON" >&2
+  echo "        Run ./install_ubuntu.sh first, or set BRMMEDIA_BACKEND_VENV to a valid isolated venv." >&2
   exit 1
 fi
 
 mkdir -p outputs logs
-source .venv/bin/activate
+# `activate` keeps VIRTUAL_ENV correct for custom nodes and Python packages
+# that inspect it.  Production retains the checkout-local .venv default;
+# the H3 canary injects its own physical venv through its private env file.
+# shellcheck disable=SC1090
+source "$BACKEND_VENV/bin/activate"
 
 CPU_THREADS="$(nproc 2>/dev/null || echo 8)"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
@@ -42,6 +49,7 @@ esac
 
 echo "[INFO] Starting Bao Rong Wan Xiang backend..."
 echo "[INFO] COMFYUI_ROOT=${COMFYUI_ROOT:-$SCRIPT_DIR/ComfyUI}"
+echo "[INFO] BACKEND_VENV=$BACKEND_VENV"
 echo "[INFO] media GPU=A5000 (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
 echo "[INFO] BRM_PERF_PROFILE=${BRM_PERF_PROFILE:-balanced}; OMP_NUM_THREADS=$OMP_NUM_THREADS; COMFYUI_ARGS=${COMFYUI_ARGS:-}"
-python -u entry_yzy.py 2>&1 | tee -a logs/backend.log
+"$BACKEND_PYTHON" -u entry_yzy.py 2>&1 | tee -a logs/backend.log

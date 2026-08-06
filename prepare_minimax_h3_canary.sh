@@ -11,6 +11,10 @@ SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 CANARY_COMFY_ROOT="${BRMMEDIA_H3_CANARY_COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
 CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
 CANARY_OUTPUT_DIR="$BACKEND_DIR/outputs-h3-canary"
+# The staged H3 runtime normally links .venv to the active release to retain
+# normal-service dependencies.  A canary must not mutate that shared venv when
+# ComfyUI installs the H3 requirements, so it always receives a physical copy.
+CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[ERROR] Run with sudo: sudo $0" >&2
@@ -44,12 +48,65 @@ set_dotenv_value() {
 
 PRODUCTION_COMFY_ROOT="$(dotenv_value COMFYUI_ROOT)"
 PRODUCTION_COMFY_ROOT="${PRODUCTION_COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
-COMFY_PYTHON="$(dotenv_value COMFYUI_PYTHON)"
-COMFY_PYTHON="${COMFY_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
-if [ ! -d "$PRODUCTION_COMFY_ROOT/.git" ] || [ ! -x "$COMFY_PYTHON" ]; then
+PRODUCTION_PYTHON="$(dotenv_value COMFYUI_PYTHON)"
+PRODUCTION_PYTHON="${PRODUCTION_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
+if [ ! -d "$PRODUCTION_COMFY_ROOT/.git" ] || [ ! -x "$PRODUCTION_PYTHON" ]; then
   echo "[ERROR] Production ComfyUI source or candidate Python is unavailable." >&2
   exit 1
 fi
+PRODUCTION_VENV="$(cd "$(dirname "$PRODUCTION_PYTHON")/.." && pwd -P)"
+CANARY_VENV_PARENT="$(dirname "$CANARY_VENV")"
+if [ "$(realpath -m "$CANARY_VENV")" = "$PRODUCTION_VENV" ]; then
+  echo "[ERROR] H3 canary venv must not point at the production venv: $PRODUCTION_VENV" >&2
+  exit 1
+fi
+
+prepare_isolated_venv() {
+  if [ -e "$CANARY_VENV" ]; then
+    if [ -L "$CANARY_VENV" ] || [ ! -x "$CANARY_VENV/bin/python" ]; then
+      echo "[ERROR] Existing H3 canary venv is unsafe or incomplete: $CANARY_VENV" >&2
+      echo "        It must be a physical, complete venv; preserve/remove it explicitly before retrying." >&2
+      return 1
+    fi
+    echo "[INFO] Reusing isolated H3 canary venv: $CANARY_VENV"
+    return 0
+  fi
+
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$CANARY_VENV_PARENT"
+  local source_kib available_kib staging
+  source_kib="$(du -sk "$PRODUCTION_VENV" | awk '{print $1}')"
+  available_kib="$(df -Pk "$CANARY_VENV_PARENT" | awk 'NR == 2 {print $4}')"
+  # Keep one GiB headroom for pip's temporary files while the H3 dependency
+  # installation changes the clone.  Do not start a copy likely to exhaust E:.
+  if [ -z "$source_kib" ] || [ -z "$available_kib" ] || [ "$available_kib" -lt $((source_kib + 1048576)) ]; then
+    echo "[ERROR] Insufficient free space for an isolated H3 canary venv (need $((source_kib + 1048576)) KiB; have ${available_kib:-0} KiB)." >&2
+    return 1
+  fi
+  staging="${CANARY_VENV}.new.$$"
+  if [ -e "$staging" ]; then
+    echo "[ERROR] Refusing to reuse a stale canary venv staging path: $staging" >&2
+    return 1
+  fi
+  echo "[INFO] Creating physical H3 canary venv from $PRODUCTION_VENV ..."
+  # --reflink=auto uses copy-on-write when E:'s filesystem supports it; unlike
+  # hard links it is safe for pip to replace or mutate files in the canary.
+  if ! cp -a --reflink=auto "$PRODUCTION_VENV" "$staging"; then
+    rm -rf "$staging"
+    echo "[ERROR] Could not create isolated H3 canary venv." >&2
+    return 1
+  fi
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"
+  {
+    printf 'source_venv=%s\n' "$PRODUCTION_VENV"
+    printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
+    "$PRODUCTION_PYTHON" -m pip freeze
+  } > "$staging/.brm-canary-venv-source.txt"
+  mv "$staging" "$CANARY_VENV"
+  echo "[OK] Isolated H3 canary venv created: $CANARY_VENV"
+}
+
+prepare_isolated_venv
+CANARY_PYTHON="$CANARY_VENV/bin/python"
 # The production checkout is provisioned by root while this preparer runs as
 # the service user.  Make the one, fully-resolved checkout an explicit safe
 # directory rather than weakening Git's ownership protection globally.
@@ -107,7 +164,8 @@ done
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_ENV")" "$CANARY_OUTPUT_DIR"
 install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0600 "$BACKEND_ENV" "$CANARY_ENV"
 set_dotenv_value COMFYUI_ROOT "$CANARY_COMFY_ROOT"
-set_dotenv_value COMFYUI_PYTHON "$COMFY_PYTHON"
+set_dotenv_value COMFYUI_PYTHON "$CANARY_PYTHON"
+set_dotenv_value BRMMEDIA_BACKEND_VENV "$CANARY_VENV"
 set_dotenv_value COMFYUI_PORT 8189
 set_dotenv_value BRM_GRADIO_HOST 127.0.0.1
 set_dotenv_value BRM_GRADIO_PORT 9001
@@ -139,7 +197,8 @@ echo '[OK] Four H3 components are present in the shared E: model store.'
 
 echo "[2/2] Preparing the pinned native-H3 ComfyUI canary checkout..."
 runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$CANARY_COMFY_ROOT" \
-  COMFYUI_PYTHON="$COMFY_PYTHON" BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  COMFYUI_PYTHON="$CANARY_PYTHON" BRMMEDIA_BACKEND_VENV="$CANARY_VENV" \
+  BRMMEDIA_APP_ROOT="$APP_ROOT" \
   "$APP_ROOT/prepare_minimax_h3_comfyui.sh"
 
 echo "[OK] H3 canary prepared. Start it with: sudo $APP_ROOT/start_minimax_h3_canary.sh"
