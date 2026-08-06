@@ -58,6 +58,8 @@ sudo systemctl start baorong-backend
 
 下载器默认使用 HF CLI；若代理与 Python TLS 不兼容，设置 `BRMMEDIA_H3_TRANSPORT=curl`，它会用同一 revision 的 `curl -L -C -` 断点续传四个文件。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。
 
+若需要在 SSH 断开后继续下载，优先执行 `sudo ./start_minimax_h3_download.sh`。它为四个文件创建低优先级临时 systemd 下载单元；用 `sudo ./start_minimax_h3_download.sh --status` 查询每个文件的状态与字节数，失败后直接再次运行同一命令即可续传。
+
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
 确认没有媒体任务运行、H3 权重导入完成后，使用 `sudo ./activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活后先跑文生视频、图生视频各一次 preview，并用 `ffprobe` 确认 MP4 含音频流；再各跑三次 preview、一次 quality，最后才运行完整回归验收。
