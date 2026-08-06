@@ -11,9 +11,19 @@ from comfyui_server import WORKFLOW_DIR, get_view_file, run_workflow, upload_ima
 
 
 def main() -> int:
-    reference = Path("/srv/brmmedia/outputs/smoke_music_ACE-Step_turbo_00001.mp3")
-    if not reference.is_file():
-        raise FileNotFoundError(f"reference audio is missing: {reference}")
+    output_dir = Path("/srv/brmmedia/outputs")
+    candidates = sorted(
+        (path for path in output_dir.glob("smoke_music_*") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not candidates:
+        raise FileNotFoundError(
+            f"no ACE-Step smoke audio is available in {output_dir}; run smoke_music.py first"
+        )
+    # ACE-Step appends output counters, so do not pin IndexTTS2 regression to
+    # one historic `00001` filename.  The media suite intentionally runs the
+    # music smoke first and this selects that newest, reusable reference.
+    reference = candidates[-1]
     uploaded_name = upload_image(reference, overwrite=True)
 
     workflow = json.loads((WORKFLOW_DIR / "TTS-语音克隆.json").read_text(encoding="utf-8"))
@@ -22,7 +32,6 @@ def main() -> int:
         {"text": "这是部署验证语音。", "seed": random.randint(1, 2**31 - 1), "temperature": 0.8}
     )
     outputs = run_workflow(workflow)
-    output_dir = Path("/srv/brmmedia/outputs")
     saved: list[str] = []
     for node_output in outputs.values():
         for audio in node_output.get("audio", []):

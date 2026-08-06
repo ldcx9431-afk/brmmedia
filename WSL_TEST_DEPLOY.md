@@ -132,6 +132,8 @@ sudo -u brm ./accept_qwen_vllm.sh
 sudo ./accept_media_regression.sh
 ```
 
+IndexTTS2 冒烟会自动使用本次 ACE-Step 冒烟产生的最新音频，不能依赖历史输出中某个固定序号的文件名。
+
 H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
 
 ## 内网访问

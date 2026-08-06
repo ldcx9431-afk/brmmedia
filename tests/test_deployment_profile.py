@@ -79,6 +79,12 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('ffprobe', acceptance)
         self.assertIn('http://127.0.0.1:9100/api/v1', acceptance)
 
+    def test_tts_smoke_uses_the_latest_music_smoke_artifact(self):
+        smoke_tts = (REPO_ROOT / "smoke_tts.py").read_text(encoding="utf-8")
+        self.assertIn('glob("smoke_music_*")', smoke_tts)
+        self.assertIn("key=lambda path: path.stat().st_mtime", smoke_tts)
+        self.assertNotIn("smoke_music_ACE-Step_turbo_00001.mp3", smoke_tts)
+
     def test_h3_candidate_refresh_rejects_active_service_paths(self):
         refresh = (REPO_ROOT / "refresh_h3_runtime_release.sh").read_text(encoding="utf-8")
         self.assertIn('/srv/brmmedia/releases/h3-*', refresh)
