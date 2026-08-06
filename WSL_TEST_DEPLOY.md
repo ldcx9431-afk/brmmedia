@@ -56,7 +56,7 @@ sudo systemctl start baorong-backend
 
 预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。如经运维确认主机容量足够但页面文件检查不可读，可一次性显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`；这会在预检日志中留下记录，不能作为常规默认配置。
 
-下载器默认使用 HF CLI；若代理与 Python TLS 不兼容，设置 `BRMMEDIA_H3_TRANSPORT=curl`，它会用同一 revision 的 `curl -L -C -` 断点续传四个文件。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。
+下载器默认使用 HF CLI；若代理与 Python TLS 不兼容，使用 `sudo ./start_minimax_h3_download.sh`。它会为四个固定组件建立独立的 transient systemd 服务，以同一 revision 的 8MiB HTTP Range 分段传输，并在每段落盘前核对 `Content-Range` 与长度；SSH 断开或部分响应关闭不会覆盖已完成数据。用 `sudo ./start_minimax_h3_download.sh --status` 查看精确进度。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。
 
 若需要在 SSH 断开后继续下载，优先执行 `sudo ./start_minimax_h3_download.sh`。它为四个文件创建低优先级临时 systemd 下载单元；用 `sudo ./start_minimax_h3_download.sh --status` 查询每个文件的状态与字节数，失败后直接再次运行同一命令即可续传。
 
