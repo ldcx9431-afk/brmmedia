@@ -75,6 +75,11 @@ install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-healthcheck.timer.exam
   /etc/systemd/system/brmmedia-healthcheck.timer
 install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-logrotate.conf.example" \
   /etc/logrotate.d/brmmedia
+if [ -f "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-h3-stage.service.example" ]; then
+  install -m 0644 "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-h3-stage.service.example" \
+    /etc/systemd/system/brmmedia-h3-stage.service
+  sed -i "s#APP_ROOT#$APP_ROOT#g" /etc/systemd/system/brmmedia-h3-stage.service
+fi
 
 install_service \
   "$ROOT_DIR/llm-backend-deploy/qwen-vllm.service.example" \
@@ -112,6 +117,9 @@ systemctl daemon-reload
 systemctl enable baorong-backend
 systemctl enable --now brmmedia-lan-api
 systemctl enable --now brmmedia-healthcheck.timer
+if [ -f /etc/systemd/system/brmmedia-h3-stage.service ]; then
+  systemctl enable brmmedia-h3-stage.service
+fi
 systemd-analyze verify \
   /etc/systemd/system/baorong-backend.service \
   /etc/systemd/system/brmmedia-lan-api.service \
@@ -147,5 +155,6 @@ Logs:
   sudo journalctl -u baorong-backend -f
   sudo journalctl -u qwen-vllm -f
   sudo systemctl list-timers brmmedia-healthcheck.timer
+  sudo systemctl start brmmedia-h3-stage   # optional resumable H3 staging
   sudo brmmedia-verify-runtime
 EOF

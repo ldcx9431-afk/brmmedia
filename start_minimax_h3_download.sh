@@ -116,7 +116,17 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$MODEL_DIR"
 for name in diffusion text video audio; do
   relative="${components[$name]}"
   file="$MODEL_DIR/$relative"
+  expected="$(expected_size "$name")"
   install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$file")"
+  actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
+  if [ "$actual" -eq "$expected" ]; then
+    echo "[INFO] $name is already complete."
+    continue
+  fi
+  if [ "$actual" -gt "$expected" ]; then
+    echo "[ERROR] $name exceeds its expected byte count ($actual > $expected)." >&2
+    exit 1
+  fi
   if systemctl is-active --quiet "brmmedia-h3-download-$name"; then
     echo "[INFO] $name download is already active."
     continue
