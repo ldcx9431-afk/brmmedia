@@ -60,9 +60,12 @@ if [ ! -f "$BACKEND_DIR/.env" ]; then
     "$BACKEND_DIR/.env"
 fi
 if [ ! -f "$QWEN_DIR/.env" ]; then
-  cp "$QWEN_DIR/.env.example" "$QWEN_DIR/.env"
+  # The supported split profile keeps all ComfyUI media work on GPU0/A5000
+  # and the low-frequency Qwen service on GPU1/A4000.  Never bootstrap the
+  # retired Qwen3.6/GPU0 example into a fresh recovery environment.
+  cp "$QWEN_DIR/.env.qwen35-4b.example" "$QWEN_DIR/.env"
   sed -i \
-    -e "s#^QWEN_LOCAL_MODEL_DIR=.*#QWEN_LOCAL_MODEL_DIR=$RUNTIME_ROOT/models/Qwen3.6-35B-A3B-AWQ-4bit#" \
+    -e "s#^QWEN_LOCAL_MODEL_DIR=.*#QWEN_LOCAL_MODEL_DIR=$RUNTIME_ROOT/models/Qwen3.5-4B-AWQ-4bit#" \
     -e "s#^HF_HOME=.*#HF_HOME=$RUNTIME_ROOT/cache/huggingface#" \
     "$QWEN_DIR/.env"
 fi
