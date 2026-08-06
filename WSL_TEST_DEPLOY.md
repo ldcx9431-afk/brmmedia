@@ -52,8 +52,12 @@ sudo ./start_minimax_h3_download.sh
 # Optional but recommended: wait, import and byte-verify in a background unit.
 sudo systemd-run --unit=brmmedia-h3-import --collect --property=User=brm \
   /usr/bin/env bash "$release/wait_import_minimax_h3_models.sh"
-# After the import unit reports success and no media task is running:
-sudo "$runtime/activate_minimax_h3.sh"
+# After the import unit reports success, drain the media queue.  The candidate
+# unit files must be installed before activation; otherwise activation refuses
+# to accidentally start the old `/srv/brmmedia/app` service path.
+sudo systemctl stop baorong-backend
+sudo "$runtime/install_ubuntu_systemd_services.sh" brm "$runtime"
+sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 ```
 
 预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。如经运维确认主机容量足够但页面文件检查不可读，可一次性显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`；这会在预检日志中留下记录，不能作为常规默认配置。
@@ -68,7 +72,14 @@ sudo "$runtime/activate_minimax_h3.sh"
 
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
-确认没有媒体任务运行、H3 权重导入完成后，使用 `sudo ./activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活后先跑文生视频、图生视频各一次 preview，并用 `ffprobe` 确认 MP4 含音频流；再各跑三次 preview、一次 quality，最后才运行完整回归验收。
+确认没有媒体任务运行、H3 权重导入完成后，先停止 `baorong-backend`，再以候选
+目录运行 `install_ubuntu_systemd_services.sh brm <candidate-root>`，最后使用
+`activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活脚本会拒绝
+systemd 仍指向旧 `/srv/brmmedia/app` 的切换，并会重做 H3 资源预检。若需要沿用已授权
+的页面文件例外，必须在本次命令前显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`。
+激活后先跑文生视频、图生视频各一次 preview；再各跑三次 preview、一次 quality。验收
+脚本用 `ffprobe` 确认每个 MP4 同时含视频和双声道音频流，并核对 API 返回的实际尺寸、
+帧网格与时长，最后才运行完整回归验收。
 
 候选运行目录包含 `accept_minimax_h3_video.sh`：不带参数时执行一组 T2V/I2V preview 冒烟和 MP4 音视频流校验；`sudo -u brm ./accept_minimax_h3_video.sh --full` 会执行每类 3 个 preview 与两个 quality 任务，按照局域网 REST API 获取产物并以 `ffprobe` 验证视频与原生音频流。它只在 H3 已激活后运行，不会改变服务配置。
 
