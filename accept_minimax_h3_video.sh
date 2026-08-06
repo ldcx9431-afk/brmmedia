@@ -154,11 +154,11 @@ preview_runs=1
 if [ "$FULL" -eq 1 ]; then preview_runs=3; fi
 
 for index in $(seq 1 "$preview_runs"); do
-  t2v="$(submit_task text-to-video '{"prompt":"A small paper boat gently moves across a quiet blue pond. Natural ripples and synchronized soft water ambience.","size":"16:9","seconds":4,"profile":"preview"}')"
+  t2v="$(submit_task text-to-video '{"prompt":"A small paper boat gently moves across a quiet blue pond. Natural ripples and synchronized soft water ambience.","size":"1344 × 768","seconds":4,"profile":"preview"}')"
   wait_for_task "$t2v" "T2V preview #$index"
   verify_native_audio_mp4 "$t2v" "T2V preview #$index" preview 4
 
-  i2v="$(submit_task image-to-video "{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"The image comes alive with a subtle camera push-in and synchronized gentle ambient sound.\",\"size\":\"16:9\",\"seconds\":4,\"profile\":\"preview\"}")"
+  i2v="$(submit_task image-to-video "{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"The image comes alive with a subtle camera push-in and synchronized gentle ambient sound.\",\"size\":\"1344 × 768\",\"seconds\":4,\"profile\":\"preview\"}")"
   wait_for_task "$i2v" "I2V preview #$index"
   verify_native_audio_mp4 "$i2v" "I2V preview #$index" preview 4
 done
@@ -166,9 +166,9 @@ done
 if [ "$FULL" -eq 1 ]; then
   for workflow in text-to-video image-to-video; do
     if [ "$workflow" = image-to-video ]; then
-      payload="{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A gentle cinematic movement with synchronized natural ambience.\",\"size\":\"16:9\",\"seconds\":6,\"profile\":\"quality\"}"
+      payload="{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A gentle cinematic movement with synchronized natural ambience.\",\"size\":\"1344 × 768\",\"seconds\":6,\"profile\":\"quality\"}"
     else
-      payload='{"prompt":"A calm cinematic landscape with synchronized natural ambience.","size":"16:9","seconds":6,"profile":"quality"}'
+      payload='{"prompt":"A calm cinematic landscape with synchronized natural ambience.","size":"1344 × 768","seconds":6,"profile":"quality"}'
     fi
     task_id="$(submit_task "$workflow" "$payload")"
     wait_for_task "$task_id" "$workflow quality"
