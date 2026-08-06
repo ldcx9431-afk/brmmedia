@@ -110,6 +110,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('"$(basename \"$file\").chunk.*" -delete', downloader)
         self.assertIn("cleanup_chunks", downloader)
         self.assertIn("trap cleanup_chunks EXIT", downloader)
+        self.assertIn("for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY", downloader)
+        self.assertIn('"${proxy_env_args[@]}"', downloader)
 
     def test_parallel_h3_worker_appends_verified_ranges_and_exits_cleanly(self):
         """Exercise the Bash EXIT trap with a two-range, checksum-valid batch."""
@@ -186,9 +188,6 @@ class DeploymentProfileTests(unittest.TestCase):
             target = temp / "models" / "MiniMax-H3" / "diffusion_models" / "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
             self.assertEqual(target.read_bytes(), payload)
             self.assertEqual(list(target.parent.glob("*.chunk.*")), [])
-        self.assertIn("for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY", downloader)
-        self.assertIn('"${proxy_env_args[@]}"', downloader)
-
     def test_h3_canary_stays_off_the_production_lan_ports(self):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
         starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
