@@ -78,7 +78,7 @@ sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 
 受控下载器使用 `curl` 对同一 Hugging Face revision 做可续传 HTTP Range 传输；运行 `sudo ./start_minimax_h3_download.sh` 会为四个固定组件建立独立的 transient systemd 服务。每段落盘前都会核对 `Content-Range` 与长度；SSH 断开或部分响应关闭不会覆盖已完成数据。默认段为 1MiB、每个组件串行下载，用 `sudo ./start_minimax_h3_download.sh --status` 查看精确进度。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。默认源为 `https://huggingface.co`；如已对同一固定 revision 做过 Range 与 SHA-256 验证，可通过 systemd 环境变量 `BRMMEDIA_H3_BASE_URL` 临时指定镜像或代理源，下载完成前不得改变 revision、文件清单或校验值。
 
-经无写入 Range 吞吐测试后，低带宽代理可临时设置 `BRMMEDIA_H3_PARALLEL_RANGES=2`，使每个未完成组件按批并发取两段、再严格按偏移顺序验证并追加。不要在多个组件同时下载时把此值提高到 `2` 以上（全局最多四条 Range 连接）；默认值 `1` 更适合未验证的网络。所有并发段仍写入临时 `.chunk.*` 文件，任一段不完整时整批不会追加，随后自动缩小段大小重试。
+经无写入 Range 吞吐测试后，低带宽代理可临时设置 `BRMMEDIA_H3_PARALLEL_RANGES=2`，使每个未完成组件按批并发取两段、再严格按偏移顺序验证并追加。只有在同一网络已通过 8 路、每路 8MiB 的完整 `206` Range 测试后，才可提高到 `4`（两个未完成组件合计最多 8 条 Range 连接）；不得超过脚本硬上限 `8` 或跳过该吞吐测试。默认值 `1` 更适合未验证的网络。所有并发段仍写入临时 `.chunk.*` 文件，任一段不完整时整批不会追加，随后自动缩小段大小重试。
 
 若已验证代理可稳定返回更大且完整的范围响应，可在 `brmmedia-h3-stage.service` 的 systemd drop-in 中显式设置 `BRMMEDIA_H3_CHUNK_BYTES`（例如 `8388608`）；该值会传给每个 transient worker。不要在没有范围响应验证时提高默认 1MiB 值。
 
