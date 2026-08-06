@@ -79,11 +79,17 @@ runuser -u "$SERVICE_USER" -- git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CA
 # A new ComfyUI clone normally has no model directory.  Refuse to replace a
 # populated non-link directory so this script cannot discard operator data.
 if [ -e "$CANARY_COMFY_ROOT/models" ] && [ ! -L "$CANARY_COMFY_ROOT/models" ]; then
-  if [ -n "$(find "$CANARY_COMFY_ROOT/models" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
-    echo "[ERROR] Canary model directory is populated and not a shared-model symlink: $CANARY_COMFY_ROOT/models" >&2
+  # A pristine ComfyUI checkout includes Git-tracked placeholder files under
+  # models/.  They are safe to replace with the shared E: model store; any
+  # untracked entry would be operator data, so keep refusing in that case.
+  untracked_models="$(git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" \
+    ls-files --others --exclude-standard -- models)"
+  if [ -n "$untracked_models" ]; then
+    echo "[ERROR] Canary model directory contains untracked data and is not a shared-model symlink: $CANARY_COMFY_ROOT/models" >&2
+    printf '%s\n' "$untracked_models" >&2
     exit 1
   fi
-  rmdir "$CANARY_COMFY_ROOT/models"
+  rm -rf "$CANARY_COMFY_ROOT/models"
 fi
 if [ ! -e "$CANARY_COMFY_ROOT/models" ]; then
   ln -s "$PRODUCTION_COMFY_ROOT/models" "$CANARY_COMFY_ROOT/models"
