@@ -10,8 +10,10 @@ REVISION="${BRMMEDIA_H3_REVISION:-0bd506d2e895983a9663037febda27aa3948cf48}"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 # The corporate proxy has been observed to close long Xet transfers early.
 # Keep each request small enough to finish, then append only a header-checked
-# byte range.  Eight MiB also provides a practical resume granularity.
-CHUNK_BYTES="${BRMMEDIA_H3_CHUNK_BYTES:-8388608}"
+# byte range.  One MiB is deliberately conservative for the observed proxy:
+# 8MiB Xet responses were frequently terminated early, while 1MiB ranges
+# complete reliably and never require discarding a partial response.
+CHUNK_BYTES="${BRMMEDIA_H3_CHUNK_BYTES:-1048576}"
 
 declare -A components=(
   [diffusion]='diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
