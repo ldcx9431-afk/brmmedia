@@ -1766,8 +1766,13 @@ def build_ui():
                         "✕ 关闭", variant="secondary", elem_id="global-settings-close",
                     )
             with gr.Row():
+                # Gradio 6 rejects a degenerate Slider range.  In H3 mode the
+                # policy deliberately caps media concurrency at one, so keep
+                # the control visibly disabled while giving the component a
+                # valid (unused) upper bound.
+                concurrency_slider_max = max(2, MAX_MEDIA_QUEUE_CONCURRENCY)
                 setting_concurrency = gr.Slider(
-                    1, MAX_MEDIA_QUEUE_CONCURRENCY, value=QUEUE_CONCURRENCY,
+                    1, concurrency_slider_max, value=QUEUE_CONCURRENCY,
                     step=1, precision=0, interactive=MAX_MEDIA_QUEUE_CONCURRENCY > 1,
                     label="任务并发数",
                 )
