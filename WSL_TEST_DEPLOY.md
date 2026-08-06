@@ -45,13 +45,15 @@ ComfyUI 的基础模型已从 `D:\\model` 导入。启动完整推理栈前，�
 切换 MiniMax H3 前必须执行以下受控步骤。下载、导入和服务切换是独立阶段：下载权重不改变当前 LTX 服务；只有 H3 预检与实测通过后才设置 `BRMMEDIA_VIDEO_ENGINE=h3` 并重启后端。
 
 ```bash
-cd /srv/brmmedia/app
-./download_minimax_h3_models.sh
-./import_comfy_models.sh
-./verify_comfy_models.sh
-sudo systemctl stop baorong-backend
-./prepare_minimax_h3_comfyui.sh
-sudo systemctl start baorong-backend
+release=/mnt/d/brmmedia/releases/h3-<commit>
+runtime=/srv/brmmedia/releases/h3-<commit>
+cd "$release"
+sudo ./start_minimax_h3_download.sh
+# Optional but recommended: wait, import and byte-verify in a background unit.
+sudo systemd-run --unit=brmmedia-h3-import --collect --property=User=brm \
+  /usr/bin/env bash "$release/wait_import_minimax_h3_models.sh"
+# After the import unit reports success and no media task is running:
+sudo "$runtime/activate_minimax_h3.sh"
 ```
 
 预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。如经运维确认主机容量足够但页面文件检查不可读，可一次性显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`；这会在预检日志中留下记录，不能作为常规默认配置。
@@ -59,6 +61,8 @@ sudo systemctl start baorong-backend
 下载器默认使用 HF CLI；若代理与 Python TLS 不兼容，使用 `sudo ./start_minimax_h3_download.sh`。它会为四个固定组件建立独立的 transient systemd 服务，以同一 revision 的 1MiB HTTP Range 分段传输，并在每段落盘前核对 `Content-Range` 与长度；SSH 断开或部分响应关闭不会覆盖已完成数据。用 `sudo ./start_minimax_h3_download.sh --status` 查看精确进度。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。
 
 若需要在 SSH 断开后继续下载，优先执行 `sudo ./start_minimax_h3_download.sh`。它为四个文件创建低优先级临时 systemd 下载单元；用 `sudo ./start_minimax_h3_download.sh --status` 查询每个文件的状态与字节数，失败后直接再次运行同一命令即可续传。
+
+`wait_import_minimax_h3_models.sh` 只会等待四个精确字节大小、导入到 E: 的 ComfyUI 模型目录并执行内容校验；它**不会**改 `BRMMEDIA_VIDEO_ENGINE`、升级 ComfyUI 或重启服务。因此它可以在当前 LTX 生产服务继续运行时安全执行。
 
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
