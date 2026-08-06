@@ -10,7 +10,11 @@ CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 BACKEND_UNIT="${BRMMEDIA_H3_CANARY_BACKEND_UNIT:-baorong-backend-h3-canary}"
 API_UNIT="${BRMMEDIA_H3_CANARY_API_UNIT:-brmmedia-lan-api-h3-canary}"
+HEALTH_TIMER="${BRMMEDIA_HEALTHCHECK_TIMER:-brmmedia-healthcheck.timer}"
+HEALTH_SERVICE="${BRMMEDIA_HEALTHCHECK_SERVICE:-brmmedia-healthcheck.service}"
 TIMEOUT_SECONDS="${BRMMEDIA_H3_CANARY_STARTUP_TIMEOUT_SECONDS:-420}"
+CANARY_STATE_DIR="$APP_ROOT/runtime-locks"
+HEALTH_TIMER_STATE="$CANARY_STATE_DIR/h3-canary-healthcheck-timer-state"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[ERROR] Run with sudo: sudo $0" >&2
@@ -36,6 +40,27 @@ if ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] BRMMEDIA_H3_CANARY_STARTUP_TIMEOUT_SECONDS must be a positive integer." >&2
   exit 2
 fi
+
+# While a private Canary owns the shared A5000, the normal backend is
+# intentionally stopped.  Pause the production health-check timer or it will
+# restart that backend after three expected failures and leave two ComfyUI
+# processes contending for GPU0.  The paired stop script restores only the
+# prior runtime state; the production timer is never disabled permanently.
+mkdir -p "$CANARY_STATE_DIR"
+timer_was_active=0
+if systemctl is-active --quiet "$HEALTH_TIMER"; then
+  timer_was_active=1
+  systemctl stop "$HEALTH_TIMER"
+fi
+systemctl stop "$HEALTH_SERVICE" 2>/dev/null || true
+printf '%s\n' "$timer_was_active" > "$HEALTH_TIMER_STATE"
+
+restore_health_timer_on_error() {
+  if [ "$timer_was_active" -eq 1 ]; then
+    systemctl start "$HEALTH_TIMER" || true
+  fi
+  rm -f "$HEALTH_TIMER_STATE"
+}
 
 dotenv_value() {
   sed -n "s/^$1=//p" "$CANARY_ENV" | tail -n1 | sed -e 's/^"//' -e 's/"$//'
@@ -103,6 +128,7 @@ if ! runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
   # already stopped by the explicit canary procedure and is never altered.
   echo "[ERROR] H3 canary compatibility gate failed; stopping isolated canary units." >&2
   systemctl stop "$API_UNIT" "$BACKEND_UNIT" || true
+  restore_health_timer_on_error
   exit 1
 fi
 

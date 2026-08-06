@@ -224,6 +224,14 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("--port 9101", starter)
         self.assertIn("Nginx is never repointed to the canary", guide)
 
+    def test_h3_canary_pauses_production_healthcheck_until_stop(self):
+        starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        stopper = (REPO_ROOT / "stop_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        self.assertIn('HEALTH_TIMER="${BRMMEDIA_HEALTHCHECK_TIMER:-brmmedia-healthcheck.timer}"', starter)
+        self.assertIn('systemctl stop "$HEALTH_TIMER"', starter)
+        self.assertIn('h3-canary-healthcheck-timer-state', starter)
+        self.assertIn('systemctl start "$HEALTH_TIMER"', stopper)
+
     def test_h3_canary_uses_a_physical_python_venv(self):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
         starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
