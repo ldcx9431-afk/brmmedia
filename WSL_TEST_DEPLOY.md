@@ -64,6 +64,8 @@ sudo "$runtime/activate_minimax_h3.sh"
 
 `wait_import_minimax_h3_models.sh` 只会等待四个精确字节大小、导入到 E: 的 ComfyUI 模型目录并执行内容校验；它**不会**改 `BRMMEDIA_VIDEO_ENGINE`、升级 ComfyUI 或重启服务。因此它可以在当前 LTX 生产服务继续运行时安全执行。
 
+若要在 WSL 或宿主机重启后自动恢复此准备过程，安装服务后启用 `sudo systemctl enable --now brmmedia-h3-stage`。它以 root 身份重新创建下载单元，再以 `brm` 身份等待并导入；所有权重已完成时会直接跳过下载。该服务只准备模型，不会自动激活 H3。
+
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
 确认没有媒体任务运行、H3 权重导入完成后，使用 `sudo ./activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活后先跑文生视频、图生视频各一次 preview，并用 `ffprobe` 确认 MP4 含音频流；再各跑三次 preview、一次 quality，最后才运行完整回归验收。
