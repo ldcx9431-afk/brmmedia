@@ -82,6 +82,8 @@ sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 
 每个 worker 对同一范围只做一次短重试（可用 `BRMMEDIA_H3_CURL_RETRIES` / `BRMMEDIA_H3_CURL_RETRY_DELAY` 调整），大范围响应仍被拒绝时会自动把该组件后续分段减半，最低至 `BRMMEDIA_H3_MIN_CHUNK_BYTES`（默认 1MiB）；已校验前缀不会被重新下载或覆盖。
 
+下载段始终先写入同目录的临时 `.chunk.*` 文件；只有范围与字节数通过检查才会 append 到模型文件。worker 重启时会删除该**组件**遗留的临时段（不会删除已校验前缀），并在收到停止信号时清理当前临时段，避免反复调整网络时占用 D: 空间。
+
 若需要在 SSH 断开后继续下载，优先执行 `sudo ./start_minimax_h3_download.sh`。它为四个文件创建低优先级临时 systemd 下载单元；用 `sudo ./start_minimax_h3_download.sh --status` 查询每个文件的状态与字节数，失败后直接再次运行同一命令即可续传。
 
 `wait_import_minimax_h3_models.sh` 只会等待四个精确字节大小、导入到 E: 的 ComfyUI 模型目录并执行内容校验；它**不会**改 `BRMMEDIA_VIDEO_ENGINE`、升级 ComfyUI 或重启服务。因此它可以在当前 LTX 生产服务继续运行时安全执行。

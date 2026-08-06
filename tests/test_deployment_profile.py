@@ -93,6 +93,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("BRMMEDIA_H3_CURL_RETRIES", downloader)
         self.assertIn('"$CURL_RETRIES"', downloader)
         self.assertIn("will retry with", downloader)
+        self.assertIn('"$(basename \"$file\").chunk.*" -delete', downloader)
+        self.assertIn("trap 'rm -f", downloader)
 
     def test_h3_canary_stays_off_the_production_lan_ports(self):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")

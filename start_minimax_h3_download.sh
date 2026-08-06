@@ -70,6 +70,17 @@ download_component() {
     effective_chunk="$MIN_CHUNK_BYTES"
   fi
 
+  # A `.chunk.*` file is never appended until the complete HTTP range and its
+  # Content-Range header have been checked.  Remove leftovers from a killed
+  # transient worker before resuming; this preserves the verified destination
+  # prefix while preventing D: from accumulating abandoned temporary ranges.
+  find "$(dirname "$file")" -maxdepth 1 -type f -name "$(basename "$file").chunk.*" -delete
+  tmp=""
+  headers=""
+  trap 'rm -f "${tmp:-}" "${headers:-}"' EXIT
+  trap 'rm -f "${tmp:-}" "${headers:-}"; exit 130' INT
+  trap 'rm -f "${tmp:-}" "${headers:-}"; exit 143' TERM
+
   # Xet-backed Hugging Face redirects can occasionally close a long ranged
   # response early (curl 18).  Download immutable, bounded ranges and append
   # only after both length and Content-Range prove it is the requested segment.
