@@ -12,6 +12,7 @@ import ast
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -203,6 +204,23 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn('format=format_name', text)
         self.assertIn('did not return an MP4 filename', text)
         self.assertNotIn('json.load(sys.stdin)["output_files"][0]', text)
+
+    def test_artifact_download_allows_safe_h3_filename_spaces(self) -> None:
+        """H3's user-visible output names contain ordinary spaces."""
+        filename = "任务_MiniMax H3 文生视频_demo.mp4"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir).resolve()
+            artifact = output_dir / filename
+            artifact.write_bytes(b"fixture")
+            previous_output = self.api.OUTPUT_DIR
+            previous_status = self.api._task_status
+            self.addCleanup(setattr, self.api, "OUTPUT_DIR", previous_output)
+            self.addCleanup(setattr, self.api, "_task_status", previous_status)
+            self.api.OUTPUT_DIR = output_dir
+            self.api._task_status = lambda _task_id: {
+                "state": "completed", "output_files": [filename]
+            }
+            self.assertEqual(self.api._safe_artifact("a" * 32, filename), artifact)
 
 
 if __name__ == "__main__":

@@ -439,7 +439,12 @@ def _artifact_url(task_id: str, filename: str) -> str:
 
 
 def _safe_artifact(task_id: str, filename: str) -> Path:
-    if not re.fullmatch(r"[a-zA-Z0-9_\-().\u4e00-\u9fff]+\.[a-zA-Z0-9]+", filename or ""):
+    # Generated task names intentionally remain human-readable.  In
+    # particular, MiniMax H3 output names include spaces (for example
+    # ``任务_MiniMax H3 文生视频_…mp4``).  A literal space is safe in a
+    # filename, while path separators and all other special characters remain
+    # forbidden by this allow-list and the resolved-path containment check.
+    if not re.fullmatch(r"[a-zA-Z0-9 _\-().\u4e00-\u9fff]+\.[a-zA-Z0-9]+", filename or ""):
         _fail(404, "artifact not found")
     status = _task_status(task_id)
     if status.get("state") != "completed":
