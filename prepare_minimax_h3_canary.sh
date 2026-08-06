@@ -118,7 +118,7 @@ set_dotenv_value BRMMEDIA_H3_CANARY_ROOT "$CANARY_COMFY_ROOT"
 echo "[1/2] Verifying imported H3 components through the shared E: model store..."
 runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
   BRMMEDIA_COMFYUI_MODEL_ROOT="$CANARY_COMFY_ROOT/models" \
-  /usr/local/sbin/brmmedia-verify-comfy-models
+  "$APP_ROOT/verify_comfy_models.sh"
 
 echo "[2/2] Preparing the pinned native-H3 ComfyUI canary checkout..."
 runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$CANARY_COMFY_ROOT" \
