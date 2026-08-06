@@ -47,3 +47,10 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('QWEN_RESPONSE="$response"', acceptance)
         self.assertIn('"runs": int(runs)', acceptance)
         self.assertNotIn("BRM_PASSWORD", acceptance)
+
+    def test_h3_candidate_refresh_rejects_active_service_paths(self):
+        refresh = (REPO_ROOT / "refresh_h3_runtime_release.sh").read_text(encoding="utf-8")
+        self.assertIn('/srv/brmmedia/releases/h3-*', refresh)
+        self.assertIn('do not refresh an active service path', refresh)
+        self.assertIn("--exclude 'ubuntu-backend-deploy/.env'", refresh)
+        self.assertIn("--exclude 'ubuntu-backend-deploy/outputs'", refresh)

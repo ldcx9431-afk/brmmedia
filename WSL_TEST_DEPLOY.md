@@ -53,8 +53,10 @@ sudo ./start_minimax_h3_download.sh
 sudo systemd-run --unit=brmmedia-h3-import --collect --property=User=brm \
   /usr/bin/env bash "$release/wait_import_minimax_h3_models.sh"
 # After the import unit reports success, drain the media queue.  The candidate
-# unit files must be installed before activation; otherwise activation refuses
-# to accidentally start the old `/srv/brmmedia/app` service path.
+# code is refreshed from the reviewed D: release while no service points to it.
+sudo "$release/refresh_h3_runtime_release.sh" "$release" "$runtime"
+# The candidate unit files must be installed before activation; otherwise
+# activation refuses to accidentally start the old `/srv/brmmedia/app` path.
 sudo systemctl stop baorong-backend
 sudo "$runtime/install_ubuntu_systemd_services.sh" brm "$runtime"
 sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
