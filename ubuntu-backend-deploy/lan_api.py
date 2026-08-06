@@ -411,7 +411,15 @@ def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
                 elif line.startswith("data: "):
                     data = line[6:]
                     if event == "complete":
-                        return json.loads(data)
+                        payload = json.loads(data)
+                        # Gradio 6 serializes API callback outputs as its
+                        # component-output list, including the common
+                        # single-output case used by BRMMedia submit/status
+                        # endpoints.  Preserve multi-output payloads while
+                        # restoring the endpoint's documented object result.
+                        if isinstance(payload, list) and len(payload) == 1:
+                            return payload[0]
+                        return payload
                     if event == "error":
                         raise RuntimeError(f"Gradio handler error: {data}")
     except (ValueError, requests.RequestException) as exc:
