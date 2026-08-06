@@ -37,12 +37,16 @@ COMFY_PORT="$(dotenv_value COMFYUI_PORT)"
 COMFY_PORT="${COMFY_PORT:-8188}"
 GRADIO_PORT="$(dotenv_value BRM_GRADIO_PORT)"
 GRADIO_PORT="${GRADIO_PORT:-9000}"
+QWEN_ENV="$APP_ROOT/llm-backend-deploy/.env"
+qwen_port="$(sed -n 's/^QWEN_PORT=//p' "$QWEN_ENV" 2>/dev/null | tail -n1 | sed -e 's/^"//' -e 's/"$//')"
+QWEN_PORT="${qwen_port:-8000}"
 HEALTH_TIMEOUT_SECONDS="${BRMMEDIA_H3_STARTUP_HEALTH_TIMEOUT_SECONDS:-420}"
 if [ ! -d "$COMFY_ROOT" ] || [ ! -x "$COMFY_PYTHON" ]; then
   echo "[ERROR] Candidate ComfyUI runtime is invalid (root=$COMFY_ROOT, python=$COMFY_PYTHON)." >&2
   exit 1
 fi
 if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*$ ]] || \
+   ! [[ "$QWEN_PORT" =~ ^[1-9][0-9]*$ ]] || \
    ! [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] Candidate health-check ports/timeout are invalid." >&2
   exit 1
@@ -79,6 +83,23 @@ restore_after_failed_activation() {
   local rollback_status=0
   if [ "$engine_updated" -eq 1 ]; then
     echo "[WARN] H3 activation failed; restoring candidate video engine to $previous_engine." >&2
+    # `systemctl start` can succeed while one of the health endpoints is not
+    # ready.  The ComfyUI rollback deliberately refuses to run with a media
+    # backend still active, so stop that half-started process before touching
+    # its checkout.  Leave it stopped afterwards: a human/operator can then
+    # inspect the original failure and explicitly start the restored LTX
+    # runtime instead of silently masking a bad H3 activation.
+    if systemctl is-active --quiet baorong-backend; then
+      echo "[WARN] Stopping partially started H3 backend before rollback." >&2
+      if ! systemctl stop baorong-backend; then
+        rollback_status=1
+        echo "[WARN] Could not stop baorong-backend; refusing unsafe ComfyUI rollback." >&2
+      fi
+    fi
+    if systemctl is-active --quiet baorong-backend; then
+      rollback_status=1
+      echo "[WARN] baorong-backend is still active; ComfyUI rollback was skipped." >&2
+    fi
     if grep -q '^BRMMEDIA_VIDEO_ENGINE=' "$BACKEND_ENV"; then
       sed -i "s/^BRMMEDIA_VIDEO_ENGINE=.*/BRMMEDIA_VIDEO_ENGINE=$previous_engine/" "$BACKEND_ENV"
     else
@@ -86,7 +107,7 @@ restore_after_failed_activation() {
     fi
     # prepare_minimax_h3_comfyui.sh has already completed at this point, so
     # invoke its durable snapshot rollback while the failed backend is down.
-    if ! runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" \
+    if [ "$rollback_status" -eq 0 ] && ! runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" \
       COMFYUI_PYTHON="$COMFY_PYTHON" BRMMEDIA_APP_ROOT="$APP_ROOT" \
       "$APP_ROOT/rollback_minimax_h3_comfyui.sh"; then
       rollback_status=1
@@ -100,15 +121,36 @@ trap restore_after_failed_activation ERR
 echo "[preflight] Verifying GPU, memory, page-file, and disk prerequisites..."
 BRMMEDIA_APP_ROOT="$APP_ROOT" "$APP_ROOT/check_h3_preflight.sh"
 
-echo "[1/4] Verifying all H3 components were imported into the E: WSL model store..."
+echo "[1/5] Starting the dedicated A4000 Qwen service and checking /v1/models..."
+# The unit may have been repointed to this candidate release by the service
+# installer while an old process was still running.  Restart deliberately so
+# the health gate proves the active process, not merely the unit file, uses
+# the current A4000 profile.
+systemctl enable qwen-vllm
+systemctl restart qwen-vllm
+deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+while :; do
+  qwen_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 \
+    "http://127.0.0.1:$QWEN_PORT/v1/models" || true)"
+  if [ "$qwen_code" = "200" ]; then
+    break
+  fi
+  if [ "$SECONDS" -ge "$deadline" ] || ! systemctl is-active --quiet qwen-vllm; then
+    echo "[ERROR] A4000 Qwen service did not become healthy (/v1/models=$qwen_code)." >&2
+    exit 1
+  fi
+  sleep 3
+done
+
+echo "[2/5] Verifying all H3 components were imported into the E: WSL model store..."
 runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
   /usr/local/sbin/brmmedia-verify-comfy-models
 
-echo "[2/4] Upgrading ComfyUI to the pinned native-H3 revision..."
+echo "[3/5] Upgrading ComfyUI to the pinned native-H3 revision..."
 runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" COMFYUI_PYTHON="$COMFY_PYTHON" BRMMEDIA_APP_ROOT="$APP_ROOT" \
   "$APP_ROOT/prepare_minimax_h3_comfyui.sh"
 
-echo "[3/4] Enabling H3 in the backend environment..."
+echo "[4/5] Enabling H3 in the backend environment..."
 if grep -q '^BRMMEDIA_VIDEO_ENGINE=' "$BACKEND_ENV"; then
   sed -i 's/^BRMMEDIA_VIDEO_ENGINE=.*/BRMMEDIA_VIDEO_ENGINE=h3/' "$BACKEND_ENV"
 else
@@ -116,7 +158,7 @@ else
 fi
 engine_updated=1
 
-echo "[4/4] Starting backend; run H3 preview T2V and I2V smoke tests next..."
+echo "[5/5] Starting backend; run H3 preview T2V and I2V smoke tests next..."
 systemctl start baorong-backend
 systemctl is-active --quiet baorong-backend
 deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
