@@ -19,6 +19,11 @@ SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 # complete reliably and never require discarding a partial response.
 CHUNK_BYTES="${BRMMEDIA_H3_CHUNK_BYTES:-1048576}"
 MIN_CHUNK_BYTES="${BRMMEDIA_H3_MIN_CHUNK_BYTES:-1048576}"
+# Long blind curl retries keep requesting the same overlarge range through a
+# proxy that has already truncated it.  One short retry is enough for a
+# transient reset; afterwards the validated-range loop shrinks that worker.
+CURL_RETRIES="${BRMMEDIA_H3_CURL_RETRIES:-1}"
+CURL_RETRY_DELAY="${BRMMEDIA_H3_CURL_RETRY_DELAY:-1}"
 
 declare -A components=(
   [diffusion]='diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
@@ -55,8 +60,9 @@ download_component() {
   expected="$(expected_size "$name")"
   expected_hash="$(expected_sha256 "$name")"
   install -d "$(dirname "$file")"
-  if ! [[ "$CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || ! [[ "$MIN_CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]]; then
-    echo "[ERROR] H3 chunk sizes must be positive integers." >&2
+  if ! [[ "$CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || ! [[ "$MIN_CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || \
+     ! [[ "$CURL_RETRIES" =~ ^[0-9]+$ ]] || ! [[ "$CURL_RETRY_DELAY" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] H3 chunk and curl retry settings must be non-negative integers (chunks > 0)." >&2
     return 2
   fi
   effective_chunk="$CHUNK_BYTES"
@@ -94,7 +100,7 @@ download_component() {
     echo "[INFO] $name attempt=$attempt range=$actual-$end/$expected"
     curl --silent --show-error --fail --location --range "$actual-$end" \
       --dump-header "$headers" \
-      --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      --retry "$CURL_RETRIES" --retry-delay "$CURL_RETRY_DELAY" --retry-all-errors --connect-timeout 30 \
       --speed-time 90 --speed-limit 1024 --output "$tmp" \
       "$H3_BASE_URL/$REPO/resolve/$REVISION/$relative" || true
     received="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
@@ -174,6 +180,8 @@ for name in diffusion text video audio; do
       --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
       --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
       --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
+      --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
+      --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
       --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
@@ -190,6 +198,8 @@ for name in diffusion text video audio; do
     --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
     --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
     --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
+    --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
+    --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
     --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
