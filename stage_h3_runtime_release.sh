@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stage a clean Git release on the E: WSL filesystem without touching the
 # existing working runtime.  The old app remains an immediate service rollback
-# target, while outputs/config/venvs are shared deliberately.
+# target, while outputs/venvs are shared deliberately. Runtime .env files are
+# copied so an H3 activation cannot mutate the recovery configuration.
 set -euo pipefail
 
 SOURCE_RELEASE="${1:?usage: sudo $0 <clean-source-release> [runtime-release-root]}"
@@ -38,12 +39,21 @@ for relative in "$BACKEND_REL/.venv" "llm-backend-deploy/.venv"; do
     ln -s "$source_path" "$target_path"
   fi
 done
-for relative in "$BACKEND_REL/.env" "llm-backend-deploy/.env" "$BACKEND_REL/outputs" "$BACKEND_REL/yzy_config.json"; do
+for relative in "$BACKEND_REL/outputs" "$BACKEND_REL/yzy_config.json"; do
   source_path="$ACTIVE_ROOT/$relative"
   target_path="$TARGET_ROOT/$relative"
   if [ -e "$source_path" ]; then
     rm -rf "$target_path"
     ln -s "$source_path" "$target_path"
+  fi
+done
+for relative in "$BACKEND_REL/.env" "llm-backend-deploy/.env"; do
+  source_path="$ACTIVE_ROOT/$relative"
+  target_path="$TARGET_ROOT/$relative"
+  if [ -f "$source_path" ]; then
+    # Copy, do not link: release-specific engine/GPU settings must remain
+    # independently reversible even though output history is shared.
+    install -m 0600 "$source_path" "$target_path"
   fi
 done
 
