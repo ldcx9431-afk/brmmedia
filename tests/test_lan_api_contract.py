@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -167,6 +168,11 @@ class LanApiContractTests(unittest.TestCase):
         self.assertEqual(explicit_preview[-2:], [4, "preview"])
 
     def test_h3_capabilities_publish_structured_form_schema(self) -> None:
+        previous = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
+        self.addCleanup(
+            os.environ.__setitem__, "BRMMEDIA_VIDEO_ENGINE", previous
+        ) if previous is not None else self.addCleanup(os.environ.pop, "BRMMEDIA_VIDEO_ENGINE", None)
+        os.environ["BRMMEDIA_VIDEO_ENGINE"] = "h3"
         capabilities = self.api.capabilities()
         text_schema = capabilities["workflows"]["text-to-video"]["options"]["params"]
         image_schema = capabilities["workflows"]["image-to-video"]["options"]["params"]
@@ -176,11 +182,26 @@ class LanApiContractTests(unittest.TestCase):
         self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")
+        self.assertEqual(capabilities["video_engine"], {"active": "h3", "h3_available": True})
+
+    def test_ltx_capabilities_do_not_claim_h3_before_activation(self) -> None:
+        previous = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
+        self.addCleanup(
+            os.environ.__setitem__, "BRMMEDIA_VIDEO_ENGINE", previous
+        ) if previous is not None else self.addCleanup(os.environ.pop, "BRMMEDIA_VIDEO_ENGINE", None)
+        os.environ["BRMMEDIA_VIDEO_ENGINE"] = "ltx23"
+        capabilities = self.api.capabilities()
+        text_video = capabilities["workflows"]["text-to-video"]
+        self.assertEqual(capabilities["video_engine"], {"active": "ltx23", "h3_available": False})
+        self.assertEqual(text_video["options"]["engine"], "LTX2.3")
+        self.assertNotIn("params", text_video["options"])
 
     def test_h3_acceptance_follows_task_artifact_contract(self) -> None:
         text = H3_ACCEPTANCE.read_text(encoding="utf-8")
         self.assertIn('payload.get("artifacts")', text)
         self.assertIn('first["download_url"]', text)
+        self.assertIn('format=format_name', text)
+        self.assertIn('did not return an MP4 filename', text)
         self.assertNotIn('json.load(sys.stdin)["output_files"][0]', text)
 
 

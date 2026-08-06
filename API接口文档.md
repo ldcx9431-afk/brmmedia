@@ -184,8 +184,8 @@ H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其
   },
   "artifacts": [
     {
-      "name": "任务_文生图_20260805-090000_1234.png",
-      "download_url": "/api/v1/tasks/0123456789abcdef0123456789abcdef/artifacts/任务_文生图_20260805-090000_1234.png"
+      "name": "任务_MiniMaxH3文生视频_20260805-090000_1234.mp4",
+      "download_url": "/api/v1/tasks/0123456789abcdef0123456789abcdef/artifacts/任务_MiniMaxH3文生视频_20260805-090000_1234.mp4"
     }
   ]
 }
@@ -249,6 +249,6 @@ python3 call_gradio_api.py submit_workflow_1 \
 ## 8. 运维与变更约定
 
 - `brmmedia-lan-api` 是独立 systemd 服务，监听 `127.0.0.1:9100`；Nginx `/api/` 代理是唯一对外入口。
-- 部署、服务器恢复或更新后，执行 `sudo brmmedia-verify-runtime`；只有 `RESULT=PASS` 才算验收通过。
+- 部署、服务器恢复或更新后，先执行 `sudo brmmedia-verify-runtime`；`RESULT=PASS` 表示服务与接口结构就绪。H3 上线还必须完成 Qwen 连续 10 次回环对话、`accept_minimax_h3_video.sh --full` 的本地 MP4（视频 + 双声道音频）实测，以及其余媒体工作流回归后，才算生产验收通过。
 - 修改任何 workflow 参数、上传限制或 REST 响应时，必须同步更新 `capabilities`、本文件、私有 `DEPLOYMENT.md` 与运行时验收。
 - 所有自动化调用都应设置超时、轮询退避和重试上限；不要用并发堆积替代队列调度。视频、数字人等高显存任务通常建议工作台并发为 1。

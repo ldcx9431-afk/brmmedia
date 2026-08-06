@@ -38,3 +38,10 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("restore_after_failed_activation", activation)
         self.assertIn("trap restore_after_failed_activation ERR", activation)
         self.assertIn("rollback_minimax_h3_comfyui.sh", activation)
+
+    def test_qwen_acceptance_is_loopback_and_records_non_secret_evidence(self):
+        acceptance = (REPO_ROOT / "accept_qwen_vllm.sh").read_text(encoding="utf-8")
+        self.assertIn("http://127.0.0.1:8000/v1", acceptance)
+        self.assertIn("/chat/completions", acceptance)
+        self.assertIn('"runs": int(runs)', acceptance)
+        self.assertNotIn("BRM_PASSWORD", acceptance)

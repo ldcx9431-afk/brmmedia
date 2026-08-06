@@ -106,7 +106,7 @@ PY
 }
 
 verify_native_audio_mp4() {
-  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename artifact_url artifact streams audio_channels
+  local task_id="$1" label="$2" profile="$3" seconds="$4" result filename artifact_url artifact streams audio_channels container_formats
   result="$(<"$work_dir/$task_id.json")"
   verify_effective_h3_settings "$task_id" "$label" "$profile" "$seconds"
   read -r filename artifact_url < <(printf '%s' "$result" | python3 -c '
@@ -125,8 +125,17 @@ print(first["name"], first["download_url"])
     /*) artifact_url="${API_BASE%/api/v1}$artifact_url" ;;
     *) echo "[ERROR] $label returned an unsupported artifact URL: $artifact_url" >&2; return 1 ;;
   esac
+  case "$filename" in
+    *.mp4|*.MP4) ;;
+    *) echo "[ERROR] $label did not return an MP4 filename: $filename" >&2; return 1 ;;
+  esac
   artifact="$work_dir/$task_id-$filename"
   curl --fail --silent --show-error "$artifact_url" -o "$artifact"
+  container_formats="$(ffprobe -v error -show_entries format=format_name -of default=nokey=1:noprint_wrappers=1 "$artifact")"
+  if ! printf '%s\n' "$container_formats" | grep -Eq '(^|,)mp4(,|$)'; then
+    echo "[ERROR] $label is not in an MP4 container: $container_formats" >&2
+    return 1
+  fi
   streams="$(ffprobe -v error -show_entries stream=codec_type -of csv=p=0 "$artifact" | sort -u)"
   if ! printf '%s\n' "$streams" | grep -qx video || ! printf '%s\n' "$streams" | grep -qx audio; then
     echo "[ERROR] $label is not a native-audio MP4: $streams" >&2

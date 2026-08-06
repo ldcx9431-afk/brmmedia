@@ -252,6 +252,22 @@ def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord
     ]
 
 
+def _normal_ltx_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    return [
+        _trim_text(params.get("prompt"), "prompt"),
+        _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
+        _number(params.get("seconds", 5), "seconds", minimum=2, maximum=360, integer=True),
+    ]
+
+
+def _normal_ltx_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    image = _asset(params, assets, "image_asset_id", "image")
+    return [
+        _trim_text(params.get("prompt"), "prompt"), image.filename,
+        _number(params.get("seconds", 5), "seconds", minimum=2, maximum=360, integer=True),
+    ]
+
+
 def _normal_first_last_frame(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     first = _asset(params, assets, "first_image_asset_id", "image")
     last = _asset(params, assets, "last_image_asset_id", "image")
@@ -323,6 +339,43 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
     "voice-clone": WorkflowSpec("submit_workflow_7", "IndexTTS2 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone),
     "music-generate": WorkflowSpec("submit_workflow_8", "ACE-Step 1.5 音乐生成", {}, _normal_music),
 }
+
+
+def _active_video_engine() -> str:
+    """Read the candidate backend's active engine without caching its dotenv.
+
+    The LAN API is started before H3 activation and remains running while the
+    activation script updates the candidate `.env`; reading per request keeps
+    capability discovery truthful throughout that transition.
+    """
+    override = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
+    if override:
+        return override.strip().lower()
+    try:
+        for line in (BASE_DIR / ".env").read_text(encoding="utf-8").splitlines():
+            if line.startswith("BRMMEDIA_VIDEO_ENGINE="):
+                return line.split("=", 1)[1].strip().strip('"').lower()
+    except OSError:
+        pass
+    return "ltx23"
+
+
+def _active_workflows() -> dict[str, WorkflowSpec]:
+    """Keep stable REST slugs while advertising the engine that can run now."""
+    if _active_video_engine() == "h3":
+        return WORKFLOWS
+    workflows = dict(WORKFLOWS)
+    workflows["text-to-video"] = WorkflowSpec(
+        "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
+        _normal_ltx_text_to_video,
+        {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+    )
+    workflows["image-to-video"] = WorkflowSpec(
+        "submit_workflow_4", "LTX2.3 图生视频（H3 尚未启用）", {"image_asset_id": "image"},
+        _normal_ltx_image_to_video,
+        {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+    )
+    return workflows
 
 
 def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
@@ -414,8 +467,14 @@ def health() -> JSONResponse:
 
 @app.get(f"{API_PREFIX}/capabilities", tags=["system"])
 def capabilities() -> dict[str, Any]:
+    active_engine = _active_video_engine()
+    workflows = _active_workflows()
     return {
         "api_version": "v1",
+        "video_engine": {
+            "active": active_engine,
+            "h3_available": active_engine == "h3",
+        },
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "asset_ttl_seconds": ASSET_TTL_SECONDS,
         "size_values": SIZE_VALUES,
@@ -427,7 +486,7 @@ def capabilities() -> dict[str, Any]:
                 "required_asset_fields": spec.required_assets,
                 "options": spec.options or {},
             }
-            for slug, spec in WORKFLOWS.items()
+            for slug, spec in workflows.items()
         },
     }
 
@@ -497,7 +556,7 @@ def upload_file(kind: str, file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.post(f"{API_PREFIX}/tasks", status_code=202, tags=["tasks"])
 def submit_task(submission: TaskSubmission) -> dict[str, Any]:
-    spec = WORKFLOWS.get(submission.workflow)
+    spec = _active_workflows().get(submission.workflow)
     if spec is None:
         _fail(422, "unknown workflow; use GET /api/v1/capabilities")
     assets = _load_assets()
