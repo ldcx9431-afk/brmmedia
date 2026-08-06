@@ -76,7 +76,9 @@ sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 
 预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。如经运维确认主机容量足够但页面文件检查不可读，可一次性显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`；这会在预检日志中留下记录，不能作为常规默认配置。
 
-受控下载器使用 `curl` 对同一 Hugging Face revision 做可续传 HTTP Range 传输；运行 `sudo ./start_minimax_h3_download.sh` 会为四个固定组件建立独立的 transient systemd 服务。每段落盘前都会核对 `Content-Range` 与长度；SSH 断开或部分响应关闭不会覆盖已完成数据。默认段为 1MiB，用 `sudo ./start_minimax_h3_download.sh --status` 查看精确进度。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。默认源为 `https://huggingface.co`；如已对同一固定 revision 做过 Range 与 SHA-256 验证，可通过 systemd 环境变量 `BRMMEDIA_H3_BASE_URL` 临时指定镜像或代理源，下载完成前不得改变 revision、文件清单或校验值。
+受控下载器使用 `curl` 对同一 Hugging Face revision 做可续传 HTTP Range 传输；运行 `sudo ./start_minimax_h3_download.sh` 会为四个固定组件建立独立的 transient systemd 服务。每段落盘前都会核对 `Content-Range` 与长度；SSH 断开或部分响应关闭不会覆盖已完成数据。默认段为 1MiB、每个组件串行下载，用 `sudo ./start_minimax_h3_download.sh --status` 查看精确进度。不要删除 `D:\model\MiniMax-H3` 中的未完成文件，后续运行会从已有字节继续。默认源为 `https://huggingface.co`；如已对同一固定 revision 做过 Range 与 SHA-256 验证，可通过 systemd 环境变量 `BRMMEDIA_H3_BASE_URL` 临时指定镜像或代理源，下载完成前不得改变 revision、文件清单或校验值。
+
+经无写入 Range 吞吐测试后，低带宽代理可临时设置 `BRMMEDIA_H3_PARALLEL_RANGES=2`，使每个未完成组件按批并发取两段、再严格按偏移顺序验证并追加。不要在多个组件同时下载时把此值提高到 `2` 以上（全局最多四条 Range 连接）；默认值 `1` 更适合未验证的网络。所有并发段仍写入临时 `.chunk.*` 文件，任一段不完整时整批不会追加，随后自动缩小段大小重试。
 
 若已验证代理可稳定返回更大且完整的范围响应，可在 `brmmedia-h3-stage.service` 的 systemd drop-in 中显式设置 `BRMMEDIA_H3_CHUNK_BYTES`（例如 `8388608`）；该值会传给每个 transient worker。不要在没有范围响应验证时提高默认 1MiB 值。
 

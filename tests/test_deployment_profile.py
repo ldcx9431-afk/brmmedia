@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -98,9 +103,89 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("BRMMEDIA_H3_MIN_CHUNK_BYTES", downloader)
         self.assertIn("BRMMEDIA_H3_CURL_RETRIES", downloader)
         self.assertIn('"$CURL_RETRIES"', downloader)
+        self.assertIn("BRMMEDIA_H3_PARALLEL_RANGES", downloader)
+        self.assertIn('"$PARALLEL_RANGES"', downloader)
+        self.assertIn("strictly in offset order", downloader)
         self.assertIn("will retry with", downloader)
         self.assertIn('"$(basename \"$file\").chunk.*" -delete', downloader)
-        self.assertIn("trap 'rm -f", downloader)
+        self.assertIn("cleanup_chunks", downloader)
+        self.assertIn("trap cleanup_chunks EXIT", downloader)
+
+    def test_parallel_h3_worker_appends_verified_ranges_and_exits_cleanly(self):
+        """Exercise the Bash EXIT trap with a two-range, checksum-valid batch."""
+        bash_major = int(
+            subprocess.check_output(
+                ["bash", "-c", "printf '%s' \"${BASH_VERSINFO[0]}\""], text=True
+            )
+        )
+        if bash_major < 4:
+            self.skipTest("the deployment downloader requires Bash 4 associative arrays")
+        source = (REPO_ROOT / "start_minimax_h3_download.sh").read_text(encoding="utf-8")
+        payload = b"abcdefgh"
+        fixture = source.replace(
+            "diffusion) echo 20970379616 ;;", "diffusion) echo 8 ;;"
+        ).replace(
+            "diffusion) echo e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a ;;",
+            f"diffusion) echo {hashlib.sha256(payload).hexdigest()} ;;",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            downloader = temp / "downloader.sh"
+            downloader.write_text(fixture, encoding="utf-8")
+            downloader.chmod(0o755)
+            fake_bin = temp / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "curl").write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import pathlib
+                    import sys
+
+                    args = sys.argv[1:]
+                    def value(flag):
+                        return args[args.index(flag) + 1]
+                    start, end = map(int, value("--range").split("-"))
+                    payload = b"abcdefgh"[start:end + 1]
+                    pathlib.Path(value("--output")).write_bytes(payload)
+                    pathlib.Path(value("--dump-header")).write_text(
+                        f"HTTP/1.1 206 Partial Content\\r\\nContent-Range: bytes {start}-{end}/8\\r\\n\\r\\n"
+                    )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            (fake_bin / "stat").write_text(
+                "#!/usr/bin/env bash\nif [ \"$1\" = \"-c%s\" ]; then wc -c < \"$2\" | tr -d ' '; else /usr/bin/stat \"$@\"; fi\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sha256sum").write_text(
+                "#!/usr/bin/env bash\nshasum -a 256 \"$1\"\n", encoding="utf-8"
+            )
+            (fake_bin / "dd").write_text(
+                "#!/usr/bin/env bash\nfor arg in \"$@\"; do case \"$arg\" in if=*) input=${arg#if=} ;; of=*) output=${arg#of=} ;; esac; done\ncat \"$input\" >> \"$output\"\n",
+                encoding="utf-8",
+            )
+            for command in fake_bin.iterdir():
+                command.chmod(0o755)
+            env = os.environ | {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "BRMMEDIA_MODEL_SOURCE_ROOT": str(temp / "models"),
+                "BRMMEDIA_H3_CHUNK_BYTES": "4",
+                "BRMMEDIA_H3_MIN_CHUNK_BYTES": "4",
+                "BRMMEDIA_H3_PARALLEL_RANGES": "2",
+            }
+            result = subprocess.run(
+                ["bash", str(downloader), "--worker", "diffusion"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            target = temp / "models" / "MiniMax-H3" / "diffusion_models" / "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(list(target.parent.glob("*.chunk.*")), [])
         self.assertIn("for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY", downloader)
         self.assertIn('"${proxy_env_args[@]}"', downloader)
 

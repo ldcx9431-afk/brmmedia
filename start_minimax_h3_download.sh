@@ -24,6 +24,10 @@ MIN_CHUNK_BYTES="${BRMMEDIA_H3_MIN_CHUNK_BYTES:-1048576}"
 # transient reset; afterwards the validated-range loop shrinks that worker.
 CURL_RETRIES="${BRMMEDIA_H3_CURL_RETRIES:-1}"
 CURL_RETRY_DELAY="${BRMMEDIA_H3_CURL_RETRY_DELAY:-1}"
+# Each batch is downloaded in parallel, but its verified ranges are appended
+# strictly in offset order.  Default to one range for conservative deployments;
+# a constrained LAN relay can opt into a small value after a no-write probe.
+PARALLEL_RANGES="${BRMMEDIA_H3_PARALLEL_RANGES:-1}"
 
 # `systemd-run` does not automatically inherit the stage service's process
 # environment.  Propagate an explicitly configured proxy to short-lived
@@ -65,7 +69,9 @@ expected_sha256() {
 }
 
 download_component() {
-  local name="$1" relative file expected expected_hash actual actual_hash attempt end chunk effective_chunk tmp headers received content_range
+  local name="$1" relative file expected expected_hash actual actual_hash attempt end chunk effective_chunk
+  local range_start range_end range_chunk index received content_range batch_valid pid
+  local -a tmp_files=() header_files=() range_starts=() range_ends=() range_chunks=() worker_pids=()
   relative="${components[$name]:-}"
   [ -n "$relative" ] || { echo "[ERROR] Unknown component: $name" >&2; return 2; }
   file="$MODEL_DIR/$relative"
@@ -73,8 +79,9 @@ download_component() {
   expected_hash="$(expected_sha256 "$name")"
   install -d "$(dirname "$file")"
   if ! [[ "$CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || ! [[ "$MIN_CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || \
-     ! [[ "$CURL_RETRIES" =~ ^[0-9]+$ ]] || ! [[ "$CURL_RETRY_DELAY" =~ ^[0-9]+$ ]]; then
-    echo "[ERROR] H3 chunk and curl retry settings must be non-negative integers (chunks > 0)." >&2
+     ! [[ "$CURL_RETRIES" =~ ^[0-9]+$ ]] || ! [[ "$CURL_RETRY_DELAY" =~ ^[0-9]+$ ]] || \
+     ! [[ "$PARALLEL_RANGES" =~ ^[1-8]$ ]]; then
+    echo "[ERROR] H3 chunk/retry settings must be valid and parallel ranges must be 1-8." >&2
     return 2
   fi
   effective_chunk="$CHUNK_BYTES"
@@ -87,11 +94,23 @@ download_component() {
   # transient worker before resuming; this preserves the verified destination
   # prefix while preventing D: from accumulating abandoned temporary ranges.
   find "$(dirname "$file")" -maxdepth 1 -type f -name "$(basename "$file").chunk.*" -delete
-  tmp=""
-  headers=""
-  trap 'rm -f "${tmp:-}" "${headers:-}"' EXIT
-  trap 'rm -f "${tmp:-}" "${headers:-}"; exit 130' INT
-  trap 'rm -f "${tmp:-}" "${headers:-}"; exit 143' TERM
+  cleanup_chunks() {
+    # EXIT can run after this function has returned, at which point Bash has
+    # released its local arrays.  Do not let `set -u` turn a successful
+    # checksum-verified worker into a failed unit during cleanup.
+    if ! declare -p tmp_files >/dev/null 2>&1 || ! declare -p header_files >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "${#tmp_files[@]}" -gt 0 ]; then
+      rm -f -- "${tmp_files[@]}" "${header_files[@]}"
+    fi
+  }
+  clear_cleanup_traps() {
+    trap - EXIT INT TERM
+  }
+  trap cleanup_chunks EXIT
+  trap 'cleanup_chunks; exit 130' INT
+  trap 'cleanup_chunks; exit 143' TERM
 
   # Xet-backed Hugging Face redirects can occasionally close a long ranged
   # response early (curl 18).  Download immutable, bounded ranges and append
@@ -102,6 +121,8 @@ download_component() {
       actual_hash="$(sha256sum "$file" | awk '{print $1}')"
       if [ "$actual_hash" = "$expected_hash" ]; then
         echo "[OK] $name complete and SHA-256 verified: $actual bytes"
+        cleanup_chunks
+        clear_cleanup_traps
         return 0
       fi
       echo "[WARN] $name has expected size but invalid SHA-256; resetting only this component for redownload." >&2
@@ -110,31 +131,64 @@ download_component() {
     fi
     if [ "$actual" -gt "$expected" ]; then
       echo "[ERROR] $name exceeds expected byte count ($actual > $expected)" >&2
+      cleanup_chunks
+      clear_cleanup_traps
       return 1
     fi
-    chunk="$effective_chunk"
-    if [ $((expected - actual)) -lt "$chunk" ]; then
-      chunk=$((expected - actual))
-    fi
-    end=$((actual + chunk - 1))
-    tmp="${file}.chunk.$$"
-    headers="${tmp}.headers"
-    rm -f "$tmp" "$headers"
-    echo "[INFO] $name attempt=$attempt range=$actual-$end/$expected"
-    curl --silent --show-error --fail --location --range "$actual-$end" \
-      --dump-header "$headers" \
-      --retry "$CURL_RETRIES" --retry-delay "$CURL_RETRY_DELAY" --retry-all-errors --connect-timeout 30 \
-      --speed-time 90 --speed-limit 1024 --output "$tmp" \
-      "$H3_BASE_URL/$REPO/resolve/$REVISION/$relative" || true
-    received="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
-    content_range="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {line=$0} END {gsub(/\r/, "", line); print line}' "$headers" 2>/dev/null || true)"
-    if [ "$received" -eq "$chunk" ] && printf '%s\n' "$content_range" | grep -qi "^content-range: bytes $actual-$end/$expected$"; then
-      dd if="$tmp" of="$file" oflag=append conv=notrunc status=none
-      rm -f "$tmp" "$headers"
+    tmp_files=()
+    header_files=()
+    range_starts=()
+    range_ends=()
+    range_chunks=()
+    worker_pids=()
+    for index in $(seq 0 $((PARALLEL_RANGES - 1))); do
+      range_start=$((actual + index * effective_chunk))
+      [ "$range_start" -lt "$expected" ] || break
+      range_chunk="$effective_chunk"
+      if [ $((expected - range_start)) -lt "$range_chunk" ]; then
+        range_chunk=$((expected - range_start))
+      fi
+      range_end=$((range_start + range_chunk - 1))
+      tmp_files+=("${file}.chunk.$$.${index}")
+      header_files+=("${file}.chunk.$$.${index}.headers")
+      range_starts+=("$range_start")
+      range_ends+=("$range_end")
+      range_chunks+=("$range_chunk")
+      rm -f "${tmp_files[$index]}" "${header_files[$index]}"
+      echo "[INFO] $name attempt=$attempt range=$range_start-$range_end/$expected batch=$((index + 1))/${PARALLEL_RANGES}"
+      (
+        curl --silent --show-error --fail --location --range "$range_start-$range_end" \
+          --dump-header "${header_files[$index]}" \
+          --retry "$CURL_RETRIES" --retry-delay "$CURL_RETRY_DELAY" --retry-all-errors --connect-timeout 30 \
+          --speed-time 90 --speed-limit 1024 --output "${tmp_files[$index]}" \
+          "$H3_BASE_URL/$REPO/resolve/$REVISION/$relative" || true
+      ) &
+      worker_pids+=("$!")
+    done
+    for pid in "${worker_pids[@]}"; do
+      wait "$pid" || true
+    done
+    batch_valid=1
+    for index in "${!tmp_files[@]}"; do
+      received="$(stat -c%s "${tmp_files[$index]}" 2>/dev/null || echo 0)"
+      content_range="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {line=$0} END {gsub(/\r/, "", line); print line}' "${header_files[$index]}" 2>/dev/null || true)"
+      if [ "$received" -ne "${range_chunks[$index]}" ] || ! printf '%s\n' "$content_range" | grep -qi "^content-range: bytes ${range_starts[$index]}-${range_ends[$index]}/$expected$"; then
+        echo "[WARN] $name rejected incomplete/unexpected segment: received=$received expected=${range_chunks[$index]} range=${content_range:-missing}" >&2
+        batch_valid=0
+      fi
+    done
+    if [ "$batch_valid" -eq 1 ]; then
+      for index in "${!tmp_files[@]}"; do
+        dd if="${tmp_files[$index]}" of="$file" oflag=append conv=notrunc status=none
+      done
+      cleanup_chunks
+      tmp_files=()
+      header_files=()
       continue
     fi
-    echo "[WARN] $name rejected incomplete/unexpected segment: received=$received expected=$chunk range=${content_range:-missing}" >&2
-    rm -f "$tmp" "$headers"
+    cleanup_chunks
+    tmp_files=()
+    header_files=()
     # A proxy can tolerate normal 8MiB transfers yet cut a particular large
     # Xet response.  Preserve the verified prefix and shrink only future
     # requests for this worker instead of wasting retries on the same range.
@@ -148,6 +202,8 @@ download_component() {
     sleep 5
   done
   echo "[ERROR] $name did not complete after repeated resumable attempts" >&2
+  cleanup_chunks
+  clear_cleanup_traps
   return 1
 }
 
@@ -205,6 +261,7 @@ for name in diffusion text video audio; do
       --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
       --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
       --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
+      --setenv="BRMMEDIA_H3_PARALLEL_RANGES=$PARALLEL_RANGES" \
       --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
       "${proxy_env_args[@]}" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
@@ -224,6 +281,7 @@ for name in diffusion text video audio; do
     --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
     --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
     --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
+    --setenv="BRMMEDIA_H3_PARALLEL_RANGES=$PARALLEL_RANGES" \
     --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
     "${proxy_env_args[@]}" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
