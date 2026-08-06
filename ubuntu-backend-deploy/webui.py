@@ -850,6 +850,11 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
     }
 
 
+def h3_profile_default_seconds(profile: str) -> int:
+    """UI helper: reset the duration when an H3 profile is explicitly changed."""
+    return H3_PROFILES.get(str(profile), H3_PROFILES["preview"])["default_seconds"]
+
+
 def extract_result(outputs: dict, task: Task) -> list:
     """
     把 ComfyUI 执行完的 outputs 里的产物(音频 / 视频 / 图片)下载并保存到
@@ -1846,6 +1851,12 @@ def build_ui():
                     api_name="ui_submit_workflow_3",
                     api_visibility="private",
                 )
+                profile3.change(
+                    fn=h3_profile_default_seconds,
+                    inputs=profile3,
+                    outputs=seconds3,
+                    api_visibility="private",
+                )
 
             # ========== Tab 4 ==========
             with gr.Tab("MiniMax H3 图生视频"):
@@ -1871,6 +1882,12 @@ def build_ui():
                     fn=submit_workflow_4,
                     inputs=[prompt4, uploaded_name4, seconds4, profile4, size4],
                     api_name="ui_submit_workflow_4",
+                    api_visibility="private",
+                )
+                profile4.change(
+                    fn=h3_profile_default_seconds,
+                    inputs=profile4,
+                    outputs=seconds4,
                     api_visibility="private",
                 )
 
