@@ -29,6 +29,16 @@ if systemctl is-active --quiet baorong-backend; then
   exit 1
 fi
 
+# The H3 environment is deliberately isolated in a candidate release.  Do not
+# allow a successful-looking activation to start the old production checkout:
+# systemd must first have been regenerated for this exact APP_ROOT.
+expected_exec="$BACKEND_DIR/start_backend.sh"
+if ! systemctl cat baorong-backend 2>/dev/null | grep -Fq "ExecStart=$expected_exec"; then
+  echo "[ERROR] baorong-backend is not installed for this candidate release." >&2
+  echo "[ERROR] First run: sudo $APP_ROOT/install_ubuntu_systemd_services.sh $SERVICE_USER $APP_ROOT" >&2
+  exit 1
+fi
+
 echo "[1/4] Verifying all H3 components were imported into the E: WSL model store..."
 runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
   /usr/local/sbin/brmmedia-verify-comfy-models
