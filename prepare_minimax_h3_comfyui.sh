@@ -22,17 +22,23 @@ mkdir -p "$BACKUP_DIR"
 stamp="$(date +%Y%m%d-%H%M%S)"
 git -C "$COMFY_ROOT" rev-parse HEAD > "$BACKUP_DIR/before-h3-$stamp.commit"
 git -C "$COMFY_ROOT" status --short > "$BACKUP_DIR/before-h3-$stamp.status"
+"$PYTHON_BIN" -m pip freeze > "$BACKUP_DIR/before-h3-$stamp.python-requirements.txt"
 if [ -s "$BACKUP_DIR/before-h3-$stamp.status" ]; then
   echo "[ERROR] ComfyUI checkout has local changes; resolve or snapshot them before upgrading." >&2
   exit 1
 fi
 
 previous_ref="$(cat "$BACKUP_DIR/before-h3-$stamp.commit")"
+previous_requirements="$BACKUP_DIR/before-h3-$stamp.python-requirements.txt"
 upgraded=0
 rollback_checkout() {
   if [ "$upgraded" -eq 1 ]; then
     echo "[WARN] H3 preparation failed; restoring ComfyUI checkout $previous_ref" >&2
     git -C "$COMFY_ROOT" checkout --detach "$previous_ref" || true
+    if [ -s "$previous_requirements" ]; then
+      echo "[WARN] Restoring the pre-upgrade Python package versions" >&2
+      "$PYTHON_BIN" -m pip install -r "$previous_requirements" || true
+    fi
   fi
 }
 trap rollback_checkout ERR
