@@ -255,10 +255,14 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(t2v["104"]["inputs"]["prompt"], args["prompt"])
         self.assertEqual(t2v["104"]["inputs"]["length"], 124)
         self.assertEqual(t2v["91"]["inputs"]["audio"], ["23", 0])
+        self.assertEqual(t2v["25"]["class_type"], "MiniMaxH3SigmaShift")
+        self.assertEqual(t2v["9"]["inputs"]["model"], ["25", 0])
+        self.assertEqual(t2v["16"]["inputs"]["model"], ["25", 0])
 
         i2v = self.webui.build_workflow_4("MiniMaxH3-图生视频", args)
         self.assertEqual(i2v["1"]["inputs"]["image"], "source.png")
         self.assertEqual(i2v["104"]["inputs"]["first_frame"], ["1", 0])
+        self.assertEqual(i2v["25"]["class_type"], "MiniMaxH3SigmaShift")
 
     def test_acestep_model_choices_follow_installed_weights(self):
         model_root = self.output_dir / "fake-comfy"
