@@ -34,7 +34,9 @@ fi
 
 echo "[3/4] Preparing .env..."
 if [ ! -f .env ]; then
-  cp .env.example .env
+  # The current production profile separates Qwen (GPU1/A4000) from ComfyUI
+  # media jobs (GPU0/A5000).  Never recreate the obsolete GPU0/Qwen3.6 file.
+  cp .env.qwen35-4b.example .env
   sed -i "s#^HF_HOME=.*#HF_HOME=$SCRIPT_DIR/.cache/huggingface#" .env
 fi
 

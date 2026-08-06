@@ -9,6 +9,9 @@ loading GPU/Gradio/FastAPI runtime modules.
 from __future__ import annotations
 
 import ast
+import importlib.util
+import sys
+import types
 import unittest
 from pathlib import Path
 
@@ -19,7 +22,86 @@ NGINX = ROOT / "ubuntu-backend-deploy" / "nginx-brmmedia.conf.example"
 SERVICE = ROOT / "ubuntu-backend-deploy" / "brmmedia-lan-api.service.example"
 
 
+def _load_lan_api():
+    """Load the normalizers without FastAPI/ComfyUI production dependencies."""
+    requests = types.ModuleType("requests")
+
+    class RequestException(Exception):
+        pass
+
+    def unavailable(*args, **kwargs):
+        raise RequestException("network disabled in contract tests")
+
+    requests.RequestException = RequestException
+    requests.get = unavailable
+    sys.modules["requests"] = requests
+
+    fastapi = types.ModuleType("fastapi")
+
+    class FastAPI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def _route(*args, **kwargs):
+            return lambda function: function
+
+        get = _route
+        post = _route
+
+    class HTTPException(Exception):
+        def __init__(self, status_code, detail):
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(detail)
+
+    class UploadFile:
+        pass
+
+    fastapi.FastAPI = FastAPI
+    fastapi.File = lambda *args, **kwargs: None
+    fastapi.HTTPException = HTTPException
+    fastapi.UploadFile = UploadFile
+    sys.modules["fastapi"] = fastapi
+
+    responses = types.ModuleType("fastapi.responses")
+
+    class FileResponse:
+        pass
+
+    class JSONResponse:
+        def __init__(self, *args, **kwargs):
+            self.status_code = kwargs.get("status_code")
+            self.content = kwargs.get("content")
+
+    responses.FileResponse = FileResponse
+    responses.JSONResponse = JSONResponse
+    sys.modules["fastapi.responses"] = responses
+
+    pydantic = types.ModuleType("pydantic")
+    pydantic.BaseModel = object
+    pydantic.Field = lambda default=None, **kwargs: default
+    sys.modules["pydantic"] = pydantic
+
+    comfy = types.ModuleType("comfyui_server")
+    comfy.BASE = "http://127.0.0.1:8188"
+    comfy.audio_duration = lambda *args, **kwargs: 0.0
+    comfy.upload_image = lambda *args, **kwargs: "mock-input"
+    sys.modules["comfyui_server"] = comfy
+
+    spec = importlib.util.spec_from_file_location("brmmedia_lan_api_under_test", LAN_API)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class LanApiContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.api = _load_lan_api()
+
     def test_api_has_stable_rest_routes(self) -> None:
         tree = ast.parse(LAN_API.read_text(encoding="utf-8"))
         decorators = [
@@ -61,6 +143,38 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn("location /api/", nginx)
         self.assertIn("proxy_pass http://127.0.0.1:9100", nginx)
         self.assertIn("--host 127.0.0.1 --port 9100", service)
+
+    def test_h3_profile_defaults_and_gradio_argument_order(self) -> None:
+        text_args = self.api._normal_text_to_video(
+            {"prompt": "morning city", "profile": "quality"}, {}
+        )
+        self.assertEqual(text_args, ["morning city", "768 × 1024", 6, "quality"])
+
+        asset = self.api.AssetRecord(
+            asset_id="a" * 32, kind="image", filename="source.png",
+            source_filename="source.png", size_bytes=1, sha256="b" * 64, created_at=0,
+        )
+        image_args = self.api._normal_image_to_video(
+            {"prompt": "animate", "image_asset_id": asset.asset_id, "profile": "quality"},
+            {asset.asset_id: asset},
+        )
+        self.assertEqual(image_args, ["animate", "source.png", "768 × 1024", 6, "quality"])
+
+        explicit_preview = self.api._normal_text_to_video(
+            {"prompt": "morning city", "profile": "preview", "seconds": 4}, {}
+        )
+        self.assertEqual(explicit_preview[-2:], [4, "preview"])
+
+    def test_h3_capabilities_publish_structured_form_schema(self) -> None:
+        capabilities = self.api.capabilities()
+        text_schema = capabilities["workflows"]["text-to-video"]["options"]["params"]
+        image_schema = capabilities["workflows"]["image-to-video"]["options"]["params"]
+
+        self.assertTrue(text_schema["prompt"]["required"])
+        self.assertEqual(text_schema["profile"]["enum"], ["preview", "quality"])
+        self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
+        self.assertEqual(text_schema["size"]["enum_source"], "size_values")
+        self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")
 
 
 if __name__ == "__main__":

@@ -12,4 +12,6 @@ echo "MODELS"
 find /srv/brmmedia/ComfyUI/models -type f 2>/dev/null | wc -l
 du -sh /srv/brmmedia/ComfyUI/models 2>/dev/null || true
 echo "SERVICES"
-systemctl is-enabled baorong-backend qwen-vllm baorong-backend-highvram 2>&1 || true
+systemctl is-enabled baorong-backend qwen-vllm brmmedia-lan-api brmmedia-healthcheck.timer 2>&1 || true
+echo "LEGACY_HIGHVRAM"
+systemctl is-active baorong-backend-highvram 2>&1 || true

@@ -53,6 +53,12 @@ BASE_DIR = Path(__file__).resolve().parent
 # Tests and recovery tools can override this with an isolated directory. The
 # production default remains next to webui.py, preserving existing assets.
 OUTPUT_DIR = Path(os.environ.get("BRM_OUTPUT_DIR", BASE_DIR / "outputs")).expanduser().resolve()
+# Keep the deployment reversible while H3 is staged and burn-in tested.  The
+# service unit sets this to "h3" only after the native nodes and weights have
+# passed validation; recovery can switch it back to ltx23 without a Git reset.
+VIDEO_ENGINE = os.environ.get("BRMMEDIA_VIDEO_ENGINE", "ltx23").strip().lower()
+if VIDEO_ENGINE not in {"ltx23", "h3"}:
+    raise RuntimeError("BRMMEDIA_VIDEO_ENGINE must be ltx23 or h3")
 TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
 gr.set_static_paths(paths=[OUTPUT_DIR])
@@ -792,8 +798,8 @@ def _parse_size(size: str) -> tuple[int, int]:
 # showing the adjusted values in the task record prevents the UI/API from
 # claiming an impossible duration.
 H3_PROFILES = {
-    "preview": {"short_edge": 480, "label": "稳定预览（480 短边，约 5 秒）"},
-    "quality": {"short_edge": 768, "label": "质量（768 短边，约 6 秒）"},
+    "preview": {"short_edge": 480, "default_seconds": 5, "label": "稳定预览（480 短边，约 5 秒）"},
+    "quality": {"short_edge": 768, "default_seconds": 6, "label": "质量（768 短边，约 6 秒）"},
 }
 H3_MAX_LONG_EDGE = 1344
 H3_FPS = 24
@@ -822,7 +828,9 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
     )
     width = max(32, int(round(requested_width * scale / 32)) * 32)
     height = max(32, int(round(requested_height * scale / 32)) * 32)
-    frames = max(5, round(requested_seconds * H3_FPS))
+    # Native H3 notes its trained range starts at about 124 frames.  Keep the
+    # public 4–15 second request range, but report the real 5.167s minimum.
+    frames = max(124, round(requested_seconds * H3_FPS))
     frames += (5 - frames % 17) % 17
     return {
         "profile": profile,
@@ -885,16 +893,20 @@ def submit_workflow_2(prompt, input_filename):
     return submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
 
 def submit_workflow_3(prompt, size, seconds, profile="preview"):
-    """Queue a local MiniMax H3 text-to-video job."""
     if not (prompt or "").strip():
         raise gr.Error("请输入视频提示词")
+    if VIDEO_ENGINE == "ltx23":
+        return submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
+    """Queue a local MiniMax H3 text-to-video job."""
     args = {"prompt": prompt, **normalise_h3_request(size, seconds, profile)}
     return submit("MiniMaxH3-文生视频", args)
 
 def submit_workflow_4(prompt, input_filename, seconds, profile="preview", size="768 × 1024"):
-    """Queue a local MiniMax H3 image-to-video job."""
     if not (prompt or "").strip() or not input_filename:
         raise gr.Error("请输入提示词并上传源图片")
+    if VIDEO_ENGINE == "ltx23":
+        return submit("LTX23-图生视频", {"prompt": prompt, "seconds": seconds, "input_filename": input_filename})
+    """Queue a local MiniMax H3 image-to-video job."""
     args = {
         "prompt": prompt,
         "input_filename": input_filename,
@@ -985,12 +997,16 @@ def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> dic
 # Versioned H3-oriented wrappers are used by the REST bridge.  Keep the two
 # legacy Gradio endpoints above intact for clients that already call them.
 def api_submit_workflow_3_h3(prompt: str, size: str, seconds: int, profile: str) -> dict:
+    if VIDEO_ENGINE != "h3":
+        raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
     return submit_workflow_3(prompt, size, seconds, profile)
 
 
 def api_submit_workflow_4_h3(
     prompt: str, input_filename: str, size: str, seconds: int, profile: str
 ) -> dict:
+    if VIDEO_ENGINE != "h3":
+        raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
     return submit_workflow_4(prompt, input_filename, seconds, profile, size)
 
 
@@ -1086,6 +1102,34 @@ def build_workflow_4(workflow_name: str, args: dict) -> dict:
     })
     wf["15"]["inputs"]["noise_seed"] = random.randint(1, 1_000_000)
     wf["110"]["inputs"]["filename_prefix"] = "MiniMaxH3-图生视频"
+    return wf
+
+
+def build_workflow_ltx3(workflow_name: str, args: dict) -> dict:
+    import json
+    path = WORKFLOW_DIR / (workflow_name + ".json")
+    if not path.exists():
+        raise gr.Error(f"找不到工作流文件:{path}")
+    width, height = _parse_size(args["size"])
+    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf["14"]["inputs"]["text"] = args["prompt"]
+    wf["38"]["inputs"]["value"] = args["seconds"]
+    wf["23"]["inputs"]["width"] = width
+    wf["23"]["inputs"]["height"] = height
+    wf["29"]["inputs"]["noise_seed"] = random.randint(1, 10000)
+    return wf
+
+
+def build_workflow_ltx4(workflow_name: str, args: dict) -> dict:
+    import json
+    path = WORKFLOW_DIR / (workflow_name + ".json")
+    if not path.exists():
+        raise gr.Error(f"找不到工作流文件:{path}")
+    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf["10"]["inputs"]["image"] = args["input_filename"]
+    wf["14"]["inputs"]["text"] = args["prompt"]
+    wf["38"]["inputs"]["value"] = args["seconds"]
+    wf["29"]["inputs"]["noise_seed"] = random.randint(1, 10000)
     return wf
 
 
@@ -1218,6 +1262,8 @@ WORKFLOW_BUILDERS = {
     "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图片编辑"),
     "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
     "MiniMaxH3-图生视频": (build_workflow_4, "MiniMax H3 图生视频"),
+    "LTX23-文生视频": (build_workflow_ltx3, "LTX2.3 文生视频（回退）"),
+    "LTX23-图生视频": (build_workflow_ltx4, "LTX2.3 图生视频（回退）"),
     "LTX23-首尾帧视频": (build_workflow_5, "首尾帧视频"),
     "LTX23-单图数字人-语音驱动": (build_workflow_6, "单图数字人-语音驱动"),
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),

@@ -55,6 +55,28 @@ H3_PROFILE_DETAILS = {
     "preview": {"short_edge": 480, "default_seconds": 5},
     "quality": {"short_edge": 768, "default_seconds": 6},
 }
+H3_COMMON_PARAMS = {
+    "prompt": {
+        "type": "string", "required": True, "maximum_length": 12000,
+        "description": "Video prompt. Include scene, movement, and desired audio where applicable.",
+    },
+    "size": {
+        "type": "string", "required": False, "default": "768 × 1024",
+        "enum_source": "size_values",
+        "description": "Aspect ratio only; the service selects the H3 canvas for the requested profile.",
+    },
+    "profile": {
+        "type": "string", "required": False, "default": "preview",
+        "enum": H3_PROFILE_VALUES,
+        "description": "preview uses a 480px short edge; quality uses a 768px short edge.",
+    },
+    "seconds": {
+        "type": "integer", "required": False, "minimum": 4, "maximum": 15,
+        "default": 5,
+        "default_by_profile": {profile: detail["default_seconds"] for profile, detail in H3_PROFILE_DETAILS.items()},
+        "description": "H3 adjusts the request to its 24fps / 17-frame grid; read effective_settings from task status.",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -204,21 +226,29 @@ def _normal_image_edit(params: dict[str, Any], assets: dict[str, AssetRecord]) -
 
 
 def _normal_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    profile = _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview")
     return [
         _trim_text(params.get("prompt"), "prompt"),
         _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
-        _number(params.get("seconds", 5), "seconds", minimum=4, maximum=15, integer=True),
-        _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview"),
+        _number(
+            params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]),
+            "seconds", minimum=4, maximum=15, integer=True,
+        ),
+        profile,
     ]
 
 
 def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     image = _asset(params, assets, "image_asset_id", "image")
+    profile = _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview")
     return [
         _trim_text(params.get("prompt"), "prompt"), image.filename,
         _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
-        _number(params.get("seconds", 5), "seconds", minimum=4, maximum=15, integer=True),
-        _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview"),
+        _number(
+            params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]),
+            "seconds", minimum=4, maximum=15, integer=True,
+        ),
+        profile,
     ]
 
 
@@ -271,14 +301,22 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
         _normal_text_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
          "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
-         "size_rule": "size selects aspect ratio; preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)"},
+         "size_rule": "size selects aspect ratio; preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)",
+         "params": H3_COMMON_PARAMS},
     ),
     "image-to-video": WorkflowSpec(
         "submit_workflow_4_h3", "MiniMax H3 本地图生视频（含同步立体声音频）", {"image_asset_id": "image"},
         _normal_image_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
          "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
-         "size_rule": "size selects output aspect ratio; the source image is fitted to the H3 canvas"},
+         "size_rule": "size selects output aspect ratio; the source image is fitted to the H3 canvas",
+         "params": {
+             "image_asset_id": {
+                 "type": "asset_id", "required": True, "asset_kind": "image",
+                 "description": "An image asset_id returned by POST /files?kind=image.",
+             },
+             **H3_COMMON_PARAMS,
+         }},
     ),
     "first-last-frame-video": WorkflowSpec("submit_workflow_5", "LTX2.3 首尾帧视频", {"first_image_asset_id": "image", "last_image_asset_id": "image"}, _normal_first_last_frame),
     "talking-head": WorkflowSpec("submit_workflow_6", "LTX2.3 单图数字人-语音驱动", {"image_asset_id": "image", "audio_asset_id": "audio"}, _normal_talking_head),

@@ -26,7 +26,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" "$BRM_API/health"
 curl --fail --user "$BRM_USER:$BRM_PASSWORD" "$BRM_API/capabilities"
 ```
 
-`health` 返回 `200` 且 `status: ok` 说明 Gradio 与 ComfyUI 可用；依赖未就绪时返回 `503` 和 `degraded`。`capabilities` 给出本次部署支持的工作流、尺寸、素材字段、上传上限与素材有效期，是客户端生成表单和校验规则的唯一依据。
+`health` 返回 `200` 且 `status: ok` 说明 Gradio 与 ComfyUI 可用；依赖未就绪时返回 `503` 和 `degraded`。`capabilities` 给出本次部署支持的工作流、尺寸、素材字段、上传上限与素材有效期；H3 视频工作流还会在 `workflows.<workflow>.options.params` 返回字段类型、必填项、默认值和枚举。完整 HTTP 请求/响应结构以 OpenAPI 为准。
 
 ## 2. 推荐调用闭环
 
@@ -121,8 +121,8 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | --- | --- | --- |
 | `text-to-image` | `prompt` | `size`（默认 `1024 × 1024`）、`batch`（1–4） |
 | `image-edit` | `prompt`、`image_asset_id` | 图片编辑 |
-| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（4–15，默认 5）、`profile`（`preview` 默认或 `quality`） |
-| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（4–15，默认 5）、`profile`（`preview` 默认或 `quality`） |
+| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（4–15；随档位默认）、`profile`（`preview` 默认或 `quality`） |
+| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（4–15；随档位默认）、`profile`（`preview` 默认或 `quality`） |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | `temperature`（0–1.5，默认 0.8） |
@@ -143,9 +143,10 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 `text-to-video` 与 `image-to-video` 已保留原 REST workflow 标识，调用方不需要迁移路径；实际引擎为本地开源 **MiniMax H3 Base**，输出是带模型原生同步立体声音频的 MP4。
 
-- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证；`quality` 使用约 `768` 像素短边。两者最长边都不超过 `1344`。
+- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证；省略 `seconds` 时为 `5` 秒。`quality` 使用约 `768` 像素短边；省略 `seconds` 时为 `6` 秒。两者最长边都不超过 `1344`。
 - `size` 只表达画幅比例；服务会计算模型可用的 32 像素网格画布。图生视频会把上传图适配到该画布。
 - 请求时长只能为 `4–15` 秒。H3 使用 24fps、17 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
+- 业务系统应先读取 `GET /capabilities` 中 H3 workflow 的 `options.params` 构建表单。它明确列出 `profile` 枚举、`seconds.default_by_profile`、`size` 的 `enum_source` 和图生视频所需的 `image_asset_id`。
 
 示例：
 
@@ -163,7 +164,7 @@ TASK_ID='<POST /tasks 返回的 task_id>'
 curl --fail --user "$BRM_USER:$BRM_PASSWORD" "$BRM_API/tasks/$TASK_ID"
 ```
 
-示例完成状态：
+H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其他尺寸/时长必须以实际返回的 `effective_settings` 为准：
 
 ```json
 {
@@ -172,6 +173,15 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" "$BRM_API/tasks/$TASK_ID"
   "status": "已完成",
   "finished_at": 1780000000.0,
   "error": null,
+  "effective_settings": {
+    "profile": "preview",
+    "requested_size": "1920 × 1080",
+    "requested_seconds": 5,
+    "width": 864,
+    "height": 480,
+    "frames": 124,
+    "effective_seconds": 5.167
+  },
   "artifacts": [
     {
       "name": "任务_文生图_20260805-090000_1234.png",
@@ -220,7 +230,9 @@ Qwen 固定使用 GPU1（RTX A4000），媒体工作流固定使用 GPU0（RTX A
 
 ## 7. 兼容层：原 Gradio API
 
-旧脚本仍可使用 `GET /gradio_api/info` 与固定端点：`/submit_workflow_1` 至 `/submit_workflow_8`、`/task_status`。H3 专用内部端点 `/submit_workflow_3_h3`、`/submit_workflow_4_h3` 仅由 REST 桥接调用。它们使用 Gradio v2 POST + SSE，上传文件名需已经在 ComfyUI 输入目录中；因此不适合新业务系统。
+旧脚本仍可使用 `GET /gradio_api/info` 与固定端点：`/submit_workflow_1` 至 `/submit_workflow_8`、`/task_status`。其中旧的 `/submit_workflow_3`、`/submit_workflow_4` 已改为同一套 H3 的 **preview** 兼容入口：参数位置不变，但时长现在只接受 `4–15` 秒；旧 LTX 的 `2–360` 秒取值不再适用。
+
+`/submit_workflow_3_h3`、`/submit_workflow_4_h3` 是 REST 桥接使用的 Gradio 实现细节。它们因 Gradio 运行机制会出现在 API 元数据中并受入口 Basic Auth 保护，但**不承诺对外稳定性**，业务系统不要直接依赖。所有 Gradio 端点都使用 v2 POST + SSE，上传文件名需已经在 ComfyUI 输入目录中；新业务系统应使用 REST API。
 
 仓库工具 [`call_gradio_api.py`](call_gradio_api.py) 已支持局域网 Basic Auth，密码只能从环境变量读取：
 
