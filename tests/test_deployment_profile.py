@@ -101,6 +101,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("will retry with", downloader)
         self.assertIn('"$(basename \"$file\").chunk.*" -delete', downloader)
         self.assertIn("trap 'rm -f", downloader)
+        self.assertIn("for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY", downloader)
+        self.assertIn('"${proxy_env_args[@]}"', downloader)
 
     def test_h3_canary_stays_off_the_production_lan_ports(self):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")

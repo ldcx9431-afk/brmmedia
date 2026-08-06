@@ -25,6 +25,18 @@ MIN_CHUNK_BYTES="${BRMMEDIA_H3_MIN_CHUNK_BYTES:-1048576}"
 CURL_RETRIES="${BRMMEDIA_H3_CURL_RETRIES:-1}"
 CURL_RETRY_DELAY="${BRMMEDIA_H3_CURL_RETRY_DELAY:-1}"
 
+# `systemd-run` does not automatically inherit the stage service's process
+# environment.  Propagate an explicitly configured proxy to short-lived
+# workers so resumable downloads can use a LAN relay without changing the
+# immutable source, revision, or checksum gates.
+proxy_env_args=()
+for proxy_env_name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY; do
+  proxy_env_value="${!proxy_env_name:-}"
+  if [ -n "$proxy_env_value" ]; then
+    proxy_env_args+=("--setenv=${proxy_env_name}=${proxy_env_value}")
+  fi
+done
+
 declare -A components=(
   [diffusion]='diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
   [text]='text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
@@ -194,6 +206,7 @@ for name in diffusion text video audio; do
       --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
       --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
       --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
+      "${proxy_env_args[@]}" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
   fi
@@ -212,6 +225,7 @@ for name in diffusion text video audio; do
     --setenv="BRMMEDIA_H3_CURL_RETRIES=$CURL_RETRIES" \
     --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
     --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
+    "${proxy_env_args[@]}" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
 show_status
