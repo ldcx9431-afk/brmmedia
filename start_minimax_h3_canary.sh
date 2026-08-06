@@ -20,6 +20,10 @@ if [ ! -f "$CANARY_ENV" ] || [ ! -x "$BACKEND_DIR/start_backend.sh" ]; then
   echo "[ERROR] Canary is not prepared. Run $APP_ROOT/prepare_minimax_h3_canary.sh first." >&2
   exit 1
 fi
+if [ ! -x "$APP_ROOT/verify_h3_workflow_gate.sh" ]; then
+  echo "[ERROR] H3 workflow compatibility gate is missing: $APP_ROOT/verify_h3_workflow_gate.sh" >&2
+  exit 1
+fi
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "[ERROR] Linux service user does not exist: $SERVICE_USER" >&2
   exit 1
@@ -77,6 +81,21 @@ while :; do
   fi
   sleep 3
 done
+
+echo "[gate] Validating live H3/custom-node workflow compatibility before canary acceptance..."
+if ! runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  "$APP_ROOT/verify_h3_workflow_gate.sh" \
+  --url "http://127.0.0.1:$COMFY_PORT" \
+  --workflows "$BACKEND_DIR/workflows" \
+  --timeout 15; then
+  # The canary is intentionally not exposed through Nginx, but leaving an
+  # incompatible process alive would still consume the shared A5000 and make
+  # recovery ambiguous.  Tear down only its transient units; production was
+  # already stopped by the explicit canary procedure and is never altered.
+  echo "[ERROR] H3 canary compatibility gate failed; stopping isolated canary units." >&2
+  systemctl stop "$API_UNIT" "$BACKEND_UNIT" || true
+  exit 1
+fi
 
 echo "[OK] H3 canary is ready on loopback Gradio :$GRADIO_PORT and REST :9101."
 echo "     Run acceptance only against http://127.0.0.1:9101/api/v1; do not expose this port through Nginx."

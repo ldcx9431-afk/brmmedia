@@ -51,10 +51,23 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("/system_stats", activation)
         self.assertIn("systemctl restart qwen-vllm", activation)
         self.assertIn("/v1/models", activation)
-        self.assertIn("Validating all ComfyUI workflow nodes", activation)
-        self.assertIn("validate_comfy_workflows.py", activation)
+        self.assertIn("verify_h3_workflow_gate.sh", activation)
+        self.assertIn("compatibility before activation completes", activation)
         self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
         self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
+
+    def test_h3_workflow_gate_is_required_for_canary_and_production_cutover(self):
+        gate = (REPO_ROOT / "verify_h3_workflow_gate.sh").read_text(encoding="utf-8")
+        activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
+        canary = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        self.assertIn("validate_comfy_workflows.py", gate)
+        self.assertIn("MiniMaxH3-文生视频.json", gate)
+        self.assertIn("MiniMaxH3-图生视频.json", gate)
+        self.assertIn("verify_h3_workflow_gate.sh", activation)
+        self.assertIn("trap restore_after_failed_activation ERR", activation)
+        self.assertIn("verify_h3_workflow_gate.sh", canary)
+        self.assertIn("stopping isolated canary units", canary)
+        self.assertIn('systemctl stop "$API_UNIT" "$BACKEND_UNIT"', canary)
 
     def test_qwen_acceptance_is_loopback_and_records_non_secret_evidence(self):
         acceptance = (REPO_ROOT / "accept_qwen_vllm.sh").read_text(encoding="utf-8")

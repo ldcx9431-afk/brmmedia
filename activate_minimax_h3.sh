@@ -61,6 +61,10 @@ if [ ! -x "$APP_ROOT/check_h3_preflight.sh" ]; then
   echo "[ERROR] H3 preflight script is missing: $APP_ROOT/check_h3_preflight.sh" >&2
   exit 1
 fi
+if [ ! -x "$APP_ROOT/verify_h3_workflow_gate.sh" ]; then
+  echo "[ERROR] H3 workflow compatibility gate is missing: $APP_ROOT/verify_h3_workflow_gate.sh" >&2
+  exit 1
+fi
 if systemctl is-active --quiet baorong-backend; then
   echo "[ERROR] Stop or drain media tasks before activating H3; this script will not interrupt a running job." >&2
   exit 1
@@ -179,12 +183,12 @@ done
 
 # A HTTP-200 ComfyUI process alone is not enough: the H3 upgrade can change
 # custom-node availability required by the retained LTX, avatar, voice and
-# music workflows.  Validate every checked-in workflow against the live
-# object-info schema while the ERR trap can still stop and roll back the
-# candidate on failure.
-echo "[gate] Validating all ComfyUI workflow nodes and static model choices..."
-runuser -u "$SERVICE_USER" -- "$BACKEND_DIR/.venv/bin/python" \
-  "$APP_ROOT/validate_comfy_workflows.py" \
+# music workflows.  This gate runs while the ERR trap is still armed.  If it
+# fails, the H3 environment and ComfyUI snapshot are restored and the backend
+# remains stopped instead of serving an incompatible mixed workflow release.
+echo "[gate] Validating live H3/custom-node workflow compatibility before activation completes..."
+runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  "$APP_ROOT/verify_h3_workflow_gate.sh" \
   --url "http://127.0.0.1:$COMFY_PORT" \
   --workflows "$BACKEND_DIR/workflows" \
   --timeout 15

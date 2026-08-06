@@ -26,3 +26,13 @@
 将 systemd 单元安装到候选运行目录，再运行激活脚本；激活脚本会拒绝旧服务路径。若任一
 阶段失败，停止 H3 服务、恢复本文件所记录的前一 ComfyUI commit，并重新启用旧 LTX
 工作流快照。
+
+在 Canary 启动和生产激活完成前都会执行 `verify_h3_workflow_gate.sh`：它针对运行中的
+ComfyUI `/object_info` 校验两个 H3 工作流及所有保留工作流的节点类型、静态模型选择。
+Canary 失败会停止其隔离单元；生产失败会触发激活脚本的引擎/ComfyUI 回滚，不能把不兼容
+的自定义节点组合留在对外服务中。
+
+`accept_minimax_h3_video.sh --full --restart-recovery` 是必须保留的真实恢复验收：首个
+完成的 H3 文生视频任务会使后端重启，随后使用**相同 task_id** 从 REST 重查任务、重新
+下载素材，并用 `ffprobe` 确认 MP4 同时具有视频和双声道音频流。该记录与 Qwen 十次对话、
+H3 任务和媒体回归报告一起构成生产切换证据。
