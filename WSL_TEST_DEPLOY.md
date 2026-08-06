@@ -94,7 +94,13 @@ cd /srv/brmmedia/app
 python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 ```
 
-预检全部显示 `READY` 后，先完成 Qwen 连续 10 次对话；再分别完成 H3 文生视频、图生视频各 3 次 `preview` 任务；通过后验证 `quality`。最后回归文生图、图片编辑、音乐、语音克隆、首尾帧视频、数字人、历史素材和 REST API。H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
+预检全部显示 `READY` 后，先完成 Qwen 连续 10 次对话；候选运行目录中的 `accept_qwen_vllm.sh` 会调用仅回环可见的 `/v1/models` 和 `/v1/chat/completions`，并在 `/srv/brmmedia/artifacts/acceptance/` 留下不含凭据的结果文件：
+
+```bash
+sudo -u brm ./accept_qwen_vllm.sh
+```
+
+再分别完成 H3 文生视频、图生视频各 3 次 `preview` 任务；通过后验证 `quality`。最后回归文生图、图片编辑、音乐、语音克隆、首尾帧视频、数字人、历史素材和 REST API。H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
 
 ## 内网访问
 
@@ -113,7 +119,7 @@ python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 sudo brmmedia-verify-runtime
 ```
 
-该命令检查虚拟环境、服务、Gradio/ComfyUI/Qwen 内部 HTTP、关键 Gradio 组件和 API、八个工作流的 65 个节点类型、ComfyUI 锁定 commit、Qwen 回环绑定以及受控健康检查。应以 `RESULT=PASS` 结束。
+该命令检查虚拟环境、服务、Gradio/ComfyUI/Qwen 内部 HTTP、关键 Gradio 组件和 API、八个工作流的 65 个节点类型、ComfyUI 锁定 commit、Qwen 回环绑定以及受控健康检查。应以 `RESULT=PASS` 结束；它是**结构与服务就绪检查**，不是 H3 推理生产验收的替代品。H3 切换还必须保留 Qwen 10 次对话、H3 `accept_minimax_h3_video.sh --full` 和其余媒体回归的实测记录。
 
 ## 局域网 API 任务状态
 
