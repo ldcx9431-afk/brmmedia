@@ -121,8 +121,8 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | --- | --- | --- |
 | `text-to-image` | `prompt` | `size`（默认 `1024 × 1024`）、`batch`（1–4） |
 | `image-edit` | `prompt`、`image_asset_id` | 图片编辑 |
-| `text-to-video` | `prompt` | `size`（默认 `768 × 1024`）、`seconds`（2–360） |
-| `image-to-video` | `prompt`、`image_asset_id` | `seconds`（2–360） |
+| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（4–15，默认 5）、`profile`（`preview` 默认或 `quality`） |
+| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（4–15，默认 5）、`profile`（`preview` 默认或 `quality`） |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | `temperature`（0–1.5，默认 0.8） |
@@ -138,6 +138,23 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 ```
 
 非法参数、类型不匹配的素材引用和过期素材均返回 `422`；工作台或 ComfyUI 不可用返回 `503`；文件上传到 ComfyUI 失败返回 `502`。
+
+### MiniMax H3 视频规则
+
+`text-to-video` 与 `image-to-video` 已保留原 REST workflow 标识，调用方不需要迁移路径；实际引擎为本地开源 **MiniMax H3 Base**，输出是带模型原生同步立体声音频的 MP4。
+
+- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证；`quality` 使用约 `768` 像素短边。两者最长边都不超过 `1344`。
+- `size` 只表达画幅比例；服务会计算模型可用的 32 像素网格画布。图生视频会把上传图适配到该画布。
+- 请求时长只能为 `4–15` 秒。H3 使用 24fps、17 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
+
+示例：
+
+```bash
+curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"workflow":"text-to-video","params":{"prompt":"雨后街道反射霓虹灯，电影感，环境声","size":"1920 × 1080","seconds":5,"profile":"preview"}}' \
+  "$BRM_API/tasks"
+```
 
 ## 5. 查询与下载
 
@@ -199,11 +216,11 @@ curl --user "$BRM_USER:$BRM_PASSWORD" \
   }'
 ```
 
-常规模式下 Qwen 使用 GPU0；切换至高显存视频模式时 Qwen 会停止，这是预期行为。工作台中的“Qwen 大模型”标签页适合浏览器内流式验证。
+Qwen 固定使用 GPU1（RTX A4000），媒体工作流固定使用 GPU0（RTX A5000）；两项服务正常情况下应同时在线。工作台中的“Qwen 大模型”标签页适合浏览器内流式验证。
 
 ## 7. 兼容层：原 Gradio API
 
-旧脚本仍可使用 `GET /gradio_api/info` 与九个固定端点：`/submit_workflow_1` 至 `/submit_workflow_8`、`/task_status`。它们使用 Gradio v2 POST + SSE，上传文件名需已经在 ComfyUI 输入目录中；因此不适合新业务系统。
+旧脚本仍可使用 `GET /gradio_api/info` 与固定端点：`/submit_workflow_1` 至 `/submit_workflow_8`、`/task_status`。H3 专用内部端点 `/submit_workflow_3_h3`、`/submit_workflow_4_h3` 仅由 REST 桥接调用。它们使用 Gradio v2 POST + SSE，上传文件名需已经在 ComfyUI 输入目录中；因此不适合新业务系统。
 
 仓库工具 [`call_gradio_api.py`](call_gradio_api.py) 已支持局域网 Basic Auth，密码只能从环境变量读取：
 

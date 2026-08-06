@@ -218,6 +218,30 @@ class TaskQueueTests(unittest.TestCase):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
         self.assertEqual(queue.task_status("not-here")["state"], "not_found")
 
+    def test_h3_profile_normalisation_uses_supported_canvas_and_frame_grid(self):
+        preview = self.webui.normalise_h3_request("1920 × 1080", 5, "preview")
+        self.assertEqual((preview["width"], preview["height"]), (864, 480))
+        self.assertEqual(preview["frames"], 124)
+        self.assertEqual(preview["effective_seconds"], 5.167)
+
+        quality = self.webui.normalise_h3_request("1080 × 1920", 6, "quality")
+        self.assertEqual((quality["width"], quality["height"]), (768, 1344))
+        self.assertEqual(quality["frames"], 158)
+
+    def test_h3_workflow_builders_forward_actual_canvas_and_source_image(self):
+        args = {
+            "prompt": "rain falls on a city street", "width": 864, "height": 480,
+            "frames": 124, "input_filename": "source.png",
+        }
+        t2v = self.webui.build_workflow_3("MiniMaxH3-文生视频", args)
+        self.assertEqual(t2v["104"]["inputs"]["prompt"], args["prompt"])
+        self.assertEqual(t2v["104"]["inputs"]["length"], 124)
+        self.assertEqual(t2v["91"]["inputs"]["audio"], ["23", 0])
+
+        i2v = self.webui.build_workflow_4("MiniMaxH3-图生视频", args)
+        self.assertEqual(i2v["1"]["inputs"]["image"], "source.png")
+        self.assertEqual(i2v["104"]["inputs"]["first_frame"], ["1", 0])
+
     def test_acestep_model_choices_follow_installed_weights(self):
         model_root = self.output_dir / "fake-comfy"
         turbo = model_root / "models" / "diffusion_models" / "acestep" / "acestep_v1.5_xl_turbo_bf16.safetensors"

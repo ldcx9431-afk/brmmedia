@@ -10,6 +10,7 @@
 - `/srv/brmmedia/ComfyUI/models`：ComfyUI 运行中的模型，均位于 E 盘的 WSL ext4 文件系统。
 - `/srv/brmmedia/models`：Qwen 等独立服务的模型目录；缓存、日志和输出也位于 E 盘 WSL 文件系统。
 - `D:\\model`：已导入的 ComfyUI 模型源目录；`baorong-model-import` 从此处以可断点续传方式同步到 E 盘。
+- `D:\\model\\MiniMax-H3`：MiniMax H3 约 42GB 的受控源权重；必须先落到这里，再导入 `/srv/brmmedia/ComfyUI/models`。
 - `D:\\models\\Qwen3.5-4B-AWQ-4bit`：Qwen 离线模型源；运行时副本位于 `/srv/brmmedia/models/Qwen3.5-4B-AWQ-4bit`。
 - `D:\\brmmedia\\artifacts`：诊断、离线包和原 Windows `custom_nodes` 源码交付目录。
 - `D:\\brmmedia\\archive`：历史输出与备份。
@@ -25,11 +26,10 @@
 
 | 模式 | 服务 | CUDA 设备 | 物理 GPU |
 |---|---|---:|---|
-| 常规 | ComfyUI/Gradio | `1` | RTX A4000 16 GB |
-| 常规 | Qwen/vLLM | `0` | RTX A5000 24 GB |
-| 高显存视频 | ComfyUI/Gradio | `0` | RTX A5000 24 GB |
+| 生产 | ComfyUI/Gradio（全部媒体流程） | `0` | RTX A5000 24 GB |
+| 生产 | Qwen/vLLM | `1` | RTX A4000 16 GB |
 
-高显存视频服务与 Qwen 服务互斥。
+两项服务必须同时在线。禁止 `--highvram`、`--gpu-only` 和旧的 `baorong-backend-highvram`，让 MiniMax H3 的内置 Qwen3-VL 编码器在 A5000 任务期间动态装卸。
 
 ## 模型交付要求
 
@@ -42,14 +42,27 @@ ComfyUI 的基础模型已从 `D:\\model` 导入。启动完整推理栈前，�
 
 ## 工作流验证顺序
 
-恢复服务后，先在 WSL 内执行以下无推理预检；它会逐一检查八个项目工作流需要的 ComfyUI 节点，缺少的节点会按工作流名称列出：
+切换 MiniMax H3 前必须执行以下受控步骤（任一项失败即停止，不下载或不切换）：
+
+```bash
+cd /srv/brmmedia/app
+./check_h3_preflight.sh
+./prepare_minimax_h3_comfyui.sh
+./download_minimax_h3_models.sh
+./import_comfy_models.sh
+./verify_comfy_models.sh
+```
+
+预检要求 GPU0=A5000、GPU1=A4000、WSL 可见内存不少于 64 GiB、Windows E: 页面文件不少于 64 GB，并在 D: 模型源与 E: WSL 运行目录都保留至少 50 GB 空间。下载脚本固定 Hugging Face revision，并不会把 Token 写入脚本或仓库。
+
+恢复服务后，先在 WSL 内执行以下无推理预检；它会逐一检查项目工作流需要的 ComfyUI 节点，缺少的节点会按工作流名称列出：
 
 ```bash
 cd /srv/brmmedia/app
 python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 ```
 
-预检全部显示 `READY` 后，按以下顺序提交小规格真实任务并核对产物文件：文生图、图片编辑、音乐、语音克隆、文生视频、图生视频、首尾帧视频、数字人。视频类先使用最短时长；高显存视频模式与 Qwen vLLM 服务互斥。
+预检全部显示 `READY` 后，先完成 Qwen 连续 10 次对话；再分别完成 H3 文生视频、图生视频各 3 次 `preview` 任务；通过后验证 `quality`。最后回归文生图、图片编辑、音乐、语音克隆、首尾帧视频、数字人、历史素材和 REST API。H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
 
 ## 内网访问
 
@@ -60,7 +73,7 @@ python3 validate_comfy_workflows.py --url http://127.0.0.1:8188
 
 ## 当前服务与只读验收
 
-常规模式中，`baorong-backend`、`nginx`、`qwen-vllm` 都应为 active；高显存视频模式下，`baorong-backend-highvram` 会替代常规后端，Qwen 停止是预期行为。
+生产模式中，`baorong-backend`、`brmmedia-lan-api`、`nginx`、`qwen-vllm` 都应为 `active`；`baorong-backend-highvram` 必须为 `inactive`。
 
 在 WSL 中运行以下命令可进行不创建任务、不读取凭据的验收：
 

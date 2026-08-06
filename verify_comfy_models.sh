@@ -55,6 +55,15 @@ verify_file LTX23_video_vae_bf16.safetensors vae/LTX23_video_vae_bf16.safetensor
 verify_tree LTX-2.3 loras/LTX-2.3
 verify_tree IndexTTS-2 IndexTTS-2
 
+if [ -d "$SOURCE_ROOT/MiniMax-H3" ] || [ "${BRMMEDIA_REQUIRE_H3_MODELS:-0}" = "1" ]; then
+  verify_file MiniMax-H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+  verify_file MiniMax-H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+  verify_file MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors vae/minimax_h3_video_vae_fp16.safetensors
+  verify_file MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors vae/minimax_h3_audio_vae_fp32.safetensors
+else
+  echo "[INFO] MiniMax H3 source not staged; H3 verification skipped."
+fi
+
 if [ "$failed" -ne 0 ]; then
   exit 1
 fi

@@ -5,7 +5,7 @@ set -u -o pipefail
 APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
 SOURCE_ROOT="${BRMMEDIA_SOURCE_ROOT:-/mnt/d/brmmedia/source}"
 COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
-EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-42d2aa55432b57371ddc9d4078ae250b54227641}"
+EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-15989f87ca89bfe2e7c47763252c559e96d97551}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 QWEN_DIR="$APP_ROOT/llm-backend-deploy"
 WORKFLOW_VALIDATOR="$APP_ROOT/validate_comfy_workflows.py"
@@ -44,7 +44,10 @@ check_source_runtime_sync() {
     "ubuntu-backend-deploy/webui.py"
     "ubuntu-backend-deploy/lan_api.py"
     "ubuntu-backend-deploy/comfyui_server.py"
+    "ubuntu-backend-deploy/workflows/MiniMaxH3-文生视频.json"
+    "ubuntu-backend-deploy/workflows/MiniMaxH3-图生视频.json"
     "validate_comfy_workflows.py"
+    "check_h3_preflight.sh"
     "brmmedia-verify-runtime.sh"
   )
   if [ ! -d "$SOURCE_ROOT" ]; then
@@ -120,7 +123,8 @@ expected_labels = {
 }
 expected_endpoints = {
     "/submit_workflow_1", "/submit_workflow_2", "/submit_workflow_3",
-    "/submit_workflow_4", "/submit_workflow_5", "/submit_workflow_6",
+    "/submit_workflow_4", "/submit_workflow_3_h3", "/submit_workflow_4_h3",
+    "/submit_workflow_5", "/submit_workflow_6",
     "/submit_workflow_7", "/submit_workflow_8", "/task_status",
 }
 
@@ -210,13 +214,12 @@ check_service nginx
 check_timer brmmedia-healthcheck.timer
 check_source_runtime_sync
 
-highvram=false
 if systemctl is-active --quiet baorong-backend-highvram; then
-  highvram=true
-  ok "high-VRAM mode is active; Qwen is intentionally excluded"
+  bad "legacy baorong-backend-highvram is active; it conflicts with the split-GPU production profile"
 else
-  check_service qwen-vllm
+  ok "legacy high-VRAM service is inactive"
 fi
+check_service qwen-vllm
 
 check_http gradio http://127.0.0.1:9000/gradio_api/info
 check_http lan_api http://127.0.0.1:9100/api/v1/health
@@ -224,9 +227,7 @@ check_http comfyui http://127.0.0.1:8188/system_stats
 check_gradio_ui_contract
 check_comfy_workflows
 
-if [ "$highvram" = false ]; then
-  check_http qwen http://127.0.0.1:8000/v1/models
-fi
+check_http qwen http://127.0.0.1:8000/v1/models
 
 if [ -d "$COMFY_ROOT/.git" ]; then
   comfy_ref="$(git -c safe.directory="$COMFY_ROOT" -C "$COMFY_ROOT" rev-parse HEAD 2>/dev/null || true)"
@@ -243,12 +244,14 @@ if [ -f "$QWEN_DIR/.env" ]; then
   # The profile only reads model identity and host, not secrets.
   qwen_model="$(grep '^QWEN_SERVED_MODEL_NAME=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
   qwen_host="$(grep '^QWEN_HOST=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
+  qwen_gpu="$(grep '^QWEN_CUDA_VISIBLE_DEVICES=' "$QWEN_DIR/.env" | head -n1 | cut -d= -f2-)"
   [ -n "$qwen_model" ] && ok "Qwen served model configured: $qwen_model" || bad "QWEN_SERVED_MODEL_NAME is missing"
   if [ "$qwen_host" = "127.0.0.1" ]; then
     ok "Qwen is bound to loopback"
   else
     bad "Qwen host is not loopback: ${qwen_host:-unset}"
   fi
+  [ "$qwen_gpu" = "1" ] && ok "Qwen is pinned to A4000/GPU1" || bad "Qwen GPU must be 1, got ${qwen_gpu:-unset}"
 else
   bad "Qwen runtime .env is missing"
 fi

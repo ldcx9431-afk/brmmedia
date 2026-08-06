@@ -50,6 +50,11 @@ SIZE_VALUES = [
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
 MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
+H3_PROFILE_VALUES = ["preview", "quality"]
+H3_PROFILE_DETAILS = {
+    "preview": {"short_edge": 480, "default_seconds": 5},
+    "quality": {"short_edge": 768, "default_seconds": 6},
+}
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ class WorkflowSpec:
     description: str
     required_assets: dict[str, str]
     normalizer: Callable[[dict[str, Any], dict[str, "AssetRecord"]], list[Any]]
+    options: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +84,7 @@ class TaskSubmission(BaseModel):
 
 app = FastAPI(
     title="BRMMedia LAN API",
-    version="1.0.0",
+    version="1.1.0",
     description="Authenticated LAN automation API for BRMMedia generation workflows.",
     openapi_url=f"{API_PREFIX}/openapi.json",
     docs_url=f"{API_PREFIX}/docs",
@@ -105,7 +111,10 @@ def _number(value: Any, field: str, *, minimum: float, maximum: float, integer: 
     if isinstance(value, bool):
         _fail(422, f"{field} must be a number")
     try:
-        parsed = int(value) if integer else float(value)
+        numeric = float(value)
+        if integer and not numeric.is_integer():
+            _fail(422, f"{field} must be an integer")
+        parsed = int(numeric) if integer else numeric
     except (TypeError, ValueError):
         _fail(422, f"{field} must be a number")
     if parsed < minimum or parsed > maximum:
@@ -198,7 +207,8 @@ def _normal_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]
     return [
         _trim_text(params.get("prompt"), "prompt"),
         _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
-        _number(params.get("seconds", 5), "seconds", minimum=2, maximum=360, integer=True),
+        _number(params.get("seconds", 5), "seconds", minimum=4, maximum=15, integer=True),
+        _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview"),
     ]
 
 
@@ -206,7 +216,9 @@ def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord
     image = _asset(params, assets, "image_asset_id", "image")
     return [
         _trim_text(params.get("prompt"), "prompt"), image.filename,
-        _number(params.get("seconds", 5), "seconds", minimum=2, maximum=360, integer=True),
+        _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
+        _number(params.get("seconds", 5), "seconds", minimum=4, maximum=15, integer=True),
+        _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview"),
     ]
 
 
@@ -254,8 +266,20 @@ def _normal_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> lis
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "text-to-image": WorkflowSpec("submit_workflow_1", "Z-Image 文生图", {}, _normal_text_to_image),
     "image-edit": WorkflowSpec("submit_workflow_2", "FLUX.2-klein 图片编辑", {"image_asset_id": "image"}, _normal_image_edit),
-    "text-to-video": WorkflowSpec("submit_workflow_3", "LTX2.3 文生视频", {}, _normal_text_to_video),
-    "image-to-video": WorkflowSpec("submit_workflow_4", "LTX2.3 图生视频", {"image_asset_id": "image"}, _normal_image_to_video),
+    "text-to-video": WorkflowSpec(
+        "submit_workflow_3_h3", "MiniMax H3 本地文生视频（含同步立体声音频）", {},
+        _normal_text_to_video,
+        {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
+         "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
+         "size_rule": "size selects aspect ratio; preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)"},
+    ),
+    "image-to-video": WorkflowSpec(
+        "submit_workflow_4_h3", "MiniMax H3 本地图生视频（含同步立体声音频）", {"image_asset_id": "image"},
+        _normal_image_to_video,
+        {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
+         "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
+         "size_rule": "size selects output aspect ratio; the source image is fitted to the H3 canvas"},
+    ),
     "first-last-frame-video": WorkflowSpec("submit_workflow_5", "LTX2.3 首尾帧视频", {"first_image_asset_id": "image", "last_image_asset_id": "image"}, _normal_first_last_frame),
     "talking-head": WorkflowSpec("submit_workflow_6", "LTX2.3 单图数字人-语音驱动", {"image_asset_id": "image", "audio_asset_id": "audio"}, _normal_talking_head),
     "voice-clone": WorkflowSpec("submit_workflow_7", "IndexTTS2 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone),
@@ -363,6 +387,7 @@ def capabilities() -> dict[str, Any]:
             slug: {
                 "description": spec.description,
                 "required_asset_fields": spec.required_assets,
+                "options": spec.options or {},
             }
             for slug, spec in WORKFLOWS.items()
         },

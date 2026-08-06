@@ -243,6 +243,11 @@ class TaskQueue:
             "done_ts": task.done_ts,
             "result": task.result if isinstance(task.result, list) else [],
             "error": task.error,
+            "effective_settings": {
+                key: task.args[key]
+                for key in ("profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds")
+                if key in task.args
+            },
         }
 
     @staticmethod
@@ -259,11 +264,18 @@ class TaskQueue:
             ]
             if status == TaskStatus.DONE and not result:
                 return None
+            saved_settings = record.get("effective_settings", {})
+            if not isinstance(saved_settings, dict):
+                saved_settings = {}
             return Task(
                 id=str(record["id"]),
                 name=str(record.get("name", "历史任务")),
                 workflow_name=str(record.get("workflow_name", "历史恢复")),
-                args={},
+                args={
+                    key: value
+                    for key, value in saved_settings.items()
+                    if key in {"profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds"}
+                },
                 status=status,
                 submit_ts=float(record.get("submit_ts", 0.0)),
                 start_ts=float(record.get("start_ts", 0.0)),
@@ -423,6 +435,11 @@ class TaskQueue:
                 "finished_at": task.done_ts or None,
                 "output_files": outputs,
                 "error": task.error or None,
+                "effective_settings": {
+                    key: task.args[key]
+                    for key in ("profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds")
+                    if key in task.args
+                },
             }
 
     def snapshot(self):
@@ -770,6 +787,54 @@ def _parse_size(size: str) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
+# MiniMax H3 Base is deliberately kept to the locally supported 768 short
+# edge.  The model generates on a 17-frame grid with a five-frame offset;
+# showing the adjusted values in the task record prevents the UI/API from
+# claiming an impossible duration.
+H3_PROFILES = {
+    "preview": {"short_edge": 480, "label": "稳定预览（480 短边，约 5 秒）"},
+    "quality": {"short_edge": 768, "label": "质量（768 短边，约 6 秒）"},
+}
+H3_MAX_LONG_EDGE = 1344
+H3_FPS = 24
+
+
+def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
+    """Validate a H3 request and return the actual canvas/frame-grid values."""
+    profile = str(profile or "preview")
+    if profile not in H3_PROFILES:
+        raise gr.Error("H3 档位仅支持 preview 或 quality")
+    try:
+        numeric_seconds = float(seconds)
+        if not numeric_seconds.is_integer():
+            raise ValueError
+        requested_seconds = int(numeric_seconds)
+    except (TypeError, ValueError):
+        raise gr.Error("视频时长必须是 4–15 秒的整数") from None
+    if requested_seconds < 4 or requested_seconds > 15:
+        raise gr.Error("MiniMax H3 视频时长仅支持 4–15 秒")
+
+    requested_width, requested_height = _parse_size(size)
+    short_edge = H3_PROFILES[profile]["short_edge"]
+    scale = min(
+        short_edge / min(requested_width, requested_height),
+        H3_MAX_LONG_EDGE / max(requested_width, requested_height),
+    )
+    width = max(32, int(round(requested_width * scale / 32)) * 32)
+    height = max(32, int(round(requested_height * scale / 32)) * 32)
+    frames = max(5, round(requested_seconds * H3_FPS))
+    frames += (5 - frames % 17) % 17
+    return {
+        "profile": profile,
+        "requested_size": size,
+        "requested_seconds": requested_seconds,
+        "width": width,
+        "height": height,
+        "frames": frames,
+        "effective_seconds": round(frames / H3_FPS, 3),
+    }
+
+
 def extract_result(outputs: dict, task: Task) -> list:
     """
     把 ComfyUI 执行完的 outputs 里的产物(音频 / 视频 / 图片)下载并保存到
@@ -819,17 +884,23 @@ def submit_workflow_2(prompt, input_filename):
         raise gr.Error("请输入提示词并上传要编辑的图片")
     return submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
 
-def submit_workflow_3(prompt, size, seconds):
-    # 工作流 JSON 的文件名(不含 .json)
+def submit_workflow_3(prompt, size, seconds, profile="preview"):
+    """Queue a local MiniMax H3 text-to-video job."""
     if not (prompt or "").strip():
         raise gr.Error("请输入视频提示词")
-    return submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
+    args = {"prompt": prompt, **normalise_h3_request(size, seconds, profile)}
+    return submit("MiniMaxH3-文生视频", args)
 
-def submit_workflow_4(prompt, input_filename, seconds):
-    # 工作流 JSON 的文件名(不含 .json)
+def submit_workflow_4(prompt, input_filename, seconds, profile="preview", size="768 × 1024"):
+    """Queue a local MiniMax H3 image-to-video job."""
     if not (prompt or "").strip() or not input_filename:
         raise gr.Error("请输入提示词并上传源图片")
-    return submit("LTX23-图生视频", {"prompt": prompt, "seconds": seconds, "input_filename": input_filename})
+    args = {
+        "prompt": prompt,
+        "input_filename": input_filename,
+        **normalise_h3_request(size, seconds, profile),
+    }
+    return submit("MiniMaxH3-图生视频", args)
 
 
 def submit_workflow_5(prompt, input_filename1, input_filename2, seconds):
@@ -911,6 +982,18 @@ def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> dic
     return submit_workflow_4(prompt, input_filename, seconds)
 
 
+# Versioned H3-oriented wrappers are used by the REST bridge.  Keep the two
+# legacy Gradio endpoints above intact for clients that already call them.
+def api_submit_workflow_3_h3(prompt: str, size: str, seconds: int, profile: str) -> dict:
+    return submit_workflow_3(prompt, size, seconds, profile)
+
+
+def api_submit_workflow_4_h3(
+    prompt: str, input_filename: str, size: str, seconds: int, profile: str
+) -> dict:
+    return submit_workflow_4(prompt, input_filename, seconds, profile, size)
+
+
 def api_submit_workflow_5(
     prompt: str, input_filename1: str, input_filename2: str, seconds: int
 ) -> dict:
@@ -977,13 +1060,13 @@ def build_workflow_3(workflow_name: str, args: dict) -> dict:
     path = WORKFLOW_DIR / (workflow_name + ".json")
     if not path.exists():
         raise gr.Error(f"找不到工作流文件:{path}")
-    width, height = _parse_size(args["size"])
     wf = json.loads(path.read_text(encoding="utf-8"))
-    wf["14"]["inputs"]["text"] = args["prompt"]
-    wf["38"]["inputs"]["value"] = args["seconds"]
-    wf["23"]["inputs"]["width"] = width
-    wf["23"]["inputs"]["height"] = height
-    wf["29"]["inputs"]["noise_seed"] = random.randint(1, 10000)
+    wf["104"]["inputs"].update({
+        "prompt": args["prompt"], "width": args["width"],
+        "height": args["height"], "length": args["frames"],
+    })
+    wf["15"]["inputs"]["noise_seed"] = random.randint(1, 1_000_000)
+    wf["110"]["inputs"]["filename_prefix"] = "MiniMaxH3-文生视频"
     return wf
 
 
@@ -996,10 +1079,13 @@ def build_workflow_4(workflow_name: str, args: dict) -> dict:
     if not path.exists():
         raise gr.Error(f"找不到工作流文件:{path}")
     wf = json.loads(path.read_text(encoding="utf-8"))
-    wf["10"]["inputs"]["image"] = args["input_filename"]
-    wf["14"]["inputs"]["text"] = args["prompt"]
-    wf["38"]["inputs"]["value"] = args["seconds"]
-    wf["29"]["inputs"]["noise_seed"] = random.randint(1, 10000)
+    wf["1"]["inputs"]["image"] = args["input_filename"]
+    wf["104"]["inputs"].update({
+        "prompt": args["prompt"], "width": args["width"],
+        "height": args["height"], "length": args["frames"],
+    })
+    wf["15"]["inputs"]["noise_seed"] = random.randint(1, 1_000_000)
+    wf["110"]["inputs"]["filename_prefix"] = "MiniMaxH3-图生视频"
     return wf
 
 
@@ -1130,8 +1216,8 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
 WORKFLOW_BUILDERS = {
     "image_z_image_turbo": (build_workflow_1, "文生图"),
     "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图片编辑"),
-    "LTX23-文生视频": (build_workflow_3, "文生视频"),
-    "LTX23-图生视频": (build_workflow_4, "图生视频"),
+    "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
+    "MiniMaxH3-图生视频": (build_workflow_4, "MiniMax H3 图生视频"),
     "LTX23-首尾帧视频": (build_workflow_5, "首尾帧视频"),
     "LTX23-单图数字人-语音驱动": (build_workflow_6, "单图数字人-语音驱动"),
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),
@@ -1680,28 +1766,38 @@ def build_ui():
                 )
 
             # ========== Tab 3 ==========
-            with gr.Tab("文生视频LTX2.3"):
+            with gr.Tab("MiniMax H3 文生视频"):
                 with gr.Row():
                     with gr.Column(scale=1):
                         prompt3 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的亚洲女孩在在花丛中散步", lines=3)
                     with gr.Column(scale=1):
                         with gr.Row():
                             size3 = gr.Dropdown(label="视频尺寸", choices=output_size, value="768 × 1024")
-                            seconds3 = gr.Number(value=5, label="视频时长", minimum=2, maximum=360, precision=0)
+                            seconds3 = gr.Number(value=5, label="视频时长（秒）", minimum=4, maximum=15, precision=0)
+                            profile3 = gr.Dropdown(
+                                label="生成档位", choices=list(H3_PROFILES), value="preview",
+                                info="preview：480 短边；quality：768 短边。实际时长会按 H3 帧网格调整。",
+                            )
                         submit_btn3 = gr.Button("提交", variant="primary")
                 submit_btn3.click(
                     fn=submit_workflow_3,
-                    inputs=[prompt3, size3, seconds3],
+                    inputs=[prompt3, size3, seconds3, profile3],
                     api_name="ui_submit_workflow_3",
                     api_visibility="private",
                 )
 
             # ========== Tab 4 ==========
-            with gr.Tab("图生视频LTX2.3"):
+            with gr.Tab("MiniMax H3 图生视频"):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt4 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=10, max_lines=10)
-                        seconds4 = gr.Number(value=5, label="视频时长", minimum=2, maximum=360, precision=0)
+                        with gr.Row():
+                            size4 = gr.Dropdown(label="输出画幅", choices=output_size, value="768 × 1024")
+                            seconds4 = gr.Number(value=5, label="视频时长（秒）", minimum=4, maximum=15, precision=0)
+                        profile4 = gr.Dropdown(
+                            label="生成档位", choices=list(H3_PROFILES), value="preview",
+                            info="H3 会将源图适配至所选画幅，并生成同步立体声音频。",
+                        )
                     with gr.Column(scale=1):
                         reference_image4 = gr.Image(type="filepath", height=400)   # 关键:拿到磁盘路径才能上传
                         uploaded_name4   = gr.State("")                # 存上传后 ComfyUI 给的文件名
@@ -1712,7 +1808,7 @@ def build_ui():
                                        api_visibility="private")   # 清空时一并清掉
                 submit_btn4.click(
                     fn=submit_workflow_4,
-                    inputs=[prompt4, uploaded_name4, seconds4],
+                    inputs=[prompt4, uploaded_name4, seconds4, profile4, size4],
                     api_name="ui_submit_workflow_4",
                     api_visibility="private",
                 )
@@ -1864,7 +1960,7 @@ def build_ui():
             with gr.Tab("Qwen 大模型"):
                 gr.Markdown(
                     "使用本机 Qwen3.5-4B 的流式问答能力做快速验证。"
-                    "高显存视频模式会暂时停止 Qwen 服务。"
+                    "Qwen 固定在 A4000，媒体工作流固定在 A5000；两项服务应同时在线。"
                 )
                 qwen_system = gr.Textbox(
                     label="系统提示词（可选）",
@@ -2001,6 +2097,8 @@ def build_ui():
         gr.api(api_submit_workflow_2, api_name="submit_workflow_2")
         gr.api(api_submit_workflow_3, api_name="submit_workflow_3")
         gr.api(api_submit_workflow_4, api_name="submit_workflow_4")
+        gr.api(api_submit_workflow_3_h3, api_name="submit_workflow_3_h3")
+        gr.api(api_submit_workflow_4_h3, api_name="submit_workflow_4_h3")
         gr.api(api_submit_workflow_5, api_name="submit_workflow_5")
         gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
         gr.api(api_submit_workflow_7, api_name="submit_workflow_7")

@@ -25,20 +25,10 @@ is_ok() {
   [ "$1" = "active" ]
 }
 
-normal_backend="baorong-backend"
-highvram_backend="baorong-backend-highvram"
+backend_service="baorong-backend"
+mode="a5000-media-a4000-qwen"
+qwen_expected=true
 nginx_state="$(service_state nginx)"
-highvram_state="$(service_state "$highvram_backend")"
-
-if is_ok "$highvram_state"; then
-  mode="highvram"
-  backend_service="$highvram_backend"
-  qwen_expected=false
-else
-  mode="normal"
-  backend_service="$normal_backend"
-  qwen_expected=true
-fi
 
 backend_state="$(service_state "$backend_service")"
 qwen_state="$(service_state qwen-vllm)"
@@ -73,8 +63,8 @@ if [ "${#problems[@]}" -eq 0 ]; then
 else
   failures=$((failures + 1))
   if [ "$failures" -ge "$RESTART_AFTER" ]; then
-    # Restart only the services that own a failed dependency. qwen-vllm is
-    # intentionally skipped while the high-VRAM profile is active.
+    # Restart only the service that owns the failed dependency.  Both media
+    # and Qwen are expected to be online in the split-GPU production profile.
     if ! is_ok "$backend_state" || [ "$gradio_code" != "200" ] || [ "$comfy_code" != "200" ]; then
       systemctl restart "$backend_service"
       restarted="$backend_service"

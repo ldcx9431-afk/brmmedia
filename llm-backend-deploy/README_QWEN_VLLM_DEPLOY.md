@@ -1,7 +1,7 @@
 # Qwen3.6 35B-A3B AWQ vLLM 独立部署
 
 > **当前 BRMMedia 生产 Profile（2026-08-03）不是本页的旧 35B 方案。**
-> 现网使用本地 `Qwen3.5-4B-AWQ-4bit`，由 GPU0（RTX A5000）运行，模型目录为
+> 目标生产组合使用本地 `Qwen3.5-4B-AWQ-4bit`，由 GPU1（RTX A4000）运行，模型目录为
 > `/srv/brmmedia/models/Qwen3.5-4B-AWQ-4bit`，仅经 Nginx 的认证 `/qwen/v1`
 > 路径对局域网提供服务。精确版本与启动参数见
 > `../runtime-locks/production-profile-2026-08-03.md`。请勿把本页示例直接覆盖

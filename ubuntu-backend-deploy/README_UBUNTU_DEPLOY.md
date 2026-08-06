@@ -1,9 +1,9 @@
 # 包容万象数智启动器 Ubuntu 后端一体化部署文档
 
-> **Windows 11 + WSL2 当前生产 Profile：** 常规模式的 ComfyUI/Gradio 使用 GPU1
-> （RTX A4000），Qwen3.5-4B AWQ vLLM 使用 GPU0（RTX A5000）；高显存视频模式
-> 会让 ComfyUI 使用 GPU0 并停止 Qwen。实际服务、模型与锁定版本以仓库根目录的
-> `WSL_TEST_DEPLOY.md` 和 `runtime-locks/production-profile-2026-08-03.md` 为准。
+> **Windows 11 + WSL2 MiniMax H3 目标 Profile：** ComfyUI/Gradio 的所有媒体流程使用
+> GPU0（RTX A5000），Qwen3.5-4B AWQ vLLM 使用 GPU1（RTX A4000）；两项服务需同时在线。
+> ComfyUI 使用动态卸载，不允许 `--highvram` 或 `--gpu-only`。实际切换与验收以仓库根目录的
+> `WSL_TEST_DEPLOY.md` 和 `runtime-locks/minimax-h3-target-profile-2026-08-05.md` 为准。
 
 > **重要：本页后续大量内容是 2026-06 的通用/旧 GPU 参考，不可直接用于当前服务器。**
 > 当前 Windows 11 + WSL2 的生产与恢复步骤只执行 `WSL_TEST_DEPLOY.md`；局域网访问只走

@@ -51,4 +51,17 @@ copy_file LTX23_video_vae_bf16.safetensors vae/LTX23_video_vae_bf16.safetensors
 copy_tree LTX-2.3 loras/LTX-2.3
 copy_tree IndexTTS-2 IndexTTS-2
 
+# H3 is staged separately because the four files are about 42 GB.  Existing
+# recovery imports remain usable before this optional model source arrives;
+# once any H3 source component is present, require all four atomically.
+H3_SOURCE="$SOURCE_ROOT/MiniMax-H3"
+if [ -d "$H3_SOURCE" ] || [ "${BRMMEDIA_REQUIRE_H3_MODELS:-0}" = "1" ]; then
+  copy_file MiniMax-H3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+  copy_file MiniMax-H3/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+  copy_file MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors vae/minimax_h3_video_vae_fp16.safetensors
+  copy_file MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors vae/minimax_h3_audio_vae_fp32.safetensors
+else
+  echo "[INFO] MiniMax H3 source not staged; skipping optional H3 import."
+fi
+
 echo "[OK] ComfyUI model import complete."

@@ -80,11 +80,10 @@ install_service \
   "$APP_ROOT/llm-backend-deploy" \
   "$APP_ROOT/llm-backend-deploy/start_qwen_vllm.sh"
 
-install_service \
-  "$ROOT_DIR/ubuntu-backend-deploy/baorong-backend-highvram.service.example" \
-  /etc/systemd/system/baorong-backend-highvram.service \
-  "$APP_ROOT/ubuntu-backend-deploy" \
-  "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh"
+# Legacy high-VRAM mode stole GPU0 and stopped Qwen.  Keep its source example
+# for rollback only; prevent an old installed unit from competing with the
+# production A5000-media/A4000-Qwen split profile.
+systemctl disable --now baorong-backend-highvram.service 2>/dev/null || true
 
 if [ -f "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" ]; then
   cp "$ROOT_DIR/ubuntu-backend-deploy/baorong-model-import.service.example" \
@@ -108,7 +107,6 @@ systemctl enable --now brmmedia-healthcheck.timer
 systemd-analyze verify \
   /etc/systemd/system/baorong-backend.service \
   /etc/systemd/system/brmmedia-lan-api.service \
-  /etc/systemd/system/baorong-backend-highvram.service \
   /etc/systemd/system/qwen-vllm.service \
   /etc/systemd/system/brmmedia-healthcheck.service \
   /etc/systemd/system/brmmedia-healthcheck.timer
@@ -131,12 +129,10 @@ Import local models / documented custom nodes when their source is ready:
   sudo systemctl enable --now baorong-model-import
   sudo systemctl start baorong-custom-nodes-install
 
-High-VRAM video mode (stops the normal backend and Qwen):
-  sudo systemctl start baorong-backend-highvram
-
-Return to normal mode:
-  sudo systemctl stop baorong-backend-highvram
-  sudo systemctl start baorong-backend qwen-vllm
+Production GPU layout:
+  baorong-backend / all ComfyUI media flows: GPU0 RTX A5000
+  qwen-vllm: GPU1 RTX A4000
+  Both services are intentionally enabled and online together.
 
 Logs:
   sudo journalctl -u baorong-backend -f

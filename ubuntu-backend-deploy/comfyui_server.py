@@ -52,8 +52,10 @@ LOG_FILE = Path(os.environ.get("COMFYUI_LOG_FILE", BASE_DIR / "comfyui_runtime.l
 DEFAULT_ARGS = ["--enable-manager", "--disable-auto-launch"]
 EXTRA_ARGS = os.environ.get("COMFYUI_ARGS", "").split()
 PERF_PROFILE = os.environ.get("BRM_PERF_PROFILE", "balanced").strip().lower()
-if PERF_PROFILE == "max" and "--highvram" not in EXTRA_ARGS:
-    EXTRA_ARGS = ["--highvram", *EXTRA_ARGS]
+if any(arg in {"--highvram", "--gpu-only"} for arg in EXTRA_ARGS):
+    raise RuntimeError(
+        "MiniMax H3 requires ComfyUI dynamic offload; remove --highvram and --gpu-only from COMFYUI_ARGS."
+    )
 START_ARGS = DEFAULT_ARGS + EXTRA_ARGS
 
 _process: subprocess.Popen | None = None
