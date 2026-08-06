@@ -105,6 +105,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('"$CURL_RETRIES"', downloader)
         self.assertIn("BRMMEDIA_H3_PARALLEL_RANGES", downloader)
         self.assertIn('"$PARALLEL_RANGES"', downloader)
+        self.assertIn('--setenv="BRMMEDIA_H3_REPO=$REPO"', downloader)
+        self.assertIn('--setenv="BRMMEDIA_H3_REVISION=$REVISION"', downloader)
         self.assertIn("strictly in offset order", downloader)
         self.assertIn("will retry with", downloader)
         self.assertIn('"$(basename \"$file\").chunk.*" -delete', downloader)

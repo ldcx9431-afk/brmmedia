@@ -263,6 +263,8 @@ for name in diffusion text video audio; do
       --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
       --setenv="BRMMEDIA_H3_PARALLEL_RANGES=$PARALLEL_RANGES" \
       --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
+      --setenv="BRMMEDIA_H3_REPO=$REPO" \
+      --setenv="BRMMEDIA_H3_REVISION=$REVISION" \
       "${proxy_env_args[@]}" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
@@ -283,6 +285,8 @@ for name in diffusion text video audio; do
     --setenv="BRMMEDIA_H3_CURL_RETRY_DELAY=$CURL_RETRY_DELAY" \
     --setenv="BRMMEDIA_H3_PARALLEL_RANGES=$PARALLEL_RANGES" \
     --setenv="BRMMEDIA_H3_BASE_URL=$H3_BASE_URL" \
+    --setenv="BRMMEDIA_H3_REPO=$REPO" \
+    --setenv="BRMMEDIA_H3_REVISION=$REVISION" \
     "${proxy_env_args[@]}" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
