@@ -126,6 +126,17 @@ ComfyUI 回环健康端点均返回 HTTP 200；超时、后端退出或其中任
 
 候选运行目录包含 `accept_minimax_h3_video.sh`：不带参数时执行一组 T2V/I2V preview 冒烟和 MP4 音视频流校验；`sudo ./accept_minimax_h3_video.sh --full --restart-recovery` 会执行每类 3 个 preview 与两个 quality 任务，并在首个完成任务后重启指定 backend，再通过 REST 查询、下载和 `ffprobe` 验证该任务仍可恢复。Canary 必须设置其回环 API、backend unit 和 Gradio 健康地址环境变量，如本文开头示例；普通生产端点不应在 H3 未验收时承担 burn-in。
 
+若完整验收在 **最后的图生视频 quality** 阶段被明确的维护操作中断，但此前的 3 组 preview、重启恢复与文生视频 quality 的日志均已保留，可仅补测缺失的一项：
+
+```bash
+sudo env BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
+  BRMMEDIA_H3_POLL_SECONDS=5 \
+  BRMMEDIA_H3_TASK_TIMEOUT_SECONDS=3600 \
+  ./accept_minimax_h3_video.sh --quality-i2v-only
+```
+
+该恢复门禁仍会上传独立夹具、走 REST 提交、读取实际生效参数、下载成品并以 `ffprobe` 检查 MP4 的视频流和双声道原生音频；它只用于补齐已留存完整证据中的缺项，不能取代没有日志的 `--full --restart-recovery`。
+
 受控升级会将旧 ComfyUI commit、工作区状态和后端 Python 依赖版本冻结到 `runtime-locks/comfyui-h3-backups/`；升级过程中失败会自动恢复旧 commit 与已冻结的 Python 包版本。
 
 服务器上已有旧工作区出现未提交修改时，不要强行 `git pull` 或覆盖 `/srv/brmmedia/app`。先从干净 Git clone 执行 `sudo ./stage_h3_runtime_release.sh /mnt/d/brmmedia/releases/h3-<commit>`，它会在 E: 创建独立运行副本并复用已验证的 venv、配置、任务历史与素材输出；旧运行目录保留为回退目标。

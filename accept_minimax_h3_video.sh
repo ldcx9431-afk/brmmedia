@@ -8,14 +8,20 @@ POLL_SECONDS="${BRMMEDIA_H3_POLL_SECONDS:-10}"
 TIMEOUT_SECONDS="${BRMMEDIA_H3_TASK_TIMEOUT_SECONDS:-5400}"
 FULL=0
 RESTART_RECOVERY=0
+QUALITY_I2V_ONLY=0
 
 for argument in "$@"; do
   case "$argument" in
     --full) FULL=1 ;;
     --restart-recovery) RESTART_RECOVERY=1 ;;
-    *) echo "usage: $0 [--full] [--restart-recovery]" >&2; exit 2 ;;
+    --quality-i2v-only) QUALITY_I2V_ONLY=1 ;;
+    *) echo "usage: $0 [--full] [--restart-recovery] [--quality-i2v-only]" >&2; exit 2 ;;
   esac
 done
+if [ "$QUALITY_I2V_ONLY" -eq 1 ] && { [ "$FULL" -eq 1 ] || [ "$RESTART_RECOVERY" -eq 1 ]; }; then
+  echo "[ERROR] --quality-i2v-only cannot be combined with --full or --restart-recovery." >&2
+  exit 2
+fi
 
 for command in curl python3 ffprobe base64; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -245,6 +251,18 @@ if [ "$(printf '%s' "$health" | json_get status)" != "ok" ]; then
 fi
 
 image_asset_id="$(upload_fixture_image)"
+if [ "$QUALITY_I2V_ONLY" -eq 1 ]; then
+  # This focused gate is intentionally available for recovery from an
+  # interrupted full burn-in.  It still submits through the public REST
+  # contract and verifies the returned effective settings, downloadable MP4,
+  # video stream and native stereo audio.  It never substitutes for a clean
+  # full run unless the earlier preview/T2V-quality evidence is retained.
+  quality_i2v="$(submit_task image-to-video "{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A gentle cinematic movement with synchronized natural ambience.\",\"size\":\"1344 × 768\",\"seconds\":6,\"profile\":\"quality\"}")"
+  wait_for_task "$quality_i2v" "image-to-video quality recovery"
+  verify_native_audio_mp4 "$quality_i2v" "image-to-video quality recovery" quality 6
+  echo "[PASS] MiniMax H3 quality I2V recovery acceptance passed."
+  exit 0
+fi
 preview_runs=1
 if [ "$FULL" -eq 1 ]; then preview_runs=3; fi
 

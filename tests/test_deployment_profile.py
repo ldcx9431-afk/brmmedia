@@ -81,6 +81,8 @@ class DeploymentProfileTests(unittest.TestCase):
     def test_h3_acceptance_can_verify_task_recovery_across_restart(self):
         acceptance = (REPO_ROOT / "accept_minimax_h3_video.sh").read_text(encoding="utf-8")
         self.assertIn("--restart-recovery", acceptance)
+        self.assertIn("--quality-i2v-only", acceptance)
+        self.assertIn("quality I2V recovery acceptance", acceptance)
         self.assertIn("verify_completed_task_after_restart", acceptance)
         self.assertIn("systemctl restart", acceptance)
         self.assertIn('"$API_BASE/tasks/$task_id"', acceptance)
