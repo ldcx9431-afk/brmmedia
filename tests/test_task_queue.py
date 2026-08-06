@@ -219,6 +219,10 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(queue.task_status("not-here")["state"], "not_found")
 
     def test_h3_profile_normalisation_uses_supported_canvas_and_frame_grid(self):
+        minimum = self.webui.normalise_h3_request("768 × 1024", 4, "preview")
+        self.assertEqual(minimum["frames"], 124)
+        self.assertEqual(minimum["effective_seconds"], 5.167)
+
         preview = self.webui.normalise_h3_request("1920 × 1080", 5, "preview")
         self.assertEqual((preview["width"], preview["height"]), (864, 480))
         self.assertEqual(preview["frames"], 124)
