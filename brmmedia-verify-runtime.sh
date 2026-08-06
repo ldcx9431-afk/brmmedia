@@ -2,8 +2,20 @@
 # Read-only post-deploy acceptance for the production WSL runtime.
 set -u -o pipefail
 
-APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
-SOURCE_ROOT="${BRMMEDIA_SOURCE_ROOT:-/mnt/d/brmmedia/source}"
+RUNTIME_ENV_FILE="${BRMMEDIA_RUNTIME_ENV_FILE:-/etc/brmmedia/runtime.env}"
+runtime_env_value() {
+  local key="$1"
+  [ -r "$RUNTIME_ENV_FILE" ] || return 0
+  sed -n "s/^${key}=//p" "$RUNTIME_ENV_FILE" | tail -n1
+}
+
+# The verifier is installed globally, while the active runtime can be a staged
+# H3 release.  Prefer an explicit caller value, then the systemd installer
+# record, and only then the legacy recovery root.
+APP_ROOT="${BRMMEDIA_APP_ROOT:-$(runtime_env_value BRMMEDIA_APP_ROOT)}"
+SOURCE_ROOT="${BRMMEDIA_SOURCE_ROOT:-$(runtime_env_value BRMMEDIA_SOURCE_ROOT)}"
+APP_ROOT="${APP_ROOT:-/srv/brmmedia/app}"
+SOURCE_ROOT="${SOURCE_ROOT:-/mnt/d/brmmedia/source}"
 COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-15989f87ca89bfe2e7c47763252c559e96d97551}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
@@ -53,6 +65,10 @@ check_source_runtime_sync() {
     "verify_comfy_models.sh"
     "prepare_minimax_h3_comfyui.sh"
     "rollback_minimax_h3_comfyui.sh"
+    "activate_minimax_h3.sh"
+    "accept_minimax_h3_video.sh"
+    "start_minimax_h3_download.sh"
+    "wait_import_minimax_h3_models.sh"
     "brmmedia-verify-runtime.sh"
   )
   if [ ! -d "$SOURCE_ROOT" ]; then

@@ -5,7 +5,6 @@
 set -euo pipefail
 
 APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
-COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 BACKEND_ENV="$BACKEND_DIR/.env"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
@@ -16,6 +15,21 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 if [ ! -f "$BACKEND_ENV" ] || [ ! -f "$BACKEND_DIR/webui.py" ]; then
   echo "[ERROR] Runtime application is incomplete: $APP_ROOT" >&2
+  exit 1
+fi
+
+# The candidate dotenv is what start_backend.sh will source.  Resolve the
+# same values here rather than accepting a caller's COMFYUI_ROOT override,
+# which could otherwise prepare one checkout and launch another.
+dotenv_value() {
+  sed -n "s/^$1=//p" "$BACKEND_ENV" | tail -n1 | sed -e 's/^"//' -e 's/"$//'
+}
+COMFY_ROOT="$(dotenv_value COMFYUI_ROOT)"
+COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
+COMFY_PYTHON="$(dotenv_value COMFYUI_PYTHON)"
+COMFY_PYTHON="${COMFY_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
+if [ ! -d "$COMFY_ROOT" ] || [ ! -x "$COMFY_PYTHON" ]; then
+  echo "[ERROR] Candidate ComfyUI runtime is invalid (root=$COMFY_ROOT, python=$COMFY_PYTHON)." >&2
   exit 1
 fi
 if ! grep -q 'MiniMaxH3-文生视频' "$BACKEND_DIR/webui.py" || \
@@ -43,6 +57,31 @@ if ! systemctl cat baorong-backend 2>/dev/null | grep -Fq "ExecStart=$expected_e
   exit 1
 fi
 
+previous_engine="$(dotenv_value BRMMEDIA_VIDEO_ENGINE)"
+previous_engine="${previous_engine:-ltx23}"
+engine_updated=0
+restore_after_failed_activation() {
+  local rollback_status=0
+  if [ "$engine_updated" -eq 1 ]; then
+    echo "[WARN] H3 activation failed; restoring candidate video engine to $previous_engine." >&2
+    if grep -q '^BRMMEDIA_VIDEO_ENGINE=' "$BACKEND_ENV"; then
+      sed -i "s/^BRMMEDIA_VIDEO_ENGINE=.*/BRMMEDIA_VIDEO_ENGINE=$previous_engine/" "$BACKEND_ENV"
+    else
+      printf '\nBRMMEDIA_VIDEO_ENGINE=%s\n' "$previous_engine" >> "$BACKEND_ENV"
+    fi
+    # prepare_minimax_h3_comfyui.sh has already completed at this point, so
+    # invoke its durable snapshot rollback while the failed backend is down.
+    if ! runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" \
+      COMFYUI_PYTHON="$COMFY_PYTHON" BRMMEDIA_APP_ROOT="$APP_ROOT" \
+      "$APP_ROOT/rollback_minimax_h3_comfyui.sh"; then
+      rollback_status=1
+      echo "[WARN] Automatic ComfyUI rollback failed; inspect $APP_ROOT/runtime-locks/comfyui-h3-backups." >&2
+    fi
+  fi
+  return "$rollback_status"
+}
+trap restore_after_failed_activation ERR
+
 echo "[preflight] Verifying GPU, memory, page-file, and disk prerequisites..."
 BRMMEDIA_APP_ROOT="$APP_ROOT" "$APP_ROOT/check_h3_preflight.sh"
 
@@ -51,7 +90,7 @@ runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
   /usr/local/sbin/brmmedia-verify-comfy-models
 
 echo "[2/4] Upgrading ComfyUI to the pinned native-H3 revision..."
-runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" BRMMEDIA_APP_ROOT="$APP_ROOT" \
+runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$COMFY_ROOT" COMFYUI_PYTHON="$COMFY_PYTHON" BRMMEDIA_APP_ROOT="$APP_ROOT" \
   "$APP_ROOT/prepare_minimax_h3_comfyui.sh"
 
 echo "[3/4] Enabling H3 in the backend environment..."
@@ -60,8 +99,10 @@ if grep -q '^BRMMEDIA_VIDEO_ENGINE=' "$BACKEND_ENV"; then
 else
   printf '\nBRMMEDIA_VIDEO_ENGINE=h3\n' >> "$BACKEND_ENV"
 fi
+engine_updated=1
 
 echo "[4/4] Starting backend; run H3 preview T2V and I2V smoke tests next..."
 systemctl start baorong-backend
 systemctl is-active --quiet baorong-backend
+trap - ERR
 echo "[OK] MiniMax H3 is active. Do not call this production-ready until the preview/quality and regression acceptance suite passes."

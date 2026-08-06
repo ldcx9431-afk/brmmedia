@@ -24,3 +24,17 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("QWEN_GPU_MEMORY_UTILIZATION=0.70", text)
         self.assertNotIn("QWEN_CUDA_VISIBLE_DEVICES=0", text)
 
+    def test_runtime_verifier_uses_installed_release_record(self):
+        verifier = (REPO_ROOT / "brmmedia-verify-runtime.sh").read_text(encoding="utf-8")
+        installer = (REPO_ROOT / "install_ubuntu_systemd_services.sh").read_text(encoding="utf-8")
+        self.assertIn("/etc/brmmedia/runtime.env", verifier)
+        self.assertIn("runtime_env_value BRMMEDIA_APP_ROOT", verifier)
+        self.assertIn("BRMMEDIA_SOURCE_ROOT", installer)
+        self.assertIn("/etc/brmmedia/runtime.env", installer)
+
+    def test_h3_activation_uses_candidate_env_and_restores_on_start_failure(self):
+        activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
+        self.assertIn("dotenv_value COMFYUI_ROOT", activation)
+        self.assertIn("restore_after_failed_activation", activation)
+        self.assertIn("trap restore_after_failed_activation ERR", activation)
+        self.assertIn("rollback_minimax_h3_comfyui.sh", activation)
