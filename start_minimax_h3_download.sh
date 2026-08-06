@@ -14,6 +14,7 @@ SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 # 8MiB Xet responses were frequently terminated early, while 1MiB ranges
 # complete reliably and never require discarding a partial response.
 CHUNK_BYTES="${BRMMEDIA_H3_CHUNK_BYTES:-1048576}"
+MIN_CHUNK_BYTES="${BRMMEDIA_H3_MIN_CHUNK_BYTES:-1048576}"
 
 declare -A components=(
   [diffusion]='diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
@@ -43,13 +44,21 @@ expected_sha256() {
 }
 
 download_component() {
-  local name="$1" relative file expected expected_hash actual actual_hash attempt end chunk tmp headers received content_range
+  local name="$1" relative file expected expected_hash actual actual_hash attempt end chunk effective_chunk tmp headers received content_range
   relative="${components[$name]:-}"
   [ -n "$relative" ] || { echo "[ERROR] Unknown component: $name" >&2; return 2; }
   file="$MODEL_DIR/$relative"
   expected="$(expected_size "$name")"
   expected_hash="$(expected_sha256 "$name")"
   install -d "$(dirname "$file")"
+  if ! [[ "$CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]] || ! [[ "$MIN_CHUNK_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] H3 chunk sizes must be positive integers." >&2
+    return 2
+  fi
+  effective_chunk="$CHUNK_BYTES"
+  if [ "$effective_chunk" -lt "$MIN_CHUNK_BYTES" ]; then
+    effective_chunk="$MIN_CHUNK_BYTES"
+  fi
 
   # Xet-backed Hugging Face redirects can occasionally close a long ranged
   # response early (curl 18).  Download immutable, bounded ranges and append
@@ -70,7 +79,7 @@ download_component() {
       echo "[ERROR] $name exceeds expected byte count ($actual > $expected)" >&2
       return 1
     fi
-    chunk="$CHUNK_BYTES"
+    chunk="$effective_chunk"
     if [ $((expected - actual)) -lt "$chunk" ]; then
       chunk=$((expected - actual))
     fi
@@ -93,6 +102,16 @@ download_component() {
     fi
     echo "[WARN] $name rejected incomplete/unexpected segment: received=$received expected=$chunk range=${content_range:-missing}" >&2
     rm -f "$tmp" "$headers"
+    # A proxy can tolerate normal 8MiB transfers yet cut a particular large
+    # Xet response.  Preserve the verified prefix and shrink only future
+    # requests for this worker instead of wasting retries on the same range.
+    if [ "$effective_chunk" -gt "$MIN_CHUNK_BYTES" ]; then
+      effective_chunk=$((effective_chunk / 2))
+      if [ "$effective_chunk" -lt "$MIN_CHUNK_BYTES" ]; then
+        effective_chunk="$MIN_CHUNK_BYTES"
+      fi
+      echo "[INFO] $name will retry with ${effective_chunk}-byte segments." >&2
+    fi
     sleep 5
   done
   echo "[ERROR] $name did not complete after repeated resumable attempts" >&2
@@ -150,6 +169,7 @@ for name in diffusion text video audio; do
     systemd-run --unit="brmmedia-h3-download-$name" --collect \
       --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
       --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
+      --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
       /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
     continue
   fi
@@ -164,6 +184,7 @@ for name in diffusion text video audio; do
   systemd-run --unit="brmmedia-h3-download-$name" --collect \
     --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
     --setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES" \
+    --setenv="BRMMEDIA_H3_MIN_CHUNK_BYTES=$MIN_CHUNK_BYTES" \
     /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
 show_status

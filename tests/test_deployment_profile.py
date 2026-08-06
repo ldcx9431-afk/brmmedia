@@ -61,3 +61,5 @@ class DeploymentProfileTests(unittest.TestCase):
     def test_h3_worker_inherits_the_stage_chunk_size(self):
         downloader = (REPO_ROOT / "start_minimax_h3_download.sh").read_text(encoding="utf-8")
         self.assertIn('--setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES"', downloader)
+        self.assertIn("BRMMEDIA_H3_MIN_CHUNK_BYTES", downloader)
+        self.assertIn("will retry with", downloader)
