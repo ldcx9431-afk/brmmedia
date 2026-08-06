@@ -16,18 +16,64 @@ declare -A components=(
   [audio]='vae/minimax_h3_audio_vae_fp32.safetensors'
 )
 
+expected_size() {
+  case "$1" in
+    diffusion) echo 20970379616 ;;
+    text) echo 15687142551 ;;
+    video) echo 5207808496 ;;
+    audio) echo 605254808 ;;
+    *) return 1 ;;
+  esac
+}
+
+download_component() {
+  local name="$1" relative file expected actual attempt
+  relative="${components[$name]:-}"
+  [ -n "$relative" ] || { echo "[ERROR] Unknown component: $name" >&2; return 2; }
+  file="$MODEL_DIR/$relative"
+  expected="$(expected_size "$name")"
+  install -d "$(dirname "$file")"
+
+  # Xet-backed Hugging Face redirects can occasionally close a ranged response
+  # early (curl 18).  Each new curl invocation resumes the same file; keep the
+  # transient service alive until its immutable expected byte count is reached.
+  for attempt in $(seq 1 10000); do
+    actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
+    if [ "$actual" -eq "$expected" ]; then
+      echo "[OK] $name complete: $actual bytes"
+      return 0
+    fi
+    if [ "$actual" -gt "$expected" ]; then
+      echo "[ERROR] $name exceeds expected byte count ($actual > $expected)" >&2
+      return 1
+    fi
+    echo "[INFO] $name attempt=$attempt resume=$actual/$expected"
+    curl --silent --show-error --fail --location --continue-at - \
+      --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      --speed-time 90 --speed-limit 1024 --output "$file" \
+      "https://huggingface.co/$REPO/resolve/$REVISION/$relative" || true
+    sleep 5
+  done
+  echo "[ERROR] $name did not complete after repeated resumable attempts" >&2
+  return 1
+}
+
 show_status() {
   local name relative file expected actual
   for name in diffusion text video audio; do
     relative="${components[$name]}"
     file="$MODEL_DIR/$relative"
-    expected="$(case "$name" in diffusion) echo 20970379616;; text) echo 15687142551;; video) echo 5207808496;; audio) echo 605254808;; esac)"
+    expected="$(expected_size "$name")"
     actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
     printf '%-10s %-12s %s/%s bytes  %s\n' "$name" \
       "$(systemctl is-active "brmmedia-h3-download-$name" 2>/dev/null || true)" "$actual" "$expected" "$relative"
   done
 }
 
+if [ "${1:-}" = "--worker" ]; then
+  download_component "${2:?usage: $0 --worker <component>}"
+  exit $?
+fi
 if [ "${1:-}" = "--status" ]; then
   show_status
   exit 0
@@ -53,9 +99,6 @@ for name in diffusion text video audio; do
   fi
   systemd-run --unit="brmmedia-h3-download-$name" --collect \
     --property="User=$SERVICE_USER" --property=Nice=10 --property="WorkingDirectory=$MODEL_DIR" \
-    /usr/bin/curl --silent --show-error --fail --location --continue-at - \
-    --retry 12 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
-    --speed-time 90 --speed-limit 1024 --output "$file" \
-    "https://huggingface.co/$REPO/resolve/$REVISION/$relative"
+    /usr/bin/env bash "$(readlink -f "$0")" --worker "$name"
 done
 show_status
