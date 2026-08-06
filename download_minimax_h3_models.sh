@@ -9,6 +9,13 @@ APP_ROOT="${BRMMEDIA_APP_ROOT:-/srv/brmmedia/app}"
 REPO="${BRMMEDIA_H3_REPO:-Comfy-Org/MiniMax-H3}"
 REVISION="${BRMMEDIA_H3_REVISION:-0bd506d2e895983a9663037febda27aa3948cf48}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRANSPORT="${BRMMEDIA_H3_TRANSPORT:-auto}"
+H3_FILES=(
+  'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
+  'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
+  'vae/minimax_h3_video_vae_fp16.safetensors'
+  'vae/minimax_h3_audio_vae_fp32.safetensors'
+)
 
 if [ "${BRMMEDIA_H3_SKIP_PREFLIGHT:-0}" != "1" ]; then
   BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE="${BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE:-0}" \
@@ -29,13 +36,32 @@ if [ -z "$HF_BIN" ] || [ ! -x "$HF_BIN" ]; then
 fi
 
 mkdir -p "$MODEL_DIR"
-echo "[INFO] Staging $REPO@$REVISION into $MODEL_DIR"
-"$HF_BIN" download "$REPO" \
-  --revision "$REVISION" \
-  --local-dir "$MODEL_DIR" \
-  --include 'diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors' \
-  --include 'text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors' \
-  --include 'vae/minimax_h3_video_vae_fp16.safetensors' \
-  --include 'vae/minimax_h3_audio_vae_fp32.safetensors'
+download_with_hf() {
+  echo "[INFO] Staging $REPO@$REVISION with Hugging Face CLI"
+  # Some proxy appliances cannot carry hf-xet's HTTP stack.  Disabling Xet
+  # makes a failure immediate so auto mode can fall back to curl safely.
+  HF_HUB_DISABLE_XET=1 "$HF_BIN" download "$REPO" --revision "$REVISION" \
+    --local-dir "$MODEL_DIR" --include "${H3_FILES[@]}"
+}
+
+download_with_curl() {
+  command -v curl >/dev/null 2>&1 || { echo "[ERROR] curl is required for curl transport" >&2; return 1; }
+  local base="https://huggingface.co/$REPO/resolve/$REVISION" relative target
+  echo "[INFO] Staging $REPO@$REVISION with resumable curl downloads"
+  for relative in "${H3_FILES[@]}"; do
+    target="$MODEL_DIR/$relative"
+    mkdir -p "$(dirname "$target")"
+    curl --fail --location --continue-at - --retry 12 --retry-delay 5 --retry-all-errors \
+      --connect-timeout 30 --speed-time 90 --speed-limit 1024 \
+      --output "$target" "$base/$relative"
+  done
+}
+
+case "$TRANSPORT" in
+  hf) download_with_hf ;;
+  curl) download_with_curl ;;
+  auto) download_with_hf || download_with_curl ;;
+  *) echo "[ERROR] BRMMEDIA_H3_TRANSPORT must be auto, hf, or curl" >&2; exit 1 ;;
+esac
 
 echo "[OK] H3 source weights staged. Review the MiniMax H3 model license before production use."
