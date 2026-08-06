@@ -59,6 +59,15 @@ OUTPUT_DIR = Path(os.environ.get("BRM_OUTPUT_DIR", BASE_DIR / "outputs")).expand
 VIDEO_ENGINE = os.environ.get("BRMMEDIA_VIDEO_ENGINE", "ltx23").strip().lower()
 if VIDEO_ENGINE not in {"ltx23", "h3"}:
     raise RuntimeError("BRMMEDIA_VIDEO_ENGINE must be ltx23 or h3")
+# The Web UI must describe the engine that is actually wired into submitters.
+# During staging or rollback the same two tabs continue to work through LTX,
+# but must not present H3 profiles/audio promises that are unavailable.
+H3_ENABLED = VIDEO_ENGINE == "h3"
+PRIMARY_T2V_TAB_LABEL = "MiniMax H3 文生视频" if H3_ENABLED else "文生视频 LTX2.3（回退）"
+PRIMARY_I2V_TAB_LABEL = "MiniMax H3 图生视频" if H3_ENABLED else "图生视频 LTX2.3（回退）"
+PRIMARY_VIDEO_SECONDS_MIN = 4 if H3_ENABLED else 2
+PRIMARY_VIDEO_SECONDS_MAX = 15 if H3_ENABLED else 360
+PRIMARY_VIDEO_SECONDS_DEFAULT = 5
 TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
 gr.set_static_paths(paths=[OUTPUT_DIR])
@@ -1832,17 +1841,24 @@ def build_ui():
                 )
 
             # ========== Tab 3 ==========
-            with gr.Tab("MiniMax H3 文生视频"):
+            with gr.Tab(PRIMARY_T2V_TAB_LABEL):
                 with gr.Row():
                     with gr.Column(scale=1):
                         prompt3 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的亚洲女孩在在花丛中散步", lines=3)
                     with gr.Column(scale=1):
                         with gr.Row():
                             size3 = gr.Dropdown(label="视频尺寸", choices=output_size, value="768 × 1024")
-                            seconds3 = gr.Number(value=5, label="视频时长（秒）", minimum=4, maximum=15, precision=0)
+                            seconds3 = gr.Number(
+                                value=PRIMARY_VIDEO_SECONDS_DEFAULT,
+                                label="视频时长（秒）",
+                                minimum=PRIMARY_VIDEO_SECONDS_MIN,
+                                maximum=PRIMARY_VIDEO_SECONDS_MAX,
+                                precision=0,
+                            )
                             profile3 = gr.Dropdown(
                                 label="生成档位", choices=list(H3_PROFILES), value="preview",
                                 info="preview：480 短边；quality：768 短边。实际时长会按 H3 帧网格调整。",
+                                visible=H3_ENABLED,
                             )
                         submit_btn3 = gr.Button("提交", variant="primary")
                 submit_btn3.click(
@@ -1859,16 +1875,23 @@ def build_ui():
                 )
 
             # ========== Tab 4 ==========
-            with gr.Tab("MiniMax H3 图生视频"):
+            with gr.Tab(PRIMARY_I2V_TAB_LABEL):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt4 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=10, max_lines=10)
                         with gr.Row():
                             size4 = gr.Dropdown(label="输出画幅", choices=output_size, value="768 × 1024")
-                            seconds4 = gr.Number(value=5, label="视频时长（秒）", minimum=4, maximum=15, precision=0)
+                            seconds4 = gr.Number(
+                                value=PRIMARY_VIDEO_SECONDS_DEFAULT,
+                                label="视频时长（秒）",
+                                minimum=PRIMARY_VIDEO_SECONDS_MIN,
+                                maximum=PRIMARY_VIDEO_SECONDS_MAX,
+                                precision=0,
+                            )
                         profile4 = gr.Dropdown(
                             label="生成档位", choices=list(H3_PROFILES), value="preview",
                             info="H3 会将源图适配至所选画幅，并生成同步立体声音频。",
+                            visible=H3_ENABLED,
                         )
                     with gr.Column(scale=1):
                         reference_image4 = gr.Image(type="filepath", height=400)   # 关键:拿到磁盘路径才能上传

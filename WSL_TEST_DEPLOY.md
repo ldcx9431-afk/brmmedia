@@ -52,12 +52,22 @@ sudo ./start_minimax_h3_download.sh
 # Optional but recommended: wait, import and byte-verify in a background unit.
 sudo systemd-run --unit=brmmedia-h3-import --collect --property=User=brm \
   /usr/bin/env bash "$release/wait_import_minimax_h3_models.sh"
-# After the import unit reports success, drain the media queue.  The candidate
+# After the import unit reports success, drain the media queue. The candidate
 # code is refreshed from the reviewed D: release while no service points to it.
 sudo "$release/refresh_h3_runtime_release.sh" "$release" "$runtime"
-# The candidate unit files must be installed before activation; otherwise
-# activation refuses to accidentally start the old `/srv/brmmedia/app` path.
+# Keep the public backend on its existing LTX release while the H3 canary is
+# tested on private loopback ports. It shares A5000, so production must be
+# drained/stopped, but Nginx is never repointed to the canary.
 sudo systemctl stop baorong-backend
+sudo "$runtime/prepare_minimax_h3_canary.sh"
+sudo "$runtime/start_minimax_h3_canary.sh"
+sudo BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
+  BRMMEDIA_BACKEND_UNIT=baorong-backend-h3-canary \
+  BRMMEDIA_RESTART_GRADIO_HEALTH_URL=http://127.0.0.1:9001/gradio_api/info \
+  "$runtime/accept_minimax_h3_video.sh" --full --restart-recovery
+sudo "$runtime/stop_minimax_h3_canary.sh"
+# Only after this canary acceptance succeeds, install the candidate unit files
+# and switch the production endpoint to H3.
 sudo "$runtime/install_ubuntu_systemd_services.sh" brm "$runtime"
 sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 ```
@@ -78,20 +88,22 @@ sudo BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1 "$runtime/activate_minimax_h3.sh"
 
 H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 ComfyUI 时，在停止 `baorong-backend` 后执行 `./rollback_minimax_h3_comfyui.sh`，再启动服务并运行 `sudo brmmedia-verify-runtime`。
 
-确认没有媒体任务运行、H3 权重导入完成后，先停止 `baorong-backend`，再以候选
-目录运行 `install_ubuntu_systemd_services.sh brm <candidate-root>`，最后使用
-`activate_minimax_h3.sh` 执行固定版本升级并将运行时引擎置为 `h3`。激活脚本会拒绝
-systemd 仍指向旧 `/srv/brmmedia/app` 的切换，并会重做 H3 资源预检。若需要沿用已授权
-的页面文件例外，必须在本次命令前显式设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`。
-激活后先跑文生视频、图生视频各一次 preview；再各跑三次 preview、一次 quality。验收
-脚本用 `ffprobe` 确认每个 MP4 同时含视频和双声道音频流，并核对 API 返回的实际尺寸、
-帧网格与时长，最后才运行完整回归验收。
+确认没有媒体任务运行、H3 权重导入完成后，先停止 `baorong-backend`，以候选目录运行
+`prepare_minimax_h3_canary.sh` 与 `start_minimax_h3_canary.sh`。Canary 使用独立的
+ComfyUI 工作副本、Gradio `127.0.0.1:9001` 和 REST `127.0.0.1:9101`，不会被 Nginx
+公开；其输出也与生产历史素材隔离。先在 Canary 上完成文生视频、图生视频各三次
+preview、各一次 quality，以及 `--restart-recovery` 的任务恢复校验，再停止 Canary。
+只有全部通过，才以候选目录运行 `install_ubuntu_systemd_services.sh brm <candidate-root>`
+和 `activate_minimax_h3.sh` 执行生产切换。激活脚本会拒绝 systemd 仍指向旧
+`/srv/brmmedia/app` 的切换，并重做 H3 资源预检、A4000 Qwen `/v1/models` 检查和所有
+ComfyUI 工作流/自定义节点校验。若需要沿用已授权的页面文件例外，必须在本次命令前显式
+设置 `BRMMEDIA_H3_ALLOW_PAGEFILE_OVERRIDE=1`。
 
 `activate_minimax_h3.sh` 不仅要求 systemd 已启动，还会在 420 秒内等待候选 Gradio 与
 ComfyUI 回环健康端点均返回 HTTP 200；超时、后端退出或其中任一端点未就绪时会自动还原
 候选引擎配置和 ComfyUI 快照。
 
-候选运行目录包含 `accept_minimax_h3_video.sh`：不带参数时执行一组 T2V/I2V preview 冒烟和 MP4 音视频流校验；`sudo -u brm ./accept_minimax_h3_video.sh --full` 会执行每类 3 个 preview 与两个 quality 任务，按照局域网 REST API 获取产物并以 `ffprobe` 验证视频与原生音频流。它只在 H3 已激活后运行，不会改变服务配置。
+候选运行目录包含 `accept_minimax_h3_video.sh`：不带参数时执行一组 T2V/I2V preview 冒烟和 MP4 音视频流校验；`sudo ./accept_minimax_h3_video.sh --full --restart-recovery` 会执行每类 3 个 preview 与两个 quality 任务，并在首个完成任务后重启指定 backend，再通过 REST 查询、下载和 `ffprobe` 验证该任务仍可恢复。Canary 必须设置其回环 API、backend unit 和 Gradio 健康地址环境变量，如本文开头示例；普通生产端点不应在 H3 未验收时承担 burn-in。
 
 受控升级会将旧 ComfyUI commit、工作区状态和后端 Python 依赖版本冻结到 `runtime-locks/comfyui-h3-backups/`；升级过程中失败会自动恢复旧 commit 与已冻结的 Python 包版本。
 
@@ -129,7 +141,7 @@ sudo -u brm ./accept_qwen_vllm.sh
 sudo brmmedia-verify-runtime
 ```
 
-该命令检查虚拟环境、服务、Gradio/ComfyUI/Qwen 内部 HTTP、关键 Gradio 组件和 API、八个工作流的 65 个节点类型、ComfyUI 锁定 commit、Qwen 回环绑定以及受控健康检查。应以 `RESULT=PASS` 结束；它是**结构与服务就绪检查**，不是 H3 推理生产验收的替代品。H3 切换还必须保留 Qwen 10 次对话、H3 `accept_minimax_h3_video.sh --full` 和其余媒体回归的实测记录。
+该命令检查虚拟环境、服务、Gradio/ComfyUI/Qwen 内部 HTTP、关键 Gradio 组件和 API、当前工作流目录中全部流程的节点类型、ComfyUI 锁定 commit、Qwen 回环绑定以及受控健康检查。应以 `RESULT=PASS` 结束；它是**结构与服务就绪检查**，不是 H3 推理生产验收的替代品。H3 切换还必须保留 Qwen 10 次对话、H3 `accept_minimax_h3_video.sh --full` 和其余媒体回归的实测记录。
 
 ## 局域网 API 任务状态
 

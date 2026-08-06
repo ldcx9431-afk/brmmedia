@@ -176,6 +176,18 @@ while :; do
   fi
   sleep 3
 done
+
+# A HTTP-200 ComfyUI process alone is not enough: the H3 upgrade can change
+# custom-node availability required by the retained LTX, avatar, voice and
+# music workflows.  Validate every checked-in workflow against the live
+# object-info schema while the ERR trap can still stop and roll back the
+# candidate on failure.
+echo "[gate] Validating all ComfyUI workflow nodes and static model choices..."
+runuser -u "$SERVICE_USER" -- "$BACKEND_DIR/.venv/bin/python" \
+  "$APP_ROOT/validate_comfy_workflows.py" \
+  --url "http://127.0.0.1:$COMFY_PORT" \
+  --workflows "$BACKEND_DIR/workflows" \
+  --timeout 15
 trap - ERR
 echo "[OK] MiniMax H3 is active and both Gradio/ComfyUI health endpoints returned HTTP 200."
 echo "[WARN] Do not call this production-ready until the preview/quality and regression acceptance suite passes."

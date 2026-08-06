@@ -46,6 +46,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("/system_stats", activation)
         self.assertIn("systemctl restart qwen-vllm", activation)
         self.assertIn("/v1/models", activation)
+        self.assertIn("Validating all ComfyUI workflow nodes", activation)
+        self.assertIn("validate_comfy_workflows.py", activation)
         self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
         self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
 
@@ -57,6 +59,14 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('QWEN_RESPONSE="$response"', acceptance)
         self.assertIn('"runs": int(runs)', acceptance)
         self.assertNotIn("BRM_PASSWORD", acceptance)
+
+    def test_h3_acceptance_can_verify_task_recovery_across_restart(self):
+        acceptance = (REPO_ROOT / "accept_minimax_h3_video.sh").read_text(encoding="utf-8")
+        self.assertIn("--restart-recovery", acceptance)
+        self.assertIn("verify_completed_task_after_restart", acceptance)
+        self.assertIn("systemctl restart", acceptance)
+        self.assertIn('"$API_BASE/tasks/$task_id"', acceptance)
+        self.assertIn("persisted H3 task recovery", acceptance)
 
     def test_h3_candidate_refresh_rejects_active_service_paths(self):
         refresh = (REPO_ROOT / "refresh_h3_runtime_release.sh").read_text(encoding="utf-8")
@@ -70,6 +80,17 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('--setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES"', downloader)
         self.assertIn("BRMMEDIA_H3_MIN_CHUNK_BYTES", downloader)
         self.assertIn("will retry with", downloader)
+
+    def test_h3_canary_stays_off_the_production_lan_ports(self):
+        prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        guide = (REPO_ROOT / "WSL_TEST_DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn("ComfyUI-h3-canary", prepare)
+        self.assertIn("BRM_GRADIO_PORT 9001", prepare)
+        self.assertIn("BRMMEDIA_VIDEO_ENGINE h3", prepare)
+        self.assertIn("baorong-backend-h3-canary", starter)
+        self.assertIn("--port 9101", starter)
+        self.assertIn("Nginx is never repointed to the canary", guide)
 
     def test_current_ubuntu_guide_does_not_recommend_highvram(self):
         guide = (REPO_ROOT / "ubuntu-backend-deploy" / "README_UBUNTU_DEPLOY.md").read_text(encoding="utf-8")

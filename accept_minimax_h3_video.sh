@@ -7,13 +7,15 @@ API_BASE="${BRMMEDIA_LAN_API_BASE:-http://127.0.0.1:9100/api/v1}"
 POLL_SECONDS="${BRMMEDIA_H3_POLL_SECONDS:-10}"
 TIMEOUT_SECONDS="${BRMMEDIA_H3_TASK_TIMEOUT_SECONDS:-5400}"
 FULL=0
+RESTART_RECOVERY=0
 
-if [ "${1:-}" = "--full" ]; then
-  FULL=1
-elif [ -n "${1:-}" ]; then
-  echo "usage: $0 [--full]" >&2
-  exit 2
-fi
+for argument in "$@"; do
+  case "$argument" in
+    --full) FULL=1 ;;
+    --restart-recovery) RESTART_RECOVERY=1 ;;
+    *) echo "usage: $0 [--full] [--restart-recovery]" >&2; exit 2 ;;
+  esac
+done
 
 for command in curl python3 ffprobe base64; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -24,6 +26,10 @@ done
 if ! [[ "$POLL_SECONDS" =~ ^[0-9]+$ ]] || [ "$POLL_SECONDS" -lt 2 ]; then
   echo "[ERROR] BRMMEDIA_H3_POLL_SECONDS must be an integer >= 2." >&2
   exit 1
+fi
+if [ "$RESTART_RECOVERY" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
+  echo "[ERROR] --restart-recovery restarts a systemd backend; run this option with sudo." >&2
+  exit 2
 fi
 
 work_dir="$(mktemp -d /tmp/brmmedia-h3-accept.XXXXXX)"
@@ -166,6 +172,46 @@ upload_fixture_image() {
   printf '%s' "$response" | json_get asset_id
 }
 
+verify_completed_task_after_restart() {
+  local task_id="$1" label="$2" profile="$3" seconds="$4"
+  local backend_unit="${BRMMEDIA_BACKEND_UNIT:-baorong-backend}"
+  local gradio_health_url="${BRMMEDIA_RESTART_GRADIO_HEALTH_URL:-http://127.0.0.1:9000/gradio_api/info}"
+  local timeout_seconds="${BRMMEDIA_RESTART_RECOVERY_TIMEOUT_SECONDS:-420}"
+  local deadline response state health_code
+
+  if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[ERROR] BRMMEDIA_RESTART_RECOVERY_TIMEOUT_SECONDS must be a positive integer." >&2
+    return 2
+  fi
+  echo "[INFO] Restarting $backend_unit to verify persisted H3 task recovery..."
+  systemctl restart "$backend_unit"
+  deadline=$((SECONDS + timeout_seconds))
+  while :; do
+    health_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 \
+      "$gradio_health_url" || true)"
+    if [ "$health_code" = "200" ]; then
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ] || ! systemctl is-active --quiet "$backend_unit"; then
+      echo "[ERROR] $backend_unit did not recover its Gradio endpoint ($health_code)." >&2
+      return 1
+    fi
+    sleep 3
+  done
+  # The task endpoint is supplied by the still-running loopback LAN bridge.
+  # Re-fetch the original task after webui.py reloads its durable history,
+  # then repeat artifact download/container/audio validation from that record.
+  response="$(api_get "$API_BASE/tasks/$task_id")"
+  state="$(printf '%s' "$response" | json_get state)"
+  if [ "$state" != "completed" ]; then
+    echo "[ERROR] $label was not restored as completed after restart: $response" >&2
+    return 1
+  fi
+  printf '%s' "$response" > "$work_dir/$task_id.json"
+  verify_native_audio_mp4 "$task_id" "$label after restart" "$profile" "$seconds"
+  echo "[OK] $label persisted across $backend_unit restart."
+}
+
 health="$(api_get "$API_BASE/health")"
 if [ "$(printf '%s' "$health" | json_get status)" != "ok" ]; then
   echo "[ERROR] LAN API is not healthy: $health" >&2
@@ -180,6 +226,9 @@ for index in $(seq 1 "$preview_runs"); do
   t2v="$(submit_task text-to-video '{"prompt":"A small paper boat gently moves across a quiet blue pond. Natural ripples and synchronized soft water ambience.","size":"1344 × 768","seconds":4,"profile":"preview"}')"
   wait_for_task "$t2v" "T2V preview #$index"
   verify_native_audio_mp4 "$t2v" "T2V preview #$index" preview 4
+  if [ "$RESTART_RECOVERY" -eq 1 ] && [ "$index" -eq 1 ]; then
+    verify_completed_task_after_restart "$t2v" "T2V preview #$index" preview 4
+  fi
 
   i2v="$(submit_task image-to-video "{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"The image comes alive with a subtle camera push-in and synchronized gentle ambient sound.\",\"size\":\"1344 × 768\",\"seconds\":4,\"profile\":\"preview\"}")"
   wait_for_task "$i2v" "I2V preview #$index"
