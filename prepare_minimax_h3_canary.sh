@@ -50,11 +50,14 @@ if [ ! -d "$PRODUCTION_COMFY_ROOT/.git" ] || [ ! -x "$COMFY_PYTHON" ]; then
   echo "[ERROR] Production ComfyUI source or candidate Python is unavailable." >&2
   exit 1
 fi
-if [ -n "$(git -C "$PRODUCTION_COMFY_ROOT" status --porcelain)" ]; then
+# The production checkout is provisioned by root while this preparer runs as
+# the service user.  Make the one, fully-resolved checkout an explicit safe
+# directory rather than weakening Git's ownership protection globally.
+if [ -n "$(git -c safe.directory="$PRODUCTION_COMFY_ROOT" -C "$PRODUCTION_COMFY_ROOT" status --porcelain)" ]; then
   echo "[ERROR] Production ComfyUI has local changes; preserve them before creating a reproducible canary." >&2
   exit 1
 fi
-PRODUCTION_COMFY_ORIGIN="$(git -C "$PRODUCTION_COMFY_ROOT" remote get-url origin 2>/dev/null || true)"
+PRODUCTION_COMFY_ORIGIN="$(git -c safe.directory="$PRODUCTION_COMFY_ROOT" -C "$PRODUCTION_COMFY_ROOT" remote get-url origin 2>/dev/null || true)"
 if [ -z "$PRODUCTION_COMFY_ORIGIN" ]; then
   echo "[ERROR] Production ComfyUI has no origin remote for the pinned H3 revision." >&2
   exit 1
@@ -70,7 +73,7 @@ fi
 # `git clone <local-path>` would otherwise make the canary's origin point at
 # the mutable production working tree.  The pinned H3 preparer must fetch the
 # same upstream revision as production, not trust a local branch ref.
-runuser -u "$SERVICE_USER" -- git -C "$CANARY_COMFY_ROOT" remote set-url origin "$PRODUCTION_COMFY_ORIGIN"
+runuser -u "$SERVICE_USER" -- git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" remote set-url origin "$PRODUCTION_COMFY_ORIGIN"
 
 # Reuse immutable weights instead of duplicating the 42+ GB model store.
 # A new ComfyUI clone normally has no model directory.  Refuse to replace a
