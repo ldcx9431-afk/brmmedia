@@ -52,6 +52,9 @@ print(json.dumps({
     "messages": [{"role": "user", "content": f"请仅回复：A4000 Qwen 验收通过 #{index}"}],
     "max_tokens": 32,
     "temperature": 0,
+    # A short health answer must not spend its entire response budget on
+    # Qwen hidden reasoning channel.
+    "chat_template_kwargs": {"enable_thinking": False},
 }, ensure_ascii=False))
 PY
 )"

@@ -43,6 +43,7 @@ class DeploymentProfileTests(unittest.TestCase):
         acceptance = (REPO_ROOT / "accept_qwen_vllm.sh").read_text(encoding="utf-8")
         self.assertIn("http://127.0.0.1:8000/v1", acceptance)
         self.assertIn("/chat/completions", acceptance)
+        self.assertIn('"enable_thinking": False', acceptance)
         self.assertIn('QWEN_RESPONSE="$response"', acceptance)
         self.assertIn('"runs": int(runs)', acceptance)
         self.assertNotIn("BRM_PASSWORD", acceptance)
