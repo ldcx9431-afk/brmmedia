@@ -8,6 +8,10 @@ MODEL_DIR="$MODEL_SOURCE_ROOT/MiniMax-H3"
 REPO="${BRMMEDIA_H3_REPO:-Comfy-Org/MiniMax-H3}"
 REVISION="${BRMMEDIA_H3_REVISION:-0bd506d2e895983a9663037febda27aa3948cf48}"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
+# The corporate proxy has been observed to close long Xet transfers early.
+# Keep each request small enough to finish, then append only a header-checked
+# byte range.  Eight MiB also provides a practical resume granularity.
+CHUNK_BYTES="${BRMMEDIA_H3_CHUNK_BYTES:-8388608}"
 
 declare -A components=(
   [diffusion]='diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors'
@@ -27,16 +31,16 @@ expected_size() {
 }
 
 download_component() {
-  local name="$1" relative file expected actual attempt
+  local name="$1" relative file expected actual attempt end chunk tmp headers received content_range
   relative="${components[$name]:-}"
   [ -n "$relative" ] || { echo "[ERROR] Unknown component: $name" >&2; return 2; }
   file="$MODEL_DIR/$relative"
   expected="$(expected_size "$name")"
   install -d "$(dirname "$file")"
 
-  # Xet-backed Hugging Face redirects can occasionally close a ranged response
-  # early (curl 18).  Each new curl invocation resumes the same file; keep the
-  # transient service alive until its immutable expected byte count is reached.
+  # Xet-backed Hugging Face redirects can occasionally close a long ranged
+  # response early (curl 18).  Download immutable, bounded ranges and append
+  # only after both length and Content-Range prove it is the requested segment.
   for attempt in $(seq 1 10000); do
     actual="$(stat -c%s "$file" 2>/dev/null || echo 0)"
     if [ "$actual" -eq "$expected" ]; then
@@ -47,11 +51,29 @@ download_component() {
       echo "[ERROR] $name exceeds expected byte count ($actual > $expected)" >&2
       return 1
     fi
-    echo "[INFO] $name attempt=$attempt resume=$actual/$expected"
-    curl --silent --show-error --fail --location --continue-at - \
+    chunk="$CHUNK_BYTES"
+    if [ $((expected - actual)) -lt "$chunk" ]; then
+      chunk=$((expected - actual))
+    fi
+    end=$((actual + chunk - 1))
+    tmp="${file}.chunk.$$"
+    headers="${tmp}.headers"
+    rm -f "$tmp" "$headers"
+    echo "[INFO] $name attempt=$attempt range=$actual-$end/$expected"
+    curl --silent --show-error --fail --location --range "$actual-$end" \
+      --dump-header "$headers" \
       --retry 6 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
-      --speed-time 90 --speed-limit 1024 --output "$file" \
+      --speed-time 90 --speed-limit 1024 --output "$tmp" \
       "https://huggingface.co/$REPO/resolve/$REVISION/$relative" || true
+    received="$(stat -c%s "$tmp" 2>/dev/null || echo 0)"
+    content_range="$(awk 'BEGIN{IGNORECASE=1} /^content-range:/ {line=$0} END {gsub(/\r/, "", line); print line}' "$headers" 2>/dev/null || true)"
+    if [ "$received" -eq "$chunk" ] && printf '%s\n' "$content_range" | grep -qi "^content-range: bytes $actual-$end/$expected$"; then
+      dd if="$tmp" of="$file" oflag=append conv=notrunc status=none
+      rm -f "$tmp" "$headers"
+      continue
+    fi
+    echo "[WARN] $name rejected incomplete/unexpected segment: received=$received expected=$chunk range=${content_range:-missing}" >&2
+    rm -f "$tmp" "$headers"
     sleep 5
   done
   echo "[ERROR] $name did not complete after repeated resumable attempts" >&2
