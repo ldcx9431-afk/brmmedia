@@ -56,6 +56,12 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
         self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
 
+    def test_h3_preflight_finds_the_wsl_nvidia_shim_for_systemd(self):
+        preflight = (REPO_ROOT / "check_h3_preflight.sh").read_text(encoding="utf-8")
+        self.assertIn("BRMMEDIA_NVIDIA_SMI", preflight)
+        self.assertIn("/usr/lib/wsl/lib/nvidia-smi", preflight)
+        self.assertIn('"$nvidia_smi" --query-gpu=index,name,memory.total,uuid', preflight)
+
     def test_h3_workflow_gate_is_required_for_canary_and_production_cutover(self):
         gate = (REPO_ROOT / "verify_h3_workflow_gate.sh").read_text(encoding="utf-8")
         activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")
