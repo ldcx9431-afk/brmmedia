@@ -116,9 +116,26 @@ set_dotenv_value BRM_OUTPUT_DIR "$CANARY_OUTPUT_DIR"
 set_dotenv_value BRMMEDIA_H3_CANARY_ROOT "$CANARY_COMFY_ROOT"
 
 echo "[1/2] Verifying imported H3 components through the shared E: model store..."
-runuser -u "$SERVICE_USER" -- env BRMMEDIA_REQUIRE_H3_MODELS=1 \
-  BRMMEDIA_COMFYUI_MODEL_ROOT="$CANARY_COMFY_ROOT/models" \
-  "$APP_ROOT/verify_comfy_models.sh"
+# `wait_import_minimax_h3_models.sh` has already content-verified the complete
+# model store after its D: -> E: import.  Re-comparing every legacy model here
+# would make a canary wait on unrelated multi-GB assets.  Check the exact four
+# H3 components here; the subsequent live workflow gate and generation suite
+# exercise their actual loading and inference paths.
+declare -A h3_sizes=(
+  ["diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"]=20970379616
+  ["text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]=15687142551
+  ["vae/minimax_h3_video_vae_fp16.safetensors"]=5207808496
+  ["vae/minimax_h3_audio_vae_fp32.safetensors"]=605254808
+)
+for relative in "${!h3_sizes[@]}"; do
+  component="$CANARY_COMFY_ROOT/models/$relative"
+  actual_size="$(stat -c%s "$component" 2>/dev/null || true)"
+  if [ "$actual_size" != "${h3_sizes[$relative]}" ]; then
+    echo "[ERROR] H3 component is missing or has the wrong size: $relative ($actual_size/${h3_sizes[$relative]})" >&2
+    exit 1
+  fi
+done
+echo '[OK] Four H3 components are present in the shared E: model store.'
 
 echo "[2/2] Preparing the pinned native-H3 ComfyUI canary checkout..."
 runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$CANARY_COMFY_ROOT" \
