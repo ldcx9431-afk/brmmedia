@@ -36,6 +36,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("runtime_env_value BRMMEDIA_APP_ROOT", verifier)
         self.assertIn("BRMMEDIA_SOURCE_ROOT", installer)
         self.assertIn("/etc/brmmedia/runtime.env", installer)
+        self.assertIn("BRMMEDIA_NVIDIA_SMI", verifier)
+        self.assertIn("/usr/lib/wsl/lib/nvidia-smi", verifier)
 
     def test_h3_activation_uses_candidate_env_and_restores_on_start_failure(self):
         activation = (REPO_ROOT / "activate_minimax_h3.sh").read_text(encoding="utf-8")

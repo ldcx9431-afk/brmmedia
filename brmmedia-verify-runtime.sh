@@ -23,6 +23,16 @@ QWEN_DIR="$APP_ROOT/llm-backend-deploy"
 WORKFLOW_VALIDATOR="$APP_ROOT/validate_comfy_workflows.py"
 HTTP_READY_WAIT_SECONDS="${BRMMEDIA_VERIFY_HTTP_WAIT_SECONDS:-45}"
 HTTP_READY_POLL_SECONDS="${BRMMEDIA_VERIFY_HTTP_POLL_SECONDS:-2}"
+# systemd and globally installed diagnostic commands in WSL can have a narrow
+# PATH.  NVIDIA's WSL shim lives outside it, so resolve the same fallback used
+# by the H3 preflight rather than falsely reporting GPU0 as unavailable.
+nvidia_smi="${BRMMEDIA_NVIDIA_SMI:-}"
+if [ -z "$nvidia_smi" ]; then
+  nvidia_smi="$(command -v nvidia-smi || true)"
+fi
+if [ -z "$nvidia_smi" ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
+  nvidia_smi=/usr/lib/wsl/lib/nvidia-smi
+fi
 failures=0
 
 ok() { printf 'OK   %s\n' "$*"; }
@@ -300,12 +310,12 @@ else
   bad "Backend runtime .env is missing"
 fi
 
-if ! nvidia-smi --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^0, (NVIDIA )?RTX A5000, (2[4-9][0-9]{3}|[3-9][0-9]{4}) MiB,'; then
+if [ -z "$nvidia_smi" ] || ! "$nvidia_smi" --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^0, (NVIDIA )?RTX A5000, (2[4-9][0-9]{3}|[3-9][0-9]{4}) MiB,'; then
   bad "GPU0 A5000/24GB is not visible to WSL"
 else
   ok "GPU0 A5000/24GB is visible to WSL"
 fi
-if ! nvidia-smi --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^1, (NVIDIA )?RTX A4000, (1[6-9][0-9]{3}|[2-9][0-9]{4}) MiB,'; then
+if [ -z "$nvidia_smi" ] || ! "$nvidia_smi" --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^1, (NVIDIA )?RTX A4000, (1[6-9][0-9]{3}|[2-9][0-9]{4}) MiB,'; then
   bad "GPU1 A4000/16GB is not visible to WSL"
 else
   ok "GPU1 A4000/16GB is visible to WSL"
