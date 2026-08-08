@@ -310,12 +310,16 @@ else
   bad "Backend runtime .env is missing"
 fi
 
-if [ -z "$nvidia_smi" ] || ! "$nvidia_smi" --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^0, (NVIDIA )?RTX A5000, (2[4-9][0-9]{3}|[3-9][0-9]{4}) MiB,'; then
+gpu_inventory=""
+if [ -n "$nvidia_smi" ]; then
+  gpu_inventory="$("$nvidia_smi" --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null || true)"
+fi
+if ! printf '%s\n' "$gpu_inventory" | grep -Eq '^0, (NVIDIA )?RTX A5000, (2[4-9][0-9]{3}|[3-9][0-9]{4}) MiB,'; then
   bad "GPU0 A5000/24GB is not visible to WSL"
 else
   ok "GPU0 A5000/24GB is visible to WSL"
 fi
-if [ -z "$nvidia_smi" ] || ! "$nvidia_smi" --query-gpu=index,name,memory.total,uuid --format=csv,noheader 2>/dev/null | grep -Eq '^1, (NVIDIA )?RTX A4000, (1[6-9][0-9]{3}|[2-9][0-9]{4}) MiB,'; then
+if ! printf '%s\n' "$gpu_inventory" | grep -Eq '^1, (NVIDIA )?RTX A4000, (1[6-9][0-9]{3}|[2-9][0-9]{4}) MiB,'; then
   bad "GPU1 A4000/16GB is not visible to WSL"
 else
   ok "GPU1 A4000/16GB is visible to WSL"
