@@ -44,9 +44,39 @@ snapshot_gpu() {
 }
 before_log_lines=0; [ -f "$COMFY_LOG" ] && before_log_lines="$(wc -l < "$COMFY_LOG")"
 results="$work/results.jsonl"
+benchmark_image="$work/fixed-h3-i2v-input.png"
+# Produce a deterministic 768x432 RGB PNG without depending on Pillow/ImageMagick.
+# It is deliberately created once and used for every I2V run, so candidates see
+# the same source pixels.  Callers may override it with a representative image.
+if [ -n "${BRMMEDIA_H3_BENCHMARK_IMAGE:-}" ]; then
+  benchmark_image="$BRMMEDIA_H3_BENCHMARK_IMAGE"
+  [ -f "$benchmark_image" ] || { echo "[ERROR] BRMMEDIA_H3_BENCHMARK_IMAGE does not exist: $benchmark_image" >&2; exit 2; }
+else
+  python3 - "$benchmark_image" <<'PY'
+import struct, sys, zlib
+width, height = 768, 432
+rows = []
+for y in range(height):
+    row = bytearray([0])
+    for x in range(width):
+        row.extend((25 + x * 40 // width, 60 + y * 80 // height, 145))
+    rows.append(bytes(row))
+def chunk(name, body):
+    return struct.pack('>I', len(body)) + name + body + struct.pack('>I', zlib.crc32(name + body) & 0xffffffff)
+with open(sys.argv[1], 'wb') as f:
+    f.write(b'\x89PNG\r\n\x1a\n')
+    f.write(chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)))
+    f.write(chunk(b'IDAT', zlib.compress(b''.join(rows), 9)))
+    f.write(chunk(b'IEND', b''))
+PY
+fi
+image_asset_id="$(curl --fail --silent --show-error -F "kind=image" -F "file=@${benchmark_image};type=image/png" "$API_BASE/files" | json_value asset_id)"
 for kind in text-to-video image-to-video; do
   for n in $(seq 1 "$RUNS"); do
     payload="{\"workflow\":\"$kind\",\"params\":{\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\"}}"
+    if [ "$kind" = "image-to-video" ]; then
+      payload="{\"workflow\":\"$kind\",\"params\":{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\"}}"
+    fi
     start="$(date +%s)"; gpu_before="$(snapshot_gpu)"; id="$(submit "$kind" "$payload")"
     response="$(wait_task "$id")"; end="$(date +%s)"; gpu_after="$(snapshot_gpu)"
     python3 - "$results" "$kind" "$n" "$id" "$start" "$end" "$gpu_before" "$gpu_after" <<'PY'
