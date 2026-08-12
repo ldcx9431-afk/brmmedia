@@ -77,6 +77,8 @@ check_source_runtime_sync() {
     "rollback_minimax_h3_comfyui.sh"
     "activate_minimax_h3.sh"
     "accept_minimax_h3_video.sh"
+    "prepare_h3_cuda13_sage_candidate.sh"
+    "benchmark_h3_profiles.sh"
     "accept_qwen_vllm.sh"
     "start_minimax_h3_download.sh"
     "wait_import_minimax_h3_models.sh"

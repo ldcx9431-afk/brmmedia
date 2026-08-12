@@ -49,6 +49,8 @@ def _install_import_stubs() -> None:
     comfy.run_workflow = lambda *args, **kwargs: {}
     comfy.get_view_file = lambda *args, **kwargs: b""
     comfy.interrupt = lambda: (True, "mock interrupt")
+    comfy.TASK_TIMEOUT = 3600
+    comfy.H3_TASK_TIMEOUT = 14400
     comfy.BASE = "http://127.0.0.1:8188"
     comfy.WORKFLOW_DIR = REPO_ROOT / "ubuntu-backend-deploy" / "workflows"
     comfy.upload_image = lambda *args, **kwargs: "mock-input"
@@ -219,9 +221,13 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(queue.task_status("not-here")["state"], "not_found")
 
     def test_h3_profile_normalisation_uses_supported_canvas_and_frame_grid(self):
+        draft = self.webui.normalise_h3_request("768 × 1024", 3, "draft")
+        self.assertEqual(draft["frames"], 73)
+        self.assertEqual(draft["effective_seconds"], 3.042)
+
         minimum = self.webui.normalise_h3_request("768 × 1024", 4, "preview")
-        self.assertEqual(minimum["frames"], 124)
-        self.assertEqual(minimum["effective_seconds"], 5.167)
+        self.assertEqual(minimum["frames"], 107)
+        self.assertEqual(minimum["effective_seconds"], 4.458)
 
         preview = self.webui.normalise_h3_request("1920 × 1080", 5, "preview")
         self.assertEqual((preview["width"], preview["height"]), (864, 480))
@@ -233,6 +239,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(quality["frames"], 158)
 
     def test_h3_profile_switch_uses_the_documented_default_duration(self):
+        self.assertEqual(self.webui.h3_profile_default_seconds("draft"), 3)
         self.assertEqual(self.webui.h3_profile_default_seconds("preview"), 5)
         self.assertEqual(self.webui.h3_profile_default_seconds("quality"), 6)
         self.assertEqual(self.webui.h3_profile_default_seconds("unknown"), 5)
@@ -261,13 +268,16 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(t2v["104"]["inputs"]["length"], 124)
         self.assertEqual(t2v["91"]["inputs"]["audio"], ["23", 0])
         self.assertEqual(t2v["25"]["class_type"], "MiniMaxH3SigmaShift")
-        self.assertEqual(t2v["9"]["inputs"]["model"], ["25", 0])
-        self.assertEqual(t2v["16"]["inputs"]["model"], ["25", 0])
+        self.assertEqual(t2v["26"]["class_type"], "PathchSageAttentionKJ")
+        self.assertEqual(t2v["26"]["inputs"]["model"], ["25", 0])
+        self.assertEqual(t2v["9"]["inputs"]["model"], ["26", 0])
+        self.assertEqual(t2v["16"]["inputs"]["model"], ["26", 0])
 
         i2v = self.webui.build_workflow_4("MiniMaxH3-图生视频", args)
         self.assertEqual(i2v["1"]["inputs"]["image"], "source.png")
         self.assertEqual(i2v["104"]["inputs"]["first_frame"], ["1", 0])
         self.assertEqual(i2v["25"]["class_type"], "MiniMaxH3SigmaShift")
+        self.assertEqual(i2v["26"]["class_type"], "PathchSageAttentionKJ")
 
     def test_acestep_model_choices_follow_installed_weights(self):
         model_root = self.output_dir / "fake-comfy"

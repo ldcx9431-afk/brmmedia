@@ -47,14 +47,19 @@ BASE = f"http://{COMFY_HOST}:{COMFY_PORT}"
 CLIENT_ID = uuid.uuid4().hex
 STARTUP_TIMEOUT = int(os.environ.get("COMFYUI_STARTUP_TIMEOUT", "300"))
 TASK_TIMEOUT = int(os.environ.get("COMFYUI_TASK_TIMEOUT", "3600"))
+# H3 deliberately keeps a longer, workflow-specific wait budget.  It avoids
+# falsely marking an active long video as failed while still allowing the
+# caller to interrupt the ComfyUI prompt once the budget is genuinely used.
+H3_TASK_TIMEOUT = int(os.environ.get("BRM_H3_TASK_TIMEOUT", "14400"))
 LOG_FILE = Path(os.environ.get("COMFYUI_LOG_FILE", BASE_DIR / "comfyui_runtime.log"))
 
 DEFAULT_ARGS = ["--enable-manager", "--disable-auto-launch"]
 EXTRA_ARGS = os.environ.get("COMFYUI_ARGS", "").split()
 PERF_PROFILE = os.environ.get("BRM_PERF_PROFILE", "balanced").strip().lower()
-if any(arg in {"--highvram", "--gpu-only"} for arg in EXTRA_ARGS):
+if any(arg in {"--highvram", "--gpu-only", "--disable-smart-memory", "--cache-none"} for arg in EXTRA_ARGS):
     raise RuntimeError(
-        "MiniMax H3 requires ComfyUI dynamic offload; remove --highvram and --gpu-only from COMFYUI_ARGS."
+        "MiniMax H3 requires ComfyUI dynamic offload and smart caching; remove --highvram, --gpu-only, "
+        "--disable-smart-memory and --cache-none from COMFYUI_ARGS."
     )
 START_ARGS = DEFAULT_ARGS + EXTRA_ARGS
 
@@ -141,7 +146,12 @@ def wait_for_outputs(
             if entry.get("outputs"):
                 return entry["outputs"]
         time.sleep(1.5)
-    raise TimeoutError(f"Timed out waiting for ComfyUI task ({timeout}s)")
+    # A timeout used to leave the prompt running in ComfyUI.  That made the
+    # UI show a failed task while the A5000 stayed occupied indefinitely.
+    # Request interruption before returning a distinct timeout to the queue.
+    interrupted, message = interrupt()
+    result = "中断请求已发送" if interrupted else message
+    raise TimeoutError(f"Timed out waiting for ComfyUI task ({timeout}s); {result}")
 
 
 def upload_image(filepath, subfolder: str = "", overwrite: bool = False) -> str:

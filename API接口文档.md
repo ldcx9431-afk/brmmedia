@@ -121,8 +121,8 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | --- | --- | --- |
 | `text-to-image` | `prompt` | `size`（默认 `1024 × 1024`）、`batch`（1–4） |
 | `image-edit` | `prompt`、`image_asset_id` | 图片编辑 |
-| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（4–15；随档位默认）、`profile`（`preview` 默认或 `quality`） |
-| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（4–15；随档位默认）、`profile`（`preview` 默认或 `quality`） |
+| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（按档位限制）、`profile`（`draft` / `preview` 默认 / `quality`） |
+| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（按档位限制）、`profile`（`draft` / `preview` 默认 / `quality`） |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | `temperature`（0–1.5，默认 0.8） |
@@ -143,9 +143,10 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 `text-to-video` 与 `image-to-video` 已保留原 REST workflow 标识，调用方不需要迁移路径；实际引擎为本地开源 **MiniMax H3 Base**，输出是带模型原生同步立体声音频的 MP4。
 
-- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证；省略 `seconds` 时为 `5` 秒。`quality` 使用约 `768` 像素短边；省略 `seconds` 时为 `6` 秒。两者最长边都不超过 `1344`。
+- `profile=draft` 是官方模板同规格的极速草稿：约 `0.4MP`、`73` 帧、约 `3` 秒，仅用于提示词、构图与运动预览；它只接受 `seconds=3`。
+- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证，接受 `4–6` 秒，省略时为 `5` 秒。`quality` 使用约 `768` 像素短边，当前验收期同样限制为 `4–6` 秒，省略时为 `6` 秒。最长边都不超过 `1344`；本轮验收完成前不开放 15 秒质量请求。
 - `size` 只表达画幅比例；服务会计算模型可用的 32 像素网格画布。图生视频会把上传图适配到该画布。
-- 请求时长只能为 `4–15` 秒。H3 使用 24fps、17 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
+- H3 使用 24fps、`17k+5` 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
 - 业务系统应先读取 `GET /capabilities` 中 H3 workflow 的 `options.params` 构建表单。它明确列出 `profile` 枚举、`seconds.default_by_profile`、`size` 的 `enum_source` 和图生视频所需的 `image_asset_id`。
 
 示例：
@@ -199,6 +200,7 @@ H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其
 | `running` | 正在生成 |
 | `completed` | 已完成，可下载 `artifacts` |
 | `cancelled` | 已由工作台操作员中断或清空队列 |
+| `timed_out` | 已超过 H3 等待上限，后端已向 ComfyUI 发送中断请求；查看 `error` 确认请求结果 |
 | `failed` | 生成失败，查看安全摘要 `error` |
 
 下载时复用 Basic Auth。客户端应直接使用服务返回的 `download_url`，不要猜测文件名或内部目录：

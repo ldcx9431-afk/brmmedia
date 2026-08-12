@@ -138,6 +138,7 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn('"MiniMax H3 Base"', text)
         self.assertIn('"preview"', text)
         self.assertIn('"quality"', text)
+        self.assertIn('"draft"', text)
         self.assertNotIn("0.0.0.0", text)
 
     def test_proxy_and_service_are_loopback_only(self) -> None:
@@ -148,6 +149,11 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn("--host 127.0.0.1 --port 9100", service)
 
     def test_h3_profile_defaults_and_gradio_argument_order(self) -> None:
+        draft_args = self.api._normal_text_to_video(
+            {"prompt": "fast composition", "profile": "draft"}, {}
+        )
+        self.assertEqual(draft_args, ["fast composition", "768 × 1024", 3, "draft"])
+
         text_args = self.api._normal_text_to_video(
             {"prompt": "morning city", "profile": "quality"}, {}
         )
@@ -179,7 +185,7 @@ class LanApiContractTests(unittest.TestCase):
         image_schema = capabilities["workflows"]["image-to-video"]["options"]["params"]
 
         self.assertTrue(text_schema["prompt"]["required"])
-        self.assertEqual(text_schema["profile"]["enum"], ["preview", "quality"])
+        self.assertEqual(text_schema["profile"]["enum"], ["draft", "preview", "quality"])
         self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")

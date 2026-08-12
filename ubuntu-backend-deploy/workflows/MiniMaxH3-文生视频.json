@@ -26,6 +26,11 @@
     "class_type": "MiniMaxH3SigmaShift",
     "inputs": {"model": ["6", 0], "shift_video": 12.0, "shift_audio": 3.0}
   },
+  "26": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {"model": ["25", 0], "sage_attention": "auto", "allow_compile": false},
+    "_meta": {"title": "Patch Sage Attention KJ (H3 stable)"}
+  },
   "104": {
     "class_type": "MiniMaxH3ImageToVideo",
     "inputs": {
@@ -41,11 +46,11 @@
   "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
   "9": {
     "class_type": "BasicScheduler",
-    "inputs": {"model": ["25", 0], "scheduler": "simple", "steps": 20, "denoise": 1.0}
+    "inputs": {"model": ["26", 0], "scheduler": "simple", "steps": 20, "denoise": 1.0}
   },
   "16": {
     "class_type": "BasicGuider",
-    "inputs": {"model": ["25", 0], "conditioning": ["104", 0]}
+    "inputs": {"model": ["26", 0], "conditioning": ["104", 0]}
   },
   "14": {
     "class_type": "SamplerCustomAdvanced",

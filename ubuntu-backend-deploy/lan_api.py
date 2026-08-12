@@ -50,10 +50,12 @@ SIZE_VALUES = [
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
 MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
-H3_PROFILE_VALUES = ["preview", "quality"]
+H3_PROFILE_VALUES = ["draft", "preview", "quality"]
 H3_PROFILE_DETAILS = {
-    "preview": {"short_edge": 480, "default_seconds": 5},
-    "quality": {"short_edge": 768, "default_seconds": 6},
+    "draft": {"target_megapixels": 0.4, "frames": 73, "default_seconds": 3, "minimum_seconds": 3, "maximum_seconds": 3,
+              "purpose": "Fast official H3 prompt/composition/motion draft."},
+    "preview": {"short_edge": 480, "default_seconds": 5, "minimum_seconds": 4, "maximum_seconds": 6},
+    "quality": {"short_edge": 768, "default_seconds": 6, "minimum_seconds": 4, "maximum_seconds": 6},
 }
 H3_COMMON_PARAMS = {
     "prompt": {
@@ -68,10 +70,10 @@ H3_COMMON_PARAMS = {
     "profile": {
         "type": "string", "required": False, "default": "preview",
         "enum": H3_PROFILE_VALUES,
-        "description": "preview uses a 480px short edge; quality uses a 768px short edge.",
+        "description": "draft uses the official ~0.4MP / 73-frame template; preview uses a 480px short edge; quality uses a 768px short edge.",
     },
     "seconds": {
-        "type": "integer", "required": False, "minimum": 4, "maximum": 15,
+        "type": "integer", "required": False, "minimum": 3, "maximum": 6,
         "default": 5,
         "default_by_profile": {profile: detail["default_seconds"] for profile, detail in H3_PROFILE_DETAILS.items()},
         "description": "H3 adjusts the request to its 24fps / 17-frame grid; read effective_settings from task status.",
@@ -230,10 +232,9 @@ def _normal_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]
     return [
         _trim_text(params.get("prompt"), "prompt"),
         _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
-        _number(
-            params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]),
-            "seconds", minimum=4, maximum=15, integer=True,
-        ),
+        _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
+                minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
+                maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
         profile,
     ]
 
@@ -244,10 +245,9 @@ def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord
     return [
         _trim_text(params.get("prompt"), "prompt"), image.filename,
         _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
-        _number(
-            params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]),
-            "seconds", minimum=4, maximum=15, integer=True,
-        ),
+        _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
+                minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
+                maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
         profile,
     ]
 
@@ -316,15 +316,15 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
         "submit_workflow_3_h3", "MiniMax H3 本地文生视频（含同步立体声音频）", {},
         _normal_text_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
-         "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
-         "size_rule": "size selects aspect ratio; preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)",
+         "seconds": {"minimum": 3, "maximum": 6, "frame_grid": "24fps; effective duration is adjusted to H3's 17k+5 frame grid"},
+         "size_rule": "size selects aspect ratio; draft is ~0.4MP/73 frames, preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)",
          "params": H3_COMMON_PARAMS},
     ),
     "image-to-video": WorkflowSpec(
         "submit_workflow_4_h3", "MiniMax H3 本地图生视频（含同步立体声音频）", {"image_asset_id": "image"},
         _normal_image_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
-         "seconds": {"minimum": 4, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17-frame grid"},
+         "seconds": {"minimum": 3, "maximum": 6, "frame_grid": "24fps; effective duration is adjusted to H3's 17k+5 frame grid"},
          "size_rule": "size selects output aspect ratio; the source image is fitted to the H3 canvas",
          "params": {
              "image_asset_id": {

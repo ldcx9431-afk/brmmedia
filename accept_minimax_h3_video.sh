@@ -5,7 +5,7 @@ set -euo pipefail
 
 API_BASE="${BRMMEDIA_LAN_API_BASE:-http://127.0.0.1:9100/api/v1}"
 POLL_SECONDS="${BRMMEDIA_H3_POLL_SECONDS:-10}"
-TIMEOUT_SECONDS="${BRMMEDIA_H3_TASK_TIMEOUT_SECONDS:-5400}"
+TIMEOUT_SECONDS="${BRMMEDIA_H3_TASK_TIMEOUT_SECONDS:-14400}"
 FULL=0
 RESTART_RECOVERY=0
 QUALITY_I2V_ONLY=0
@@ -77,7 +77,7 @@ wait_for_task() {
         echo "[OK] $label completed: $task_id"
         return 0
         ;;
-      failed|cancelled|interrupted)
+      failed|cancelled|interrupted|timed_out)
         echo "[ERROR] $label ended as $state: $response" >&2
         return 1
         ;;
@@ -108,11 +108,13 @@ if settings.get("requested_seconds") != expected_seconds:
 width, height, frames = settings.get("width"), settings.get("height"), settings.get("frames")
 if not all(isinstance(value, int) for value in (width, height, frames)):
     raise SystemExit(f"[ERROR] {label} has invalid effective canvas/frame values: {settings}")
-if width < 32 or height < 32 or width % 32 or height % 32 or frames < 124 or frames % 17 != 5:
+if width < 32 or height < 32 or width % 32 or height % 32 or frames < 5 or frames % 17 != 5:
     raise SystemExit(f"[ERROR] {label} violates the H3 canvas/frame grid: {settings}")
 expected_effective = round(frames / 24, 3)
 if not math.isclose(float(settings.get("effective_seconds")), expected_effective, abs_tol=0.001):
     raise SystemExit(f"[ERROR] {label} has inconsistent effective duration: {settings}")
+if expected_profile == "draft" and frames != 73:
+    raise SystemExit(f"[ERROR] {label} draft must use the official 73-frame profile: {settings}")
 print(f"[OK] {label} effective H3 settings: {width}x{height}, {frames} frames, {expected_effective}s")
 PY
 }
@@ -195,6 +197,23 @@ iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwFfIkkY0kSH8
 PNG
 }
 
+verify_runtime_acceleration_evidence() {
+  local log_file="${BRMMEDIA_COMFY_LOG_FILE:-./ubuntu-backend-deploy/comfyui_runtime.log}"
+  [ -f "$log_file" ] || {
+    echo "[ERROR] ComfyUI runtime log is unavailable: $log_file" >&2
+    return 1
+  }
+  if ! grep -Eqi 'cuda backend.*enabled|native ops:.*(convrot|nvfp4)' "$log_file"; then
+    echo "[ERROR] CUDA quantization backend evidence is missing from $log_file" >&2
+    return 1
+  fi
+  if ! grep -Eqi 'sage.?attention' "$log_file"; then
+    echo "[ERROR] Sage Attention evidence is missing from $log_file" >&2
+    return 1
+  fi
+  echo "[OK] Runtime log records CUDA quantization and Sage Attention evidence."
+}
+
 upload_fixture_image() {
   local response
   make_fixture_image
@@ -248,6 +267,11 @@ health="$(api_get "$API_BASE/health")"
 if [ "$(printf '%s' "$health" | json_get status)" != "ok" ]; then
   echo "[ERROR] LAN API is not healthy: $health" >&2
   exit 1
+fi
+if [ "${BRMMEDIA_REQUIRE_RUNTIME_ACCELERATION_EVIDENCE:-0}" = "1" ]; then
+  verify_runtime_acceleration_evidence
+else
+  echo "[WARN] CUDA/Sage runtime-log evidence check is disabled; enable BRMMEDIA_REQUIRE_RUNTIME_ACCELERATION_EVIDENCE=1 for candidate/production acceptance."
 fi
 
 image_asset_id="$(upload_fixture_image)"

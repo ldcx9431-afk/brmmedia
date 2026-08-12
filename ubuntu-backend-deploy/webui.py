@@ -40,7 +40,7 @@ import requests
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
     start_comfyui, stop_comfyui, is_alive, run_workflow,
-    get_view_file, interrupt, BASE, WORKFLOW_DIR, upload_image, audio_duration,
+    get_view_file, interrupt, BASE, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
 )
 
 
@@ -65,8 +65,11 @@ if VIDEO_ENGINE not in {"ltx23", "h3"}:
 H3_ENABLED = VIDEO_ENGINE == "h3"
 PRIMARY_T2V_TAB_LABEL = "MiniMax H3 文生视频" if H3_ENABLED else "文生视频 LTX2.3（回退）"
 PRIMARY_I2V_TAB_LABEL = "MiniMax H3 图生视频" if H3_ENABLED else "图生视频 LTX2.3（回退）"
-PRIMARY_VIDEO_SECONDS_MIN = 4 if H3_ENABLED else 2
-PRIMARY_VIDEO_SECONDS_MAX = 15 if H3_ENABLED else 360
+PRIMARY_VIDEO_SECONDS_MIN = 3 if H3_ENABLED else 2
+# Quality remains deliberately capped while the stable CUDA/Sage canary is
+# being accepted.  This prevents a 15-second 768px request from consuming the
+# single A5000 queue for hours.
+PRIMARY_VIDEO_SECONDS_MAX = 6 if H3_ENABLED else 360
 PRIMARY_VIDEO_SECONDS_DEFAULT = 5
 TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
@@ -205,6 +208,7 @@ class TaskStatus(str, enum.Enum):
     RUNNING = "处理中"
     DONE    = "已完成"
     CANCELLED = "已中断"
+    TIMEOUT = "已超时"
     ERROR   = "失败"
 
 
@@ -277,7 +281,7 @@ class TaskQueue:
         """从落盘历史恢复已经结束的任务；丢失的产物不会显示为可下载素材。"""
         try:
             status = TaskStatus(record["status"])
-            if status not in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.ERROR):
+            if status not in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.TIMEOUT, TaskStatus.ERROR):
                 return None
             result = [
                 str(path)
@@ -419,6 +423,7 @@ class TaskQueue:
             TaskStatus.RUNNING: "running",
             TaskStatus.DONE: "completed",
             TaskStatus.CANCELLED: "cancelled",
+            TaskStatus.TIMEOUT: "timed_out",
             TaskStatus.ERROR: "failed",
         }
         with self._lock:
@@ -543,6 +548,9 @@ class TaskQueue:
             try:
                 self._processor(task)
                 task.status = TaskStatus.DONE
+            except TimeoutError as e:
+                task.status, task.error = TaskStatus.TIMEOUT, str(e)
+                print(f"[Queue] 任务「{task.name}」已超时，已请求中断 ComfyUI")
             except Exception as e:
                 if task.cancel_event.is_set():
                     task.status, task.error = TaskStatus.CANCELLED, "用户请求中断"
@@ -814,8 +822,14 @@ def _parse_size(size: str) -> tuple[int, int]:
 # showing the adjusted values in the task record prevents the UI/API from
 # claiming an impossible duration.
 H3_PROFILES = {
-    "preview": {"short_edge": 480, "default_seconds": 5, "label": "稳定预览（480 短边，约 5 秒）"},
-    "quality": {"short_edge": 768, "default_seconds": 6, "label": "质量（768 短边，约 6 秒）"},
+    # The official H3 templates use approximately 0.4MP / 73 frames as a
+    # lightweight prompt-and-motion check.  Keep it a fixed native-grid job.
+    "draft": {"target_pixels": 400_000, "default_seconds": 3, "min_seconds": 3, "max_seconds": 3,
+              "label": "极速草稿（约 0.4MP，73 帧，约 3 秒）"},
+    "preview": {"short_edge": 480, "default_seconds": 5, "min_seconds": 4, "max_seconds": 6,
+                "label": "稳定预览（480 短边，约 5 秒）"},
+    "quality": {"short_edge": 768, "default_seconds": 6, "min_seconds": 4, "max_seconds": 6,
+                "label": "质量（768 短边，约 6 秒）"},
 }
 H3_MAX_LONG_EDGE = 1344
 H3_FPS = 24
@@ -825,28 +839,35 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
     """Validate a H3 request and return the actual canvas/frame-grid values."""
     profile = str(profile or "preview")
     if profile not in H3_PROFILES:
-        raise gr.Error("H3 档位仅支持 preview 或 quality")
+        raise gr.Error("H3 档位仅支持 draft、preview 或 quality")
     try:
         numeric_seconds = float(seconds)
         if not numeric_seconds.is_integer():
             raise ValueError
         requested_seconds = int(numeric_seconds)
     except (TypeError, ValueError):
-        raise gr.Error("视频时长必须是 4–15 秒的整数") from None
-    if requested_seconds < 4 or requested_seconds > 15:
-        raise gr.Error("MiniMax H3 视频时长仅支持 4–15 秒")
+        raise gr.Error("视频时长必须是当前档位支持的整数秒") from None
+    limits = H3_PROFILES[profile]
+    if not limits["min_seconds"] <= requested_seconds <= limits["max_seconds"]:
+        raise gr.Error(
+            f"MiniMax H3 {profile} 档位仅支持 {limits['min_seconds']}–{limits['max_seconds']} 秒"
+        )
 
     requested_width, requested_height = _parse_size(size)
-    short_edge = H3_PROFILES[profile]["short_edge"]
-    scale = min(
-        short_edge / min(requested_width, requested_height),
-        H3_MAX_LONG_EDGE / max(requested_width, requested_height),
-    )
+    if "target_pixels" in limits:
+        scale = (limits["target_pixels"] / (requested_width * requested_height)) ** 0.5
+        scale = min(scale, H3_MAX_LONG_EDGE / max(requested_width, requested_height))
+    else:
+        short_edge = limits["short_edge"]
+        scale = min(
+            short_edge / min(requested_width, requested_height),
+            H3_MAX_LONG_EDGE / max(requested_width, requested_height),
+        )
     width = max(32, int(round(requested_width * scale / 32)) * 32)
     height = max(32, int(round(requested_height * scale / 32)) * 32)
-    # Native H3 notes its trained range starts at about 124 frames.  Keep the
-    # public 4–15 second request range, but report the real 5.167s minimum.
-    frames = max(124, round(requested_seconds * H3_FPS))
+    # H3 accepts the native 17k+5 frame grid.  The official 0.4MP draft
+    # template is 73 frames, so do not artificially force all profiles to 124.
+    frames = round(requested_seconds * H3_FPS)
     frames += (5 - frames % 17) % 17
     return {
         "profile": profile,
@@ -1298,7 +1319,12 @@ def process_task(task: Task) -> None:
     if builder is None:
         raise ValueError(f"未登记的工作流:{task.workflow_name}")
     workflow = builder[0](task.workflow_name, task.args)
-    outputs = run_workflow(workflow, stop_event=task.cancel_event)
+    timeout = H3_TASK_TIMEOUT if task.workflow_name.startswith("MiniMaxH3-") else None
+    outputs = run_workflow(
+        workflow,
+        timeout=timeout if timeout is not None else TASK_TIMEOUT,
+        stop_event=task.cancel_event,
+    )
     task.result = extract_result(outputs, task)
 
 
@@ -1480,6 +1506,7 @@ STATUS_ICONS = {
     TaskStatus.RUNNING: "🔵",
     TaskStatus.DONE:    "🟢",
     TaskStatus.CANCELLED: "⚫",
+    TaskStatus.TIMEOUT: "🟠",
     TaskStatus.ERROR:   "🔴",
 }
 
@@ -1545,6 +1572,8 @@ def render_queue():
     def note(t: Task) -> str:
         if t.status == TaskStatus.CANCELLED:
             return t.error or "用户请求中断"
+        if t.status == TaskStatus.TIMEOUT:
+            return t.error or "等待超时，已请求中断 ComfyUI"
         if t.status == TaskStatus.ERROR:
             return t.error
         if t.status == TaskStatus.DONE and isinstance(t.result, list):
@@ -1553,7 +1582,7 @@ def render_queue():
 
     def cost(t: Task) -> str:
         # 只有已完成的任务显示耗时,其余一律用短横代替。
-        if t.status in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.ERROR) and t.start_ts and t.done_ts:
+        if t.status in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.TIMEOUT, TaskStatus.ERROR) and t.start_ts and t.done_ts:
             return _fmt_duration(t.done_ts - t.start_ts)
         return "-"
 
@@ -1580,10 +1609,11 @@ def render_queue():
 
     ok = sum(1 for t in done if t.status == TaskStatus.DONE)
     cancelled = sum(1 for t in done if t.status == TaskStatus.CANCELLED)
+    timed_out = sum(1 for t in done if t.status == TaskStatus.TIMEOUT)
     err = sum(1 for t in done if t.status == TaskStatus.ERROR)
     backend = "在线" if is_alive() else "离线"
     summary = (f"ComfyUI:{backend}　｜　并发 {QUEUE_CONCURRENCY}　｜　排队 {len(pending)}　｜　"
-               f"处理中 {len(running)}　｜　完成 {ok}　｜　中断 {cancelled}　｜　失败 {err}")
+               f"处理中 {len(running)}　｜　完成 {ok}　｜　中断 {cancelled}　｜　超时 {timed_out}　｜　失败 {err}")
 
     # 图片与视频保持紧凑缩略图，点击后交给独立全屏查看器；音频提供下载列表和播放器选择器。
     imgs = []
@@ -1862,7 +1892,7 @@ def build_ui():
                             )
                             profile3 = gr.Dropdown(
                                 label="生成档位", choices=list(H3_PROFILES), value="preview",
-                                info="preview：480 短边；quality：768 短边。实际时长会按 H3 帧网格调整。",
+                                info="draft：0.4MP / 73 帧草稿；preview：480 短边；quality：768 短边。实际时长会按 H3 帧网格调整。",
                                 visible=H3_ENABLED,
                             )
                         submit_btn3 = gr.Button("提交", variant="primary")
@@ -1895,7 +1925,7 @@ def build_ui():
                             )
                         profile4 = gr.Dropdown(
                             label="生成档位", choices=list(H3_PROFILES), value="preview",
-                            info="H3 会将源图适配至所选画幅，并生成同步立体声音频。",
+                            info="draft：0.4MP / 73 帧草稿；preview：480 短边；quality：768 短边。H3 会将源图适配至所选画幅，并生成同步立体声音频。",
                             visible=H3_ENABLED,
                         )
                     with gr.Column(scale=1):

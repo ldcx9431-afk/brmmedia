@@ -41,8 +41,8 @@ export CUDA_VISIBLE_DEVICES="${COMFYUI_CUDA_VISIBLE_DEVICES:-0}"
 mkdir -p "$HF_HOME" "$TORCH_HOME"
 
 case " ${COMFYUI_ARGS:-} " in
-  *" --highvram "*|*" --gpu-only "*)
-    echo "[ERROR] --highvram/--gpu-only are incompatible with the MiniMax H3 dynamic-offload profile."
+  *" --highvram "*|*" --gpu-only "*|*" --disable-smart-memory "*|*" --cache-none "*)
+    echo "[ERROR] --highvram/--gpu-only/--disable-smart-memory/--cache-none are incompatible with the MiniMax H3 dynamic-offload profile."
     exit 1
     ;;
 esac
