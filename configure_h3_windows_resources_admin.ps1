@@ -53,7 +53,9 @@ $content = Set-Wsl2Option $content 'memory' "${WslMemoryGb}GB"
 # Windows E: page file is the committed-memory safety net required for H3.
 [System.IO.File]::WriteAllText($configPath, $content, [System.Text.UTF8Encoding]::new($false))
 
-$pagefileMb = $PageFileGb * 1024
+# Win32_PageFileSetting declares these fields as uint32.  PowerShell otherwise
+# infers Int32 from the arithmetic expression, which fails on New-CimInstance.
+$pagefileMb = [uint32]($PageFileGb * 1024)
 $existing = @(Get-CimInstance Win32_PageFileSetting -ErrorAction SilentlyContinue)
 if ($PSCmdlet.ShouldProcess('Windows virtual-memory settings', "set E:\pagefile.sys to fixed $PageFileGb GB")) {
     $computer = Get-CimInstance Win32_ComputerSystem
@@ -65,9 +67,9 @@ if ($PSCmdlet.ShouldProcess('Windows virtual-memory settings', "set E:\pagefile.
     }
     $ePagefile = Get-CimInstance Win32_PageFileSetting -Filter "Name='E:\\pagefile.sys'" -ErrorAction SilentlyContinue
     if ($ePagefile) {
-        Set-CimInstance -InputObject $ePagefile -Property @{ InitialSize = $pagefileMb; MaximumSize = $pagefileMb } | Out-Null
+        Set-CimInstance -InputObject $ePagefile -Property @{ InitialSize = [uint32]$pagefileMb; MaximumSize = [uint32]$pagefileMb } | Out-Null
     } else {
-        New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = 'E:\pagefile.sys'; InitialSize = $pagefileMb; MaximumSize = $pagefileMb } | Out-Null
+        New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = 'E:\pagefile.sys'; InitialSize = [uint32]$pagefileMb; MaximumSize = [uint32]$pagefileMb } | Out-Null
     }
 }
 
