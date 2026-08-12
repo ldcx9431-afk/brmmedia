@@ -8,11 +8,21 @@ param(
     [ValidateRange(64, 120)]
     [int]$WslMemoryGb = 96,
     [ValidateRange(64, 128)]
-    [int]$PageFileGb = 64
+    [int]$PageFileGb = 64,
+    # The persistent BRMMedia WSL services run through the Windows `deploy`
+    # account.  .wslconfig is per Windows user, so an administrator launching
+    # this script as another account must still write the deploy profile.
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$TargetWindowsUser = 'deploy'
 )
 
 $ErrorActionPreference = 'Stop'
-$configPath = Join-Path $env:USERPROFILE '.wslconfig'
+$profileRoot = Join-Path 'C:\Users' $TargetWindowsUser
+Test-Path $profileRoot -PathType Container | Out-Null
+if (-not (Test-Path $profileRoot -PathType Container)) {
+    throw "Windows profile does not exist: $profileRoot"
+}
+$configPath = Join-Path $profileRoot '.wslconfig'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $backupPath = "$configPath.brmmedia-h3-$stamp.bak"
 
@@ -73,7 +83,7 @@ if ($PSCmdlet.ShouldProcess('Windows virtual-memory settings', "set E:\pagefile.
     }
 }
 
-Write-Host "WSL configuration written: $configPath (memory=${WslMemoryGb}GB)"
+Write-Host "WSL configuration written for $TargetWindowsUser: $configPath (memory=${WslMemoryGb}GB)"
 if (Test-Path $backupPath) { Write-Host "Backup written: $backupPath" }
 Write-Host "E: page file configured: E:\pagefile.sys (${PageFileGb}GB fixed)"
 Write-Host 'Restart Windows before continuing. A WSL shutdown alone does not apply a new Windows page file.' -ForegroundColor Yellow
