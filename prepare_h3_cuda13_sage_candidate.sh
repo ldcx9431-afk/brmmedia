@@ -65,10 +65,19 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$MANIFEST")"
 before="$CANARY_VENV/.brm-before-cuda13-sage-$(date -u +%Y%m%dT%H%M%SZ).freeze"
 runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip freeze > "$before"
 
-note "Installing PyTorch CUDA 13.0 into isolated candidate..."
-runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip install --upgrade --force-reinstall \
-  --index-url "$TORCH_INDEX" \
-  "torch==${TORCH_VERSION}+cu130" "torchvision==${TORCHVISION_VERSION}+cu130" "torchaudio==${TORCHAUDIO_VERSION}+cu130"
+runtime_versions="$(runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" - <<'PY' 2>/dev/null || true
+import torch, torchaudio, torchvision
+print(torch.__version__, torchvision.__version__, torchaudio.__version__)
+PY
+)"
+if [ "$runtime_versions" = "$TORCH_VERSION+cu130 $TORCHVISION_VERSION+cu130 $TORCHAUDIO_VERSION+cu130" ]; then
+  note "Reusing exact PyTorch CUDA 13 candidate: $runtime_versions"
+else
+  note "Installing PyTorch CUDA 13.0 into isolated candidate..."
+  runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip install --upgrade --force-reinstall \
+    --index-url "$TORCH_INDEX" \
+    "torch==${TORCH_VERSION}+cu130" "torchvision==${TORCHVISION_VERSION}+cu130" "torchaudio==${TORCHAUDIO_VERSION}+cu130"
+fi
 
 note "Reinstalling the pinned ComfyUI requirements in the candidate..."
 comfy_root="$(sed -n 's/^COMFYUI_ROOT=//p' "$CANARY_ENV" | tail -n1)"
@@ -83,9 +92,10 @@ if [ "$SAGE_SOURCE_BUILD" = "1" ]; then
   if [ ! -d "$source_dir/.git" ]; then
     runuser -u "$SERVICE_USER" -- git clone "$SAGE_SOURCE_REPO" "$source_dir"
   fi
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$source_dir"
   runuser -u "$SERVICE_USER" -- git -C "$source_dir" fetch --tags --force
   runuser -u "$SERVICE_USER" -- git -C "$source_dir" checkout --detach "$SAGE_SOURCE_COMMIT"
-  actual_commit="$(git -C "$source_dir" rev-parse HEAD)"
+  actual_commit="$(git -c safe.directory="$source_dir" -C "$source_dir" rev-parse HEAD)"
   [ "$actual_commit" = "$SAGE_SOURCE_COMMIT" ] || die "SageAttention source commit mismatch: $actual_commit"
   note "Building pinned official SageAttention source for sm86 in the candidate..."
   rm -f "$wheel_dir"/sageattention-*.whl
