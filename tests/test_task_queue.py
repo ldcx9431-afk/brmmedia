@@ -244,6 +244,21 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(self.webui.h3_profile_default_seconds("quality"), 6)
         self.assertEqual(self.webui.h3_profile_default_seconds("unknown"), 5)
 
+    def test_h3_profile_switch_resets_and_constrains_duration_component(self):
+        quality = self.webui.h3_profile_duration_update("quality")
+        self.assertEqual(quality["value"], 6)
+        self.assertEqual(quality["minimum"], 4)
+        self.assertEqual(quality["maximum"], 15)
+        draft = self.webui.h3_profile_duration_update("draft")
+        self.assertEqual(draft["value"], 3)
+        self.assertEqual(draft["minimum"], 3)
+        self.assertEqual(draft["maximum"], 3)
+
+    def test_h3_quality_allows_15_second_production_request(self):
+        quality = self.webui.normalise_h3_request("768 × 1024", 15, "quality")
+        self.assertEqual(quality["requested_seconds"], 15)
+        self.assertEqual(quality["frames"] % 17, 5)
+
     def test_h3_mode_forces_single_media_queue(self):
         previous_engine = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
         try:

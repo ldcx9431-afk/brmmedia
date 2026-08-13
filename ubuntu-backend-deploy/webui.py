@@ -66,10 +66,10 @@ H3_ENABLED = VIDEO_ENGINE == "h3"
 PRIMARY_T2V_TAB_LABEL = "MiniMax H3 文生视频" if H3_ENABLED else "文生视频 LTX2.3（回退）"
 PRIMARY_I2V_TAB_LABEL = "MiniMax H3 图生视频" if H3_ENABLED else "图生视频 LTX2.3（回退）"
 PRIMARY_VIDEO_SECONDS_MIN = 3 if H3_ENABLED else 2
-# Quality remains deliberately capped while the stable CUDA/Sage canary is
-# being accepted.  This prevents a 15-second 768px request from consuming the
-# single A5000 queue for hours.
-PRIMARY_VIDEO_SECONDS_MAX = 6 if H3_ENABLED else 360
+# H3 runs on its own single A5000 queue and has a four-hour task deadline, so
+# production permits the model's 15-second upper bound after CUDA/Sage
+# acceptance.  The UI/API still default to the quicker profiles.
+PRIMARY_VIDEO_SECONDS_MAX = 15 if H3_ENABLED else 360
 PRIMARY_VIDEO_SECONDS_DEFAULT = 5
 TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
@@ -826,9 +826,9 @@ H3_PROFILES = {
     # lightweight prompt-and-motion check.  Keep it a fixed native-grid job.
     "draft": {"target_pixels": 400_000, "default_seconds": 3, "min_seconds": 3, "max_seconds": 3,
               "label": "极速草稿（约 0.4MP，73 帧，约 3 秒）"},
-    "preview": {"short_edge": 480, "default_seconds": 5, "min_seconds": 4, "max_seconds": 6,
+    "preview": {"short_edge": 480, "default_seconds": 5, "min_seconds": 4, "max_seconds": 15,
                 "label": "稳定预览（480 短边，约 5 秒）"},
-    "quality": {"short_edge": 768, "default_seconds": 6, "min_seconds": 4, "max_seconds": 6,
+    "quality": {"short_edge": 768, "default_seconds": 6, "min_seconds": 4, "max_seconds": 15,
                 "label": "质量（768 短边，约 6 秒）"},
 }
 H3_MAX_LONG_EDGE = 1344
@@ -880,8 +880,30 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
     }
 
 
+def h3_profile_duration_update(profile: str):
+    """Reset and constrain duration after an H3 profile switch.
+
+    Browsers can retain a value from an older page bundle. Updating the
+    component bounds as well as its value keeps each profile's valid range
+    visible and prevents stale values reaching Gradio's schema validator.
+    """
+    limits = H3_PROFILES.get(str(profile), H3_PROFILES["preview"])
+    update = {
+        "value": limits["default_seconds"],
+        "minimum": limits["min_seconds"],
+        "maximum": limits["max_seconds"],
+        "label": f"视频时长（秒，{limits['min_seconds']}–{limits['max_seconds']}）",
+        "info": f"{limits['label']}；切换档位会自动重置时长。",
+    }
+    # Gradio's update helper is available in the production runtime.  Keeping
+    # the plain mapping fallback also supports compatible versions (and makes
+    # the H3 profile switch testable without a full Gradio installation).
+    updater = getattr(gr, "update", None)
+    return updater(**update) if callable(updater) else update
+
+
 def h3_profile_default_seconds(profile: str) -> int:
-    """UI helper: reset the duration when an H3 profile is explicitly changed."""
+    """Compatibility helper retained for existing API tests/callers."""
     return H3_PROFILES.get(str(profile), H3_PROFILES["preview"])["default_seconds"]
 
 
@@ -1885,10 +1907,11 @@ def build_ui():
                             size3 = gr.Dropdown(label="视频尺寸", choices=output_size, value="768 × 1024")
                             seconds3 = gr.Number(
                                 value=PRIMARY_VIDEO_SECONDS_DEFAULT,
-                                label="视频时长（秒）",
+                                label="视频时长（秒，4–15）" if H3_ENABLED else "视频时长（秒）",
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
+                                info="preview / quality 支持 4–15 秒；draft 固定为 3 秒。切换档位会自动重置时长。" if H3_ENABLED else None,
                             )
                             profile3 = gr.Dropdown(
                                 label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -1903,7 +1926,7 @@ def build_ui():
                     api_visibility="private",
                 )
                 profile3.change(
-                    fn=h3_profile_default_seconds,
+                    fn=h3_profile_duration_update,
                     inputs=profile3,
                     outputs=seconds3,
                     api_visibility="private",
@@ -1918,10 +1941,11 @@ def build_ui():
                             size4 = gr.Dropdown(label="输出画幅", choices=output_size, value="768 × 1024")
                             seconds4 = gr.Number(
                                 value=PRIMARY_VIDEO_SECONDS_DEFAULT,
-                                label="视频时长（秒）",
+                                label="视频时长（秒，4–15）" if H3_ENABLED else "视频时长（秒）",
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
+                                info="preview / quality 支持 4–15 秒；draft 固定为 3 秒。切换档位会自动重置时长。" if H3_ENABLED else None,
                             )
                         profile4 = gr.Dropdown(
                             label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -1943,7 +1967,7 @@ def build_ui():
                     api_visibility="private",
                 )
                 profile4.change(
-                    fn=h3_profile_default_seconds,
+                    fn=h3_profile_duration_update,
                     inputs=profile4,
                     outputs=seconds4,
                     api_visibility="private",
