@@ -16,10 +16,22 @@ APP_ROOT="${BRMMEDIA_APP_ROOT:-$(runtime_env_value BRMMEDIA_APP_ROOT)}"
 SOURCE_ROOT="${BRMMEDIA_SOURCE_ROOT:-$(runtime_env_value BRMMEDIA_SOURCE_ROOT)}"
 APP_ROOT="${APP_ROOT:-/srv/brmmedia/app}"
 SOURCE_ROOT="${SOURCE_ROOT:-/mnt/d/brmmedia/source}"
-COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI}"
-EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-563b98eefbe643a4cd510ee7f0b43e79880d5a3f}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 QWEN_DIR="$APP_ROOT/llm-backend-deploy"
+backend_env_value() {
+  local key="$1"
+  [ -r "$BACKEND_DIR/.env" ] || return 0
+  sed -n "s/^${key}=//p" "$BACKEND_DIR/.env" | tail -n1 | sed -e 's/^"//' -e 's/"$//'
+}
+COMFY_ROOT="${COMFYUI_ROOT:-$(backend_env_value COMFYUI_ROOT)}"
+COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
+runtime_lock="$APP_ROOT/runtime-locks/h3-comfyui-v0.32.0.env"
+locked_comfy_ref=""
+if [ -r "$runtime_lock" ]; then
+  locked_comfy_ref="$(sed -n 's/^BRMMEDIA_H3_COMFYUI_REF=//p' "$runtime_lock" | tail -n1)"
+fi
+EXPECTED_COMFY_REF="${BRMMEDIA_COMFYUI_REF:-$locked_comfy_ref}"
+EXPECTED_COMFY_REF="${EXPECTED_COMFY_REF:-563b98eefbe643a4cd510ee7f0b43e79880d5a3f}"
 WORKFLOW_VALIDATOR="$APP_ROOT/validate_comfy_workflows.py"
 HTTP_READY_WAIT_SECONDS="${BRMMEDIA_VERIFY_HTTP_WAIT_SECONDS:-45}"
 HTTP_READY_POLL_SECONDS="${BRMMEDIA_VERIFY_HTTP_POLL_SECONDS:-2}"

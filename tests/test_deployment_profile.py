@@ -38,6 +38,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("/etc/brmmedia/runtime.env", installer)
         self.assertIn("BRMMEDIA_NVIDIA_SMI", verifier)
         self.assertIn("/usr/lib/wsl/lib/nvidia-smi", verifier)
+        self.assertIn('runtime-locks/h3-comfyui-v0.32.0.env', verifier)
+        self.assertIn('backend_env_value COMFYUI_ROOT', verifier)
         self.assertIn('gpu_inventory="$("$nvidia_smi" --query-gpu=', verifier)
 
     def test_h3_activation_uses_candidate_env_and_restores_on_start_failure(self):
