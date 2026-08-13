@@ -46,6 +46,22 @@ rsync -a --delete \
   --exclude 'runtime-locks' \
   "$SOURCE_RELEASE/" "$TARGET_ROOT/"
 
+# `runtime-locks` also contains the candidate's large venvs, build artifacts
+# and rollback state, so it must never be deleted as part of a code refresh.
+# Copy the reviewed immutable lock manifests explicitly, however; otherwise a
+# refreshed release could run new preparation code with a stale runtime pin.
+mkdir -p "$TARGET_ROOT/runtime-locks"
+for lock_manifest in \
+  backend.requirements.lock \
+  comfyui-custom-nodes.lock.tsv \
+  h3-comfyui-v0.32.0.env \
+  minimax-h3-target-profile-2026-08-05.md \
+  production-profile-2026-08-03.md \
+  qwen35-4b.requirements.lock; do
+  install -m 0644 "$SOURCE_RELEASE/runtime-locks/$lock_manifest" \
+    "$TARGET_ROOT/runtime-locks/$lock_manifest"
+done
+
 critical=(
   'ubuntu-backend-deploy/webui.py'
   'ubuntu-backend-deploy/lan_api.py'

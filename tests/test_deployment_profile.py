@@ -127,6 +127,8 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('do not refresh an active service path', refresh)
         self.assertIn("--exclude 'ubuntu-backend-deploy/.env'", refresh)
         self.assertIn("--exclude 'ubuntu-backend-deploy/outputs'", refresh)
+        self.assertIn('install -m 0644 "$SOURCE_RELEASE/runtime-locks/$lock_manifest"', refresh)
+        self.assertIn('h3-comfyui-v0.32.0.env', refresh)
 
     def test_h3_worker_inherits_the_stage_chunk_size(self):
         downloader = (REPO_ROOT / "start_minimax_h3_download.sh").read_text(encoding="utf-8")
