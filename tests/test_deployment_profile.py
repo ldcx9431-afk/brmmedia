@@ -130,6 +130,11 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('install -m 0644 "$SOURCE_RELEASE/runtime-locks/$lock_manifest"', refresh)
         self.assertIn('h3-comfyui-v0.32.0.env', refresh)
 
+    def test_systemd_installer_uses_the_release_backend_venv_for_rest(self):
+        installer = (REPO_ROOT / "install_ubuntu_systemd_services.sh").read_text(encoding="utf-8")
+        self.assertIn("BRMMEDIA_BACKEND_VENV", installer)
+        self.assertIn('$BACKEND_VENV/bin/python -m uvicorn lan_api:app', installer)
+
     def test_h3_worker_inherits_the_stage_chunk_size(self):
         downloader = (REPO_ROOT / "start_minimax_h3_download.sh").read_text(encoding="utf-8")
         self.assertIn('--setenv="BRMMEDIA_H3_CHUNK_BYTES=$CHUNK_BYTES"', downloader)

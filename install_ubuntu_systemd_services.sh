@@ -39,6 +39,18 @@ if [ ! -x "$APP_ROOT/ubuntu-backend-deploy/start_backend.sh" ] || [ ! -x "$APP_R
   exit 1
 fi
 
+# Keep the loopback REST process in the same reviewed physical environment as
+# the media backend.  H3 v0.32 candidates intentionally override
+# BRMMEDIA_BACKEND_VENV; hard-coding the legacy checkout-local .venv here would
+# silently split the two services across different dependency sets.
+BACKEND_ENV="$APP_ROOT/ubuntu-backend-deploy/.env"
+BACKEND_VENV="$(sed -n 's/^BRMMEDIA_BACKEND_VENV=//p' "$BACKEND_ENV" 2>/dev/null | tail -n1 | sed -e 's/^"//' -e 's/"$//')"
+BACKEND_VENV="${BACKEND_VENV:-$APP_ROOT/ubuntu-backend-deploy/.venv}"
+if [ ! -x "$BACKEND_VENV/bin/python" ]; then
+  echo "[ERROR] Backend runtime Python is unavailable: $BACKEND_VENV/bin/python" >&2
+  exit 1
+fi
+
 # /usr/local/sbin/brmmedia-verify-runtime is shared across releases.  Record
 # the release it must inspect so post-H3 acceptance never silently validates
 # the preserved recovery checkout instead of the active candidate.
@@ -71,7 +83,7 @@ install_service \
   "$ROOT_DIR/ubuntu-backend-deploy/brmmedia-lan-api.service.example" \
   /etc/systemd/system/brmmedia-lan-api.service \
   "$APP_ROOT/ubuntu-backend-deploy" \
-  "$APP_ROOT/ubuntu-backend-deploy/.venv/bin/python -m uvicorn lan_api:app --host 127.0.0.1 --port 9100 --proxy-headers"
+  "$BACKEND_VENV/bin/python -m uvicorn lan_api:app --host 127.0.0.1 --port 9100 --proxy-headers"
 
 install -m 0755 "$ROOT_DIR/brmmedia-healthcheck.sh" /usr/local/sbin/brmmedia-healthcheck
 install -m 0755 "$ROOT_DIR/brmmedia-verify-runtime.sh" /usr/local/sbin/brmmedia-verify-runtime
