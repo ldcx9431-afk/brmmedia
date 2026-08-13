@@ -11,6 +11,7 @@ SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 CANARY_COMFY_ROOT="${BRMMEDIA_H3_CANARY_COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
 CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
 CANARY_OUTPUT_DIR="$BACKEND_DIR/outputs-h3-canary"
+CANARY_WORKFLOW_DIR="$APP_ROOT/runtime-locks/h3-canary-workflows"
 # The staged H3 runtime normally links .venv to the active release to retain
 # normal-service dependencies.  A canary must not mutate that shared venv when
 # ComfyUI installs the H3 requirements, so it always receives a physical copy.
@@ -161,7 +162,11 @@ for config in extra_model_paths.yaml extra_model_paths.yaml.example; do
   fi
 done
 
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_ENV")" "$CANARY_OUTPUT_DIR"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_ENV")" "$CANARY_OUTPUT_DIR" "$CANARY_WORKFLOW_DIR"
+# Keep the canary's workflow graph private.  In particular this snapshot
+# contains the H3-only Sage Attention node, while production continues using
+# the already accepted workflow files until the benchmark gate passes.
+runuser -u "$SERVICE_USER" -- rsync -a --delete "$BACKEND_DIR/workflows/" "$CANARY_WORKFLOW_DIR/"
 install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0600 "$BACKEND_ENV" "$CANARY_ENV"
 set_dotenv_value COMFYUI_ROOT "$CANARY_COMFY_ROOT"
 set_dotenv_value COMFYUI_PYTHON "$CANARY_PYTHON"
@@ -171,6 +176,7 @@ set_dotenv_value BRM_GRADIO_HOST 127.0.0.1
 set_dotenv_value BRM_GRADIO_PORT 9001
 set_dotenv_value BRMMEDIA_VIDEO_ENGINE h3
 set_dotenv_value BRM_OUTPUT_DIR "$CANARY_OUTPUT_DIR"
+set_dotenv_value BRMMEDIA_WORKFLOW_DIR "$CANARY_WORKFLOW_DIR"
 set_dotenv_value BRMMEDIA_H3_CANARY_ROOT "$CANARY_COMFY_ROOT"
 
 echo "[1/2] Verifying imported H3 components through the shared E: model store..."

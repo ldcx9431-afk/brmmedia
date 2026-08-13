@@ -77,11 +77,13 @@ COMFY_PORT="$(dotenv_value COMFYUI_PORT)"
 GRADIO_PORT="$(dotenv_value BRM_GRADIO_PORT)"
 OUTPUT_DIR="$(dotenv_value BRM_OUTPUT_DIR)"
 CANARY_VENV="$(dotenv_value BRMMEDIA_BACKEND_VENV)"
+CANARY_WORKFLOW_DIR="$(dotenv_value BRMMEDIA_WORKFLOW_DIR)"
 COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
 COMFY_PORT="${COMFY_PORT:-8189}"
 GRADIO_PORT="${GRADIO_PORT:-9001}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BACKEND_DIR/outputs-h3-canary}"
 CANARY_VENV="${CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
+CANARY_WORKFLOW_DIR="${CANARY_WORKFLOW_DIR:-$APP_ROOT/runtime-locks/h3-canary-workflows}"
 CANARY_PYTHON="$CANARY_VENV/bin/python"
 if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*$ ]]; then
   echo "[ERROR] Canary port configuration is invalid." >&2
@@ -89,6 +91,10 @@ if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*
 fi
 if [ -L "$CANARY_VENV" ] || [ ! -x "$CANARY_PYTHON" ]; then
   echo "[ERROR] Canary requires its prepared physical Python venv: $CANARY_VENV" >&2
+  exit 1
+fi
+if [ ! -f "$CANARY_WORKFLOW_DIR/MiniMaxH3-文生视频.json" ] || [ ! -f "$CANARY_WORKFLOW_DIR/MiniMaxH3-图生视频.json" ]; then
+  echo "[ERROR] Private H3 canary workflow snapshot is missing: $CANARY_WORKFLOW_DIR" >&2
   exit 1
 fi
 
@@ -127,7 +133,7 @@ if ! runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
   BRMMEDIA_H3_GATE_PYTHON="$CANARY_PYTHON" \
   "$APP_ROOT/verify_h3_workflow_gate.sh" \
   --url "http://127.0.0.1:$COMFY_PORT" \
-  --workflows "$BACKEND_DIR/workflows" \
+  --workflows "$CANARY_WORKFLOW_DIR" \
   --timeout 15; then
   # The canary is intentionally not exposed through Nginx, but leaving an
   # incompatible process alive would still consume the shared A5000 and make

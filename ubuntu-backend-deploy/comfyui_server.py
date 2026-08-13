@@ -38,7 +38,10 @@ COMFY_ROOT = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expandus
 # with /usr/bin/python and make ComfyUI miss its installed dependencies.
 PYTHON_EXE = Path(os.environ.get("COMFYUI_PYTHON", sys.executable)).expanduser()
 MAIN_PY = COMFY_ROOT / "main.py"
-WORKFLOW_DIR = BASE_DIR / "workflows"
+# The H3 canary uses a private workflow snapshot so an experimental custom
+# node never changes the LAN production workflows before acceptance.  Normal
+# deployments intentionally retain the checkout-local workflows directory.
+WORKFLOW_DIR = Path(os.environ.get("BRMMEDIA_WORKFLOW_DIR", BASE_DIR / "workflows")).expanduser().resolve()
 
 COMFY_HOST = os.environ.get("COMFYUI_HOST", "127.0.0.1")
 COMFY_PORT = int(os.environ.get("COMFYUI_PORT", "8188"))
