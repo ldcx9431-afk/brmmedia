@@ -293,7 +293,10 @@ def _validate_h3_acceleration(profile: str, size: str, acceleration: str) -> Non
     is_landscape_16_9 = bool(
         match
         and int(match.group(1)) > int(match.group(2))
-        and abs(int(match.group(1)) / int(match.group(2)) - 16 / 9) <= 0.02
+        # H3/LightX2V's trained 768P production cell is 1344x768.  Its
+        # storage-friendly canvas ratio is 1.75 rather than an exact 16:9
+        # 1.777..., so keep the guard narrow but include that official cell.
+        and abs(int(match.group(1)) / int(match.group(2)) - 16 / 9) <= 0.03
     )
     if acceleration == "turbo_fast" and (profile != "quality" or not is_landscape_16_9):
         _fail(422, "turbo_fast initially requires profile=quality and a 16:9 landscape size")

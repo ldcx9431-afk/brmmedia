@@ -179,6 +179,11 @@ class LanApiContractTests(unittest.TestCase):
             "acceleration": "turbo_fast",
         }, {})
         self.assertEqual(fast_args[-1], "turbo_fast")
+        trained_cell_args = self.api._normal_text_to_video({
+            "prompt": "trained cell", "profile": "quality", "size": "1344 × 768",
+            "acceleration": "turbo_fast",
+        }, {})
+        self.assertEqual(trained_cell_args[-1], "turbo_fast")
         with self.assertRaises(self.api.HTTPException):
             self.api._normal_text_to_video({
                 "prompt": "bad fast", "profile": "quality", "size": "768 × 1024",
