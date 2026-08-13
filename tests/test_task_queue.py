@@ -388,6 +388,10 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual((fast["width"], fast["height"]), (1344, 768))
         self.assertEqual(fast["steps"], 4)
         self.assertEqual((fast["shift_video"], fast["shift_audio"]), (6.0, 3.0))
+        trained_cell = self.webui.normalise_h3_request(
+            "1344 × 768", 6, "quality", "turbo_fast"
+        )
+        self.assertEqual((trained_cell["width"], trained_cell["height"]), (1344, 768))
         with self.assertRaises(self.webui.gr.Error):
             self.webui.normalise_h3_request("768 × 1024", 6, "quality", "turbo_fast")
 

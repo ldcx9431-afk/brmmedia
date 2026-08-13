@@ -989,7 +989,9 @@ def normalise_h3_request(
     if acceleration == "turbo_fast" and (
         profile != "quality"
         or requested_width <= requested_height
-        or abs(requested_width / requested_height - 16 / 9) > 0.02
+        # The trained LightX2V cell is 1344x768 (ratio 1.75), close to but
+        # intentionally not an exact mathematical 16:9 canvas.
+        or abs(requested_width / requested_height - 16 / 9) > 0.03
     ):
         raise gr.Error("LightX2V 4 步极速模式首版仅支持 quality 档和 16:9 横版")
     if "target_pixels" in limits:
