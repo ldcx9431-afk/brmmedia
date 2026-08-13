@@ -6,7 +6,7 @@ set -euo pipefail
 
 APP_ROOT="${BRMMEDIA_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
-CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
+CANARY_ENV="${BRMMEDIA_H3_CANARY_ENV:-$APP_ROOT/runtime-locks/h3-v032-canary.env}"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
 BACKEND_UNIT="${BRMMEDIA_H3_CANARY_BACKEND_UNIT:-baorong-backend-h3-canary}"
 API_UNIT="${BRMMEDIA_H3_CANARY_API_UNIT:-brmmedia-lan-api-h3-canary}"
@@ -26,6 +26,10 @@ if [ ! -f "$CANARY_ENV" ] || [ ! -x "$BACKEND_DIR/start_backend.sh" ]; then
 fi
 if [ ! -x "$APP_ROOT/verify_h3_workflow_gate.sh" ]; then
   echo "[ERROR] H3 workflow compatibility gate is missing: $APP_ROOT/verify_h3_workflow_gate.sh" >&2
+  exit 1
+fi
+if [ ! -x "$APP_ROOT/verify_h3_canary_runtime.sh" ]; then
+  echo "[ERROR] H3 v0.32 runtime gate is missing: $APP_ROOT/verify_h3_canary_runtime.sh" >&2
   exit 1
 fi
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
@@ -78,11 +82,11 @@ GRADIO_PORT="$(dotenv_value BRM_GRADIO_PORT)"
 OUTPUT_DIR="$(dotenv_value BRM_OUTPUT_DIR)"
 CANARY_VENV="$(dotenv_value BRMMEDIA_BACKEND_VENV)"
 CANARY_WORKFLOW_DIR="$(dotenv_value BRMMEDIA_WORKFLOW_DIR)"
-COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
+COMFY_ROOT="${COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-v032-canary}"
 COMFY_PORT="${COMFY_PORT:-8189}"
 GRADIO_PORT="${GRADIO_PORT:-9001}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BACKEND_DIR/outputs-h3-canary}"
-CANARY_VENV="${CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
+CANARY_VENV="${CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-v032-canary}"
 CANARY_WORKFLOW_DIR="${CANARY_WORKFLOW_DIR:-$APP_ROOT/runtime-locks/h3-canary-workflows}"
 CANARY_PYTHON="$CANARY_VENV/bin/python"
 if ! [[ "$COMFY_PORT" =~ ^[1-9][0-9]*$ ]] || ! [[ "$GRADIO_PORT" =~ ^[1-9][0-9]*$ ]]; then
@@ -95,6 +99,13 @@ if [ -L "$CANARY_VENV" ] || [ ! -x "$CANARY_PYTHON" ]; then
 fi
 if [ ! -f "$CANARY_WORKFLOW_DIR/MiniMaxH3-文生视频.json" ] || [ ! -f "$CANARY_WORKFLOW_DIR/MiniMaxH3-图生视频.json" ]; then
   echo "[ERROR] Private H3 canary workflow snapshot is missing: $CANARY_WORKFLOW_DIR" >&2
+  exit 1
+fi
+
+echo "[gate] Verifying immutable ComfyUI v0.32/CUDA13/Attention A/B runtime..."
+if ! runuser -u "$SERVICE_USER" -- env BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  BRMMEDIA_H3_CANARY_ENV="$CANARY_ENV" "$APP_ROOT/verify_h3_canary_runtime.sh"; then
+  restore_health_timer_on_error
   exit 1
 fi
 

@@ -5,9 +5,10 @@ set -euo pipefail
 
 APP_ROOT="${BRMMEDIA_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
-CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
+CANARY_ENV="${BRMMEDIA_H3_CANARY_ENV:-$APP_ROOT/runtime-locks/h3-v032-canary.env}"
+RUNTIME_LOCK="${BRMMEDIA_H3_RUNTIME_LOCK:-$APP_ROOT/runtime-locks/h3-comfyui-v0.32.0.env}"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
-CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
+CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-v032-canary}"
 TORCH_VERSION="${BRMMEDIA_H3_TORCH_VERSION:-2.11.0}"
 TORCHVISION_VERSION="${BRMMEDIA_H3_TORCHVISION_VERSION:-0.26.0}"
 TORCHAUDIO_VERSION="${BRMMEDIA_H3_TORCHAUDIO_VERSION:-2.11.0}"
@@ -26,6 +27,9 @@ note() { echo "[INFO] $*"; }
 
 [ "$(id -u)" -eq 0 ] || die "Run with sudo: sudo $0"
 [ -f "$CANARY_ENV" ] || die "Canary environment is missing: $CANARY_ENV"
+[ -f "$RUNTIME_LOCK" ] || die "Reviewed ComfyUI v0.32 runtime lock is missing: $RUNTIME_LOCK"
+# shellcheck disable=SC1090
+source "$RUNTIME_LOCK"
 [ -x "$CANARY_VENV/bin/python" ] || die "Physical canary venv is missing: $CANARY_VENV"
 [ ! -L "$CANARY_VENV" ] || die "Refusing a symlinked canary venv: $CANARY_VENV"
 id "$SERVICE_USER" >/dev/null 2>&1 || die "Missing service user: $SERVICE_USER"
@@ -121,20 +125,39 @@ print("gpu", torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))
 print("sageattention", importlib.util.find_spec("sageattention").origin)
 PY
 
-python3 - "$MANIFEST" "$before" "$TORCH_VERSION" "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" "$sage_origin" "$wheel_sha256" <<'PY'
+after="$APP_ROOT/runtime-locks/h3-v032-cuda13-sage.requirements.lock"
+runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip freeze > "$after"
+requirements_sha256="$(sha256sum "$after" | awk '{print $1}')"
+comfy_ref="$(git -c safe.directory="$comfy_root" -C "$comfy_root" rev-parse HEAD)"
+[ "$comfy_ref" = "$BRMMEDIA_H3_COMFYUI_REF" ] || \
+  die "ComfyUI v0.32 lock drifted before CUDA/Sage manifest: $comfy_ref"
+
+python3 - "$MANIFEST" "$before" "$after" "$requirements_sha256" \
+  "$BRMMEDIA_H3_COMFYUI_VERSION" "$comfy_ref" "$TORCH_VERSION" \
+  "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" "$sage_origin" "$wheel_sha256" \
+  "$BRMMEDIA_H3_COMFY_KITCHEN_VERSION" <<'PY'
 import json, sys
 from datetime import datetime, timezone
-path, before, torch_version, torchvision_version, torchaudio_version, source, wheel_sha256 = sys.argv[1:]
+(
+    path, before, after, requirements_sha256, comfy_version, comfy_ref,
+    torch_version, torchvision_version, torchaudio_version, source,
+    wheel_sha256, kitchen_version,
+) = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump({
-        "candidate": "cuda13-sageattention",
+        "candidate": "comfyui-v032-cuda13-sageattention",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "comfyui_version": comfy_version,
+        "comfyui_commit": comfy_ref,
         "torch": f"{torch_version}+cu130",
         "torchvision": f"{torchvision_version}+cu130",
         "torchaudio": f"{torchaudio_version}+cu130",
+        "comfy_kitchen": kitchen_version,
         "sage_source_or_wheel": source,
         "sage_wheel_sha256": wheel_sha256,
         "rollback_pip_freeze": before,
+        "candidate_pip_freeze": after,
+        "candidate_pip_freeze_sha256": requirements_sha256,
         "next": "Start loopback canary, verify native CUDA logs and Sage patch, then benchmark draft T2V/I2V.",
     }, handle, ensure_ascii=False, indent=2)
     handle.write("\n")

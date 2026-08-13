@@ -224,6 +224,14 @@ class Task:
     done_ts: float = 0.0        # 执行结束的时间戳(无论成功或失败)
     result: object = None       # 最终结果,这里是已保存产物的文件路径列表
     error: str = ""
+    prompt_id: str = ""        # ComfyUI prompt id；提交成功后立即持久化
+    stage: str = "queued"
+    node_id: str | None = None
+    current_step: int | float | None = None
+    total_steps: int | float | None = None
+    progress: float | None = None
+    last_progress_ts: float = 0.0
+    recovered: bool = False
     # 每个任务独立的取消信号。不能复用队列生命周期的 stop 事件，否则一次
     # 用户中断会让 worker 退出并影响之后的新任务。
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -246,9 +254,15 @@ class TaskQueue:
         self._processor = processor
         self._max_done = max_done
         self._max_workers = max(1, int(max_workers or 1))
-        self._pending: deque[Task] = deque()
+        restored = self._load_history()
+        self._pending: deque[Task] = deque(sorted(
+            (task for task in restored if task.status == TaskStatus.PENDING),
+            key=lambda task: task.submit_ts,
+        ))
         self._running: dict[str, Task] = {}
-        self._done: list[Task] = self._load_history()
+        self._done: list[Task] = [
+            task for task in restored if task.status != TaskStatus.PENDING
+        ]
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()      # 有新任务时唤醒 worker,实现立即执行
@@ -269,9 +283,16 @@ class TaskQueue:
             "done_ts": task.done_ts,
             "result": task.result if isinstance(task.result, list) else [],
             "error": task.error,
+            "prompt_id": task.prompt_id,
+            "stage": task.stage,
+            "node_id": task.node_id,
+            "current_step": task.current_step,
+            "total_steps": task.total_steps,
+            "progress": task.progress,
+            "last_progress_ts": task.last_progress_ts,
             "effective_settings": {
                 key: task.args[key]
-                for key in ("profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds")
+                for key in H3_EFFECTIVE_SETTING_KEYS
                 if key in task.args
             },
         }
@@ -281,8 +302,20 @@ class TaskQueue:
         """从落盘历史恢复已经结束的任务；丢失的产物不会显示为可下载素材。"""
         try:
             status = TaskStatus(record["status"])
-            if status not in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.TIMEOUT, TaskStatus.ERROR):
-                return None
+            prompt_id = str(record.get("prompt_id", "")).strip()
+            recovered = False
+            if status == TaskStatus.RUNNING:
+                if prompt_id:
+                    # The worker will reattach to the existing ComfyUI prompt
+                    # instead of submitting a duplicate workflow.
+                    status, recovered = TaskStatus.PENDING, True
+                else:
+                    status = TaskStatus.ERROR
+            elif status == TaskStatus.PENDING:
+                # Submission args intentionally are not persisted (prompts may
+                # contain sensitive business data), so a pre-submit task cannot
+                # be replayed after process loss.
+                status = TaskStatus.ERROR
             result = [
                 str(path)
                 for value in record.get("result", [])
@@ -300,14 +333,28 @@ class TaskQueue:
                 args={
                     key: value
                     for key, value in saved_settings.items()
-                    if key in {"profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds"}
+                    if key in H3_EFFECTIVE_SETTING_KEYS
                 },
                 status=status,
                 submit_ts=float(record.get("submit_ts", 0.0)),
                 start_ts=float(record.get("start_ts", 0.0)),
                 done_ts=float(record.get("done_ts", 0.0)),
                 result=result,
-                error=str(record.get("error", "")),
+                error=(
+                    "后端重启时任务尚无 ComfyUI prompt_id，无法安全重放。"
+                    if status == TaskStatus.ERROR and record.get("status") in {
+                        TaskStatus.PENDING.value, TaskStatus.RUNNING.value,
+                    } and not prompt_id
+                    else str(record.get("error", ""))
+                ),
+                prompt_id=prompt_id,
+                stage="recovering" if recovered else str(record.get("stage", "completed")),
+                node_id=record.get("node_id"),
+                current_step=record.get("current_step"),
+                total_steps=record.get("total_steps"),
+                progress=record.get("progress"),
+                last_progress_ts=float(record.get("last_progress_ts", 0.0)),
+                recovered=recovered,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -360,12 +407,19 @@ class TaskQueue:
             if restored:
                 self._save_history(restored)
         restored.sort(key=lambda task: task.done_ts or task.submit_ts, reverse=True)
-        return restored[:self._max_done]
+        active = [task for task in restored if task.status == TaskStatus.PENDING]
+        terminal = [task for task in restored if task.status != TaskStatus.PENDING]
+        # Never evict a recoverable ComfyUI prompt merely because the completed
+        # history already reached its display limit.
+        return active + terminal[:self._max_done]
 
     def _save_history(self, tasks: "list[Task] | None" = None) -> None:
         """原子保存已结束任务；写入失败不会影响正在运行的生成任务。"""
-        records = [self._record_from_task(task) for task in (tasks if tasks is not None else self._done)]
-        payload = {"version": 1, "tasks": records}
+        if tasks is None:
+            active = list(getattr(self, "_pending", [])) + list(getattr(self, "_running", {}).values())
+            tasks = active + self._done
+        records = [self._record_from_task(task) for task in tasks]
+        payload = {"version": 2, "tasks": records}
         try:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             temp_path = TASK_HISTORY_PATH.with_name(f".{TASK_HISTORY_PATH.name}.{os.getpid()}.tmp")
@@ -378,8 +432,10 @@ class TaskQueue:
         """把任务追加到队尾并返回提交时的排队位置。"""
         with self._lock:
             task.status = TaskStatus.PENDING
+            task.stage = "queued"
             self._pending.append(task)
             position = len(self._pending)
+            self._save_history()
         self._wake.set()
         return position
 
@@ -462,9 +518,19 @@ class TaskQueue:
                 "finished_at": task.done_ts or None,
                 "output_files": outputs,
                 "error": task.error or None,
+                "prompt_id": task.prompt_id or None,
+                "execution": {
+                    "stage": task.stage,
+                    "node_id": task.node_id,
+                    "current_step": task.current_step,
+                    "total_steps": task.total_steps,
+                    "progress": task.progress,
+                    "last_progress_at": task.last_progress_ts or None,
+                    "recovered_after_restart": task.recovered,
+                },
                 "effective_settings": {
                     key: task.args[key]
-                    for key in ("profile", "requested_size", "requested_seconds", "width", "height", "frames", "effective_seconds")
+                    for key in H3_EFFECTIVE_SETTING_KEYS
                     if key in task.args
                 },
             }
@@ -473,6 +539,25 @@ class TaskQueue:
         """取一份当前状态快照,供界面渲染。"""
         with self._lock:
             return list(self._pending), list(self._running.values()), list(self._done)
+
+    def update_execution(self, task: Task, event: dict) -> None:
+        """Apply and durably store a ComfyUI lifecycle/progress event."""
+        now = time.time()
+        with self._lock:
+            if event.get("prompt_id"):
+                task.prompt_id = str(event["prompt_id"])
+            if event.get("stage"):
+                task.stage = str(event["stage"])
+            if "node_id" in event:
+                task.node_id = event.get("node_id")
+            if "current_step" in event:
+                task.current_step = event.get("current_step")
+            if "total_steps" in event:
+                task.total_steps = event.get("total_steps")
+            if "progress" in event and event.get("progress") is not None:
+                task.progress = float(event["progress"])
+            task.last_progress_ts = now
+            self._save_history()
 
     @property
     def stop_event(self) -> threading.Event:
@@ -538,8 +623,10 @@ class TaskQueue:
                 if self._pending:
                     task = self._pending.popleft()
                     task.status = TaskStatus.RUNNING
+                    task.stage = "recovering" if task.recovered else "building_workflow"
                     task.start_ts = time.time()
                     self._running[task.id] = task
+                    self._save_history()
             if task is None:
                 # 队列空,等待新任务唤醒(最多等 0.5 秒再检查一次)。
                 self._wake.wait(timeout=0.5)
@@ -548,15 +635,20 @@ class TaskQueue:
             try:
                 self._processor(task)
                 task.status = TaskStatus.DONE
+                task.stage = "completed"
+                task.progress = 1.0
             except TimeoutError as e:
                 task.status, task.error = TaskStatus.TIMEOUT, str(e)
+                task.stage = "timed_out"
                 print(f"[Queue] 任务「{task.name}」已超时，已请求中断 ComfyUI")
             except Exception as e:
                 if task.cancel_event.is_set():
                     task.status, task.error = TaskStatus.CANCELLED, "用户请求中断"
+                    task.stage = "interrupted"
                     print(f"[Queue] 任务「{task.name}」已中断")
                 else:
                     task.status, task.error = TaskStatus.ERROR, str(e)
+                    task.stage = "failed"
                     print(f"[Queue] 任务「{task.name}」失败: {e}")
             finally:
                 task.done_ts = time.time()
@@ -833,13 +925,53 @@ H3_PROFILES = {
 }
 H3_MAX_LONG_EDGE = 1344
 H3_FPS = 24
+H3_ACCELERATION_MODES = {
+    "standard": {
+        "label": "官方质量（20 步）",
+        "steps": 20,
+        "shift_video": 12.0,
+        "shift_audio": 3.0,
+        "sampler": "res_multistep",
+        "lora_name": None,
+        "engine": "MiniMax H3 Base",
+    },
+    "turbo_balanced": {
+        "label": "LightX2V Turbo v1.0 平衡（8 步）",
+        "steps": 8,
+        "shift_video": 12.0,
+        "shift_audio": 3.0,
+        "sampler": "euler",
+        "lora_name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "engine": "MiniMax H3 + LightX2V Turbo v1.0 8-step",
+    },
+    "turbo_fast": {
+        "label": "LightX2V Turbo v1.0 极速（4 步，768P 横版）",
+        "steps": 4,
+        "shift_video": 6.0,
+        "shift_audio": 3.0,
+        "sampler": "euler",
+        "lora_name": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        "engine": "MiniMax H3 + LightX2V Turbo v1.0 4-step 768P",
+    },
+}
+H3_EFFECTIVE_SETTING_KEYS = (
+    "profile", "acceleration", "engine", "base_model", "steps",
+    "shift_video", "shift_audio", "sampler", "lora_name",
+    "requested_size", "requested_seconds", "width", "height", "frames",
+    "effective_seconds",
+)
 
 
-def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
+def normalise_h3_request(
+    size: str, seconds, profile: str = "preview", acceleration: str = "standard"
+) -> dict:
     """Validate a H3 request and return the actual canvas/frame-grid values."""
     profile = str(profile or "preview")
     if profile not in H3_PROFILES:
         raise gr.Error("H3 档位仅支持 draft、preview 或 quality")
+    acceleration = str(acceleration or "standard")
+    if acceleration not in H3_ACCELERATION_MODES:
+        raise gr.Error("H3 加速模式仅支持 standard、turbo_balanced 或 turbo_fast")
     try:
         numeric_seconds = float(seconds)
         if not numeric_seconds.is_integer():
@@ -854,6 +986,12 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
         )
 
     requested_width, requested_height = _parse_size(size)
+    if acceleration == "turbo_fast" and (
+        profile != "quality"
+        or requested_width <= requested_height
+        or abs(requested_width / requested_height - 16 / 9) > 0.02
+    ):
+        raise gr.Error("LightX2V 4 步极速模式首版仅支持 quality 档和 16:9 横版")
     if "target_pixels" in limits:
         scale = (limits["target_pixels"] / (requested_width * requested_height)) ** 0.5
         scale = min(scale, H3_MAX_LONG_EDGE / max(requested_width, requested_height))
@@ -865,12 +1003,25 @@ def normalise_h3_request(size: str, seconds, profile: str = "preview") -> dict:
         )
     width = max(32, int(round(requested_width * scale / 32)) * 32)
     height = max(32, int(round(requested_height * scale / 32)) * 32)
+    # The 4-step v1.0 LoRA is trained specifically at 1344x768. Accept common
+    # 16:9 selectors (for example 1920x1080) but execute on its native canvas.
+    if acceleration == "turbo_fast":
+        width, height = 1344, 768
     # H3 accepts the native 17k+5 frame grid.  The official 0.4MP draft
     # template is 73 frames, so do not artificially force all profiles to 124.
     frames = round(requested_seconds * H3_FPS)
     frames += (5 - frames % 17) % 17
+    acceleration_config = H3_ACCELERATION_MODES[acceleration]
     return {
         "profile": profile,
+        "acceleration": acceleration,
+        "engine": acceleration_config["engine"],
+        "base_model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "steps": acceleration_config["steps"],
+        "shift_video": acceleration_config["shift_video"],
+        "shift_audio": acceleration_config["shift_audio"],
+        "sampler": acceleration_config["sampler"],
+        "lora_name": acceleration_config["lora_name"],
         "requested_size": size,
         "requested_seconds": requested_seconds,
         "width": width,
@@ -956,16 +1107,22 @@ def submit_workflow_2(prompt, input_filename):
         raise gr.Error("请输入提示词并上传要编辑的图片")
     return submit("image_flux2_klein_image_edit_4b_base", {"prompt": prompt, "input_filename": input_filename})
 
-def submit_workflow_3(prompt, size, seconds, profile="preview"):
+def submit_workflow_3(prompt, size, seconds, profile="preview", acceleration="standard"):
     if not (prompt or "").strip():
         raise gr.Error("请输入视频提示词")
     if VIDEO_ENGINE == "ltx23":
         return submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
     """Queue a local MiniMax H3 text-to-video job."""
-    args = {"prompt": prompt, **normalise_h3_request(size, seconds, profile)}
+    args = {
+        "prompt": prompt,
+        **normalise_h3_request(size, seconds, profile, acceleration),
+    }
     return submit("MiniMaxH3-文生视频", args)
 
-def submit_workflow_4(prompt, input_filename, seconds, profile="preview", size="768 × 1024"):
+def submit_workflow_4(
+    prompt, input_filename, seconds, profile="preview", size="768 × 1024",
+    acceleration="standard",
+):
     if not (prompt or "").strip() or not input_filename:
         raise gr.Error("请输入提示词并上传源图片")
     if VIDEO_ENGINE == "ltx23":
@@ -974,7 +1131,7 @@ def submit_workflow_4(prompt, input_filename, seconds, profile="preview", size="
     args = {
         "prompt": prompt,
         "input_filename": input_filename,
-        **normalise_h3_request(size, seconds, profile),
+        **normalise_h3_request(size, seconds, profile, acceleration),
     }
     return submit("MiniMaxH3-图生视频", args)
 
@@ -1060,18 +1217,22 @@ def api_submit_workflow_4(prompt: str, input_filename: str, seconds: int) -> dic
 
 # Versioned H3-oriented wrappers are used by the REST bridge.  Keep the two
 # legacy Gradio endpoints above intact for clients that already call them.
-def api_submit_workflow_3_h3(prompt: str, size: str, seconds: int, profile: str) -> dict:
-    if VIDEO_ENGINE != "h3":
-        raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
-    return submit_workflow_3(prompt, size, seconds, profile)
-
-
-def api_submit_workflow_4_h3(
-    prompt: str, input_filename: str, size: str, seconds: int, profile: str
+def api_submit_workflow_3_h3(
+    prompt: str, size: str, seconds: int, profile: str,
+    acceleration: str = "standard",
 ) -> dict:
     if VIDEO_ENGINE != "h3":
         raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
-    return submit_workflow_4(prompt, input_filename, seconds, profile, size)
+    return submit_workflow_3(prompt, size, seconds, profile, acceleration)
+
+
+def api_submit_workflow_4_h3(
+    prompt: str, input_filename: str, size: str, seconds: int, profile: str,
+    acceleration: str = "standard",
+) -> dict:
+    if VIDEO_ENGINE != "h3":
+        raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
+    return submit_workflow_4(prompt, input_filename, seconds, profile, size, acceleration)
 
 
 def api_submit_workflow_5(
@@ -1145,6 +1306,7 @@ def build_workflow_3(workflow_name: str, args: dict) -> dict:
         "prompt": args["prompt"], "width": args["width"],
         "height": args["height"], "length": args["frames"],
     })
+    _configure_h3_acceleration(wf, args)
     wf["15"]["inputs"]["noise_seed"] = random.randint(1, 1_000_000)
     wf["110"]["inputs"]["filename_prefix"] = "MiniMaxH3-文生视频"
     return wf
@@ -1164,9 +1326,44 @@ def build_workflow_4(workflow_name: str, args: dict) -> dict:
         "prompt": args["prompt"], "width": args["width"],
         "height": args["height"], "length": args["frames"],
     })
+    _configure_h3_acceleration(wf, args)
     wf["15"]["inputs"]["noise_seed"] = random.randint(1, 1_000_000)
     wf["110"]["inputs"]["filename_prefix"] = "MiniMaxH3-图生视频"
     return wf
+
+
+def _configure_h3_acceleration(wf: dict, args: dict) -> None:
+    """Patch an H3 API graph for the selected acceleration mode.
+
+    Standard deliberately preserves the checked-in 20-step Sage graph. Turbo
+    graphs add only ComfyUI's core model-only LoRA loader between UNETLoader
+    and MiniMaxH3SigmaShift; the existing Sage patch remains downstream.
+    """
+    acceleration = str(args.get("acceleration") or "standard")
+    config = H3_ACCELERATION_MODES.get(acceleration)
+    if config is None:
+        raise gr.Error("H3 加速模式仅支持 standard、turbo_balanced 或 turbo_fast")
+    if acceleration == "standard":
+        return
+
+    loader_id = "111"
+    while loader_id in wf:
+        loader_id = str(int(loader_id) + 1)
+    wf[loader_id] = {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {
+            "model": ["6", 0],
+            "lora_name": config["lora_name"],
+            "strength_model": 1.0,
+        },
+    }
+    wf["25"]["inputs"].update({
+        "model": [loader_id, 0],
+        "shift_video": config["shift_video"],
+        "shift_audio": config["shift_audio"],
+    })
+    wf["17"]["inputs"]["sampler_name"] = config["sampler"]
+    wf["9"]["inputs"]["steps"] = config["steps"]
 
 
 def build_workflow_ltx3(workflow_name: str, args: dict) -> dict:
@@ -1334,19 +1531,46 @@ WORKFLOW_BUILDERS = {
     "音乐生成": (build_workflow_8, "音乐生成"),
 }
 
+H3_STAGE_BY_NODE = {
+    "6": "loading_diffusion_model",
+    "13": "loading_text_encoder",
+    "104": "encoding_prompt",
+    "14": "sampling",
+    "10": "decoding_video",
+    "23": "decoding_audio",
+    "91": "muxing",
+    "110": "saving_artifacts",
+}
+
 
 def process_task(task: Task) -> None:
     """一次完整执行:构建工作流 -> 提交并等待 -> 解析并保存结果。供任务队列调用。"""
-    builder = WORKFLOW_BUILDERS.get(task.workflow_name)
-    if builder is None:
-        raise ValueError(f"未登记的工作流:{task.workflow_name}")
-    workflow = builder[0](task.workflow_name, task.args)
+    workflow = None
+    if not task.prompt_id:
+        builder = WORKFLOW_BUILDERS.get(task.workflow_name)
+        if builder is None:
+            raise ValueError(f"未登记的工作流:{task.workflow_name}")
+        workflow = builder[0](task.workflow_name, task.args)
     timeout = H3_TASK_TIMEOUT if task.workflow_name.startswith("MiniMaxH3-") else None
+
+    def submitted(prompt_id: str) -> None:
+        task_queue.update_execution(task, {"prompt_id": prompt_id, "stage": "submitted"})
+
+    def progress(event: dict) -> None:
+        event = dict(event)
+        if task.workflow_name.startswith("MiniMaxH3-") and event.get("node_id") in H3_STAGE_BY_NODE:
+            event["stage"] = H3_STAGE_BY_NODE[event["node_id"]]
+        task_queue.update_execution(task, event)
+
     outputs = run_workflow(
         workflow,
         timeout=timeout if timeout is not None else TASK_TIMEOUT,
         stop_event=task.cancel_event,
+        prompt_id=task.prompt_id or None,
+        on_submitted=submitted,
+        on_progress=progress,
     )
+    task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
     task.result = extract_result(outputs, task)
 
 
@@ -1918,10 +2142,20 @@ def build_ui():
                                 info="draft：0.4MP / 73 帧草稿；preview：480 短边；quality：768 短边。实际时长会按 H3 帧网格调整。",
                                 visible=H3_ENABLED,
                             )
+                            acceleration3 = gr.Dropdown(
+                                label="加速模式",
+                                choices=[
+                                    (config["label"], key)
+                                    for key, config in H3_ACCELERATION_MODES.items()
+                                ],
+                                value="standard",
+                                info="standard 保持官方 20 步；Turbo 为 LightX2V v1.0 可选加速，默认不启用。",
+                                visible=H3_ENABLED,
+                            )
                         submit_btn3 = gr.Button("提交", variant="primary")
                 submit_btn3.click(
                     fn=submit_workflow_3,
-                    inputs=[prompt3, size3, seconds3, profile3],
+                    inputs=[prompt3, size3, seconds3, profile3, acceleration3],
                     api_name="ui_submit_workflow_3",
                     api_visibility="private",
                 )
@@ -1952,6 +2186,16 @@ def build_ui():
                             info="draft：0.4MP / 73 帧草稿；preview：480 短边；quality：768 短边。H3 会将源图适配至所选画幅，并生成同步立体声音频。",
                             visible=H3_ENABLED,
                         )
+                        acceleration4 = gr.Dropdown(
+                            label="加速模式",
+                            choices=[
+                                (config["label"], key)
+                                for key, config in H3_ACCELERATION_MODES.items()
+                            ],
+                            value="standard",
+                            info="4 步极速首版仅支持 quality + 16:9 横版，并统一生成 1344 × 768；其他请求请选择平衡 8 步或官方 20 步。",
+                            visible=H3_ENABLED,
+                        )
                     with gr.Column(scale=1):
                         reference_image4 = gr.Image(type="filepath", height=400)   # 关键:拿到磁盘路径才能上传
                         uploaded_name4   = gr.State("")                # 存上传后 ComfyUI 给的文件名
@@ -1962,7 +2206,7 @@ def build_ui():
                                        api_visibility="private")   # 清空时一并清掉
                 submit_btn4.click(
                     fn=submit_workflow_4,
-                    inputs=[prompt4, uploaded_name4, seconds4, profile4, size4],
+                    inputs=[prompt4, uploaded_name4, seconds4, profile4, size4, acceleration4],
                     api_name="ui_submit_workflow_4",
                     api_visibility="private",
                 )

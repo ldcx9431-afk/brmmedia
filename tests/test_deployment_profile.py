@@ -56,7 +56,7 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("/v1/models", activation)
         self.assertIn("verify_h3_workflow_gate.sh", activation)
         self.assertIn("compatibility before activation completes", activation)
-        self.assertIn("563b98eefbe643a4cd510ee7f0b43e79880d5a3f", preparation)
+        self.assertIn('H3_COMFY_REF="${BRMMEDIA_H3_COMFYUI_REF:-563b98eefbe643a4cd510ee7f0b43e79880d5a3f}"', preparation)
         self.assertNotIn("15989f87ca89bfe2e7c47763252c559e96d97551", preparation)
 
     def test_h3_preflight_finds_the_wsl_nvidia_shim_for_systemd(self):
@@ -234,7 +234,7 @@ class DeploymentProfileTests(unittest.TestCase):
         prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
         starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
         guide = (REPO_ROOT / "WSL_TEST_DEPLOY.md").read_text(encoding="utf-8")
-        self.assertIn("ComfyUI-h3-canary", prepare)
+        self.assertIn("ComfyUI-h3-v032-canary", prepare)
         self.assertIn("BRM_GRADIO_PORT 9001", prepare)
         self.assertIn("BRMMEDIA_VIDEO_ENGINE h3", prepare)
         self.assertIn("remote set-url origin", prepare)
@@ -267,6 +267,65 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn('BRMMEDIA_H3_GATE_PYTHON="$CANARY_PYTHON"', starter)
         self.assertIn('BACKEND_VENV="${BRMMEDIA_BACKEND_VENV:-$SCRIPT_DIR/.venv}"', backend)
         self.assertIn('source "$BACKEND_VENV/bin/activate"', backend)
+
+    def test_h3_v032_canary_has_immutable_runtime_lock_and_ab_gate(self):
+        lock = (REPO_ROOT / "runtime-locks" / "h3-comfyui-v0.32.0.env").read_text(encoding="utf-8")
+        prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        starter = (REPO_ROOT / "start_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        verifier = (REPO_ROOT / "verify_h3_canary_runtime.sh").read_text(encoding="utf-8")
+        matrix = (REPO_ROOT / "configure_h3_canary_ab.sh").read_text(encoding="utf-8")
+
+        self.assertIn("BRMMEDIA_H3_COMFYUI_VERSION=0.32.0", lock)
+        self.assertIn("BRMMEDIA_H3_COMFYUI_REF=c2bcbecd82ec5ae66594340b395c24ef0217b238", lock)
+        self.assertIn("BRMMEDIA_H3_COMFY_KITCHEN_VERSION=0.2.30", lock)
+        self.assertIn("h3-comfyui-v0.32.0.env", prepare)
+        self.assertIn('BRMMEDIA_H3_COMFYUI_REF="$BRMMEDIA_H3_COMFYUI_REF"', prepare)
+        self.assertIn("verify_h3_canary_runtime.sh", starter)
+        self.assertLess(starter.index("verify_h3_canary_runtime.sh"), starter.index("systemd-run --unit=\"$BACKEND_UNIT\""))
+        self.assertIn("torch.version.cuda.startswith(\"13.\")", verifier)
+        self.assertIn("torch.cuda.get_device_capability(0) == (8, 6)", verifier)
+        self.assertIn("--use-ck-attention", matrix)
+        self.assertIn("--fast-disk", matrix)
+        self.assertIn("--cache-lru 1", matrix)
+
+    def test_h3_attention_and_offload_guards_are_fail_closed(self):
+        matrix = (REPO_ROOT / "configure_h3_canary_ab.sh").read_text(encoding="utf-8")
+        verifier = (REPO_ROOT / "verify_h3_canary_runtime.sh").read_text(encoding="utf-8")
+        start_backend = (REPO_ROOT / "ubuntu-backend-deploy" / "start_backend.sh").read_text(encoding="utf-8")
+        bridge = (REPO_ROOT / "ubuntu-backend-deploy" / "comfyui_server.py").read_text(encoding="utf-8")
+
+        for forbidden in (
+            "--highvram", "--gpu-only", "--lowvram", "--novram",
+            "--disable-smart-memory", "--cache-none", "--disable-dynamic-vram",
+            "--disable-async-offload",
+        ):
+            self.assertIn(forbidden, matrix)
+            self.assertIn(forbidden, verifier)
+            self.assertIn(forbidden, start_backend)
+            self.assertIn(forbidden, bridge)
+        self.assertIn("Kitchen Attention cannot be combined", matrix)
+        self.assertIn("Kitchen Attention cannot start", verifier)
+        self.assertIn("Kitchen and Sage must be benchmarked", start_backend)
+
+    def test_h3_turbo_delivery_is_checksum_gated_and_benchmarkable(self):
+        downloader = (REPO_ROOT / "download_minimax_h3_turbo_models.sh").read_text(encoding="utf-8")
+        importer = (REPO_ROOT / "import_minimax_h3_turbo_models.sh").read_text(encoding="utf-8")
+        prepare = (REPO_ROOT / "prepare_minimax_h3_canary.sh").read_text(encoding="utf-8")
+        verifier = (REPO_ROOT / "verify_h3_canary_runtime.sh").read_text(encoding="utf-8")
+        benchmark = (REPO_ROOT / "benchmark_h3_profiles.sh").read_text(encoding="utf-8")
+
+        self.assertIn("5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1", downloader)
+        for digest in (
+            "2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e",
+            "c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc",
+        ):
+            self.assertIn(digest, downloader)
+            self.assertIn(digest, prepare)
+            self.assertIn(digest, verifier)
+        self.assertIn("sha256sum", importer)
+        self.assertIn("BRMMEDIA_H3_BENCHMARK_ACCELERATION", benchmark)
+        self.assertIn("turbo_balanced", benchmark)
+        self.assertIn("turbo_fast", benchmark)
 
     def test_current_ubuntu_guide_does_not_recommend_highvram(self):
         guide = (REPO_ROOT / "ubuntu-backend-deploy" / "README_UBUNTU_DEPLOY.md").read_text(encoding="utf-8")

@@ -92,6 +92,113 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(status["queue_position"], 1)
         self.assertEqual(status["output_files"], [])
 
+    def test_prompt_and_progress_are_persisted_and_exposed(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("progress-1", "progress", "MiniMaxH3-unit", {})
+        queue.enqueue(task)
+        with queue._lock:
+            queue._pending.clear()
+            task.status = self.webui.TaskStatus.RUNNING
+            queue._running[task.id] = task
+
+        queue.update_execution(task, {
+            "prompt_id": "comfy-prompt-123",
+            "stage": "sampling",
+            "node_id": "15",
+            "current_step": 3,
+            "total_steps": 8,
+            "progress": 0.375,
+        })
+        status = queue.task_status(task.id)
+        self.assertEqual(status["prompt_id"], "comfy-prompt-123")
+        self.assertEqual(status["execution"]["stage"], "sampling")
+        self.assertEqual(status["execution"]["current_step"], 3)
+        self.assertEqual(status["execution"]["total_steps"], 8)
+        self.assertEqual(status["execution"]["progress"], 0.375)
+
+        saved = json.loads((self.output_dir / "task-history.json").read_text(encoding="utf-8"))
+        record = next(item for item in saved["tasks"] if item["id"] == task.id)
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(record["prompt_id"], "comfy-prompt-123")
+        self.assertEqual(record["stage"], "sampling")
+
+    def test_restart_reattaches_running_prompt_without_resubmitting(self):
+        history = {
+            "version": 2,
+            "tasks": [{
+                "id": "recover-1",
+                "name": "recover",
+                "workflow_name": "MiniMaxH3-unit",
+                "status": self.webui.TaskStatus.RUNNING.value,
+                "submit_ts": 1,
+                "start_ts": 2,
+                "done_ts": 0,
+                "result": [],
+                "error": "",
+                "prompt_id": "comfy-existing-prompt",
+                "stage": "sampling",
+                "current_step": 2,
+                "total_steps": 8,
+                "progress": 0.25,
+                "last_progress_ts": 3,
+                "effective_settings": {},
+            }],
+        }
+        (self.output_dir / "task-history.json").write_text(
+            json.dumps(history), encoding="utf-8"
+        )
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+
+        pending, running, done = queue.snapshot()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(running, [])
+        self.assertEqual(done, [])
+        self.assertEqual(pending[0].prompt_id, "comfy-existing-prompt")
+        self.assertTrue(pending[0].recovered)
+        self.assertEqual(queue.task_status("recover-1")["state"], "queued")
+
+    def test_recoverable_prompt_is_not_evicted_by_completed_history_limit(self):
+        artifact = self.output_dir / "old.png"
+        artifact.write_bytes(b"fixture")
+        tasks = [{
+            "id": "recover-priority", "name": "recover", "workflow_name": "MiniMaxH3-unit",
+            "status": self.webui.TaskStatus.RUNNING.value,
+            "submit_ts": 1, "start_ts": 2, "done_ts": 0, "result": [], "error": "",
+            "prompt_id": "live-prompt", "effective_settings": {},
+        }]
+        tasks.extend({
+            "id": f"done-{index}", "name": "done", "workflow_name": "unit",
+            "status": self.webui.TaskStatus.DONE.value,
+            "submit_ts": 10 + index, "start_ts": 10 + index, "done_ts": 10 + index,
+            "result": [str(artifact)], "error": "", "prompt_id": "",
+            "effective_settings": {},
+        } for index in range(4))
+        (self.output_dir / "task-history.json").write_text(
+            json.dumps({"version": 2, "tasks": tasks}), encoding="utf-8"
+        )
+        queue = self.webui.TaskQueue(lambda task: None, max_done=2)
+
+        pending, _, done = queue.snapshot()
+        self.assertEqual([task.id for task in pending], ["recover-priority"])
+        self.assertEqual(len(done), 2)
+
+    def test_restart_does_not_replay_running_task_without_prompt_id(self):
+        history = {
+            "version": 2,
+            "tasks": [{
+                "id": "unsafe-replay-1", "name": "unsafe", "workflow_name": "unit",
+                "status": self.webui.TaskStatus.RUNNING.value,
+                "submit_ts": 1, "start_ts": 2, "done_ts": 0,
+                "result": [], "error": "", "prompt_id": "", "effective_settings": {},
+            }],
+        }
+        (self.output_dir / "task-history.json").write_text(json.dumps(history), encoding="utf-8")
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+
+        status = queue.task_status("unsafe-replay-1")
+        self.assertEqual(status["state"], "failed")
+        self.assertIn("无法安全重放", status["error"])
+
     def test_cancelled_task_is_not_reported_as_failed(self):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
         task = self.webui.Task("cancel-1", "cancel", "unit", {})
@@ -259,6 +366,31 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(quality["requested_seconds"], 15)
         self.assertEqual(quality["frames"] % 17, 5)
 
+    def test_h3_acceleration_defaults_to_unchanged_standard_path(self):
+        request = self.webui.normalise_h3_request("1920 × 1080", 5, "preview")
+        self.assertEqual(request["acceleration"], "standard")
+        self.assertEqual(request["steps"], 20)
+        self.assertEqual(request["sampler"], "res_multistep")
+        self.assertIsNone(request["lora_name"])
+
+    def test_h3_turbo_modes_expose_lightx2v_v1_settings(self):
+        balanced = self.webui.normalise_h3_request(
+            "768 × 1024", 5, "preview", "turbo_balanced"
+        )
+        self.assertEqual(balanced["steps"], 8)
+        self.assertEqual(balanced["sampler"], "euler")
+        self.assertEqual((balanced["shift_video"], balanced["shift_audio"]), (12.0, 3.0))
+        self.assertIn("8step_v1.0_comfyui", balanced["lora_name"])
+
+        fast = self.webui.normalise_h3_request(
+            "1920 × 1080", 6, "quality", "turbo_fast"
+        )
+        self.assertEqual((fast["width"], fast["height"]), (1344, 768))
+        self.assertEqual(fast["steps"], 4)
+        self.assertEqual((fast["shift_video"], fast["shift_audio"]), (6.0, 3.0))
+        with self.assertRaises(self.webui.gr.Error):
+            self.webui.normalise_h3_request("768 × 1024", 6, "quality", "turbo_fast")
+
     def test_h3_mode_forces_single_media_queue(self):
         previous_engine = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
         try:
@@ -288,11 +420,36 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(t2v["9"]["inputs"]["model"], ["26", 0])
         self.assertEqual(t2v["16"]["inputs"]["model"], ["26", 0])
 
+        standard_nodes = [node for node in t2v.values() if node["class_type"] == "LoraLoaderModelOnly"]
+        self.assertEqual(standard_nodes, [])
+
+        turbo_args = dict(args, acceleration="turbo_balanced")
+        turbo = self.webui.build_workflow_3("MiniMaxH3-文生视频", turbo_args)
+        lora_id = next(key for key, node in turbo.items() if node["class_type"] == "LoraLoaderModelOnly")
+        self.assertEqual(turbo[lora_id]["inputs"]["model"], ["6", 0])
+        self.assertEqual(turbo["25"]["inputs"]["model"], [lora_id, 0])
+        self.assertEqual(turbo["25"]["inputs"]["shift_video"], 12.0)
+        self.assertEqual(turbo["17"]["inputs"]["sampler_name"], "euler")
+        self.assertEqual(turbo["9"]["inputs"]["steps"], 8)
+        self.assertEqual(turbo["26"]["inputs"]["model"], ["25", 0])
+
         i2v = self.webui.build_workflow_4("MiniMaxH3-图生视频", args)
         self.assertEqual(i2v["1"]["inputs"]["image"], "source.png")
         self.assertEqual(i2v["104"]["inputs"]["first_frame"], ["1", 0])
         self.assertEqual(i2v["25"]["class_type"], "MiniMaxH3SigmaShift")
         self.assertEqual(i2v["26"]["class_type"], "PathchSageAttentionKJ")
+
+        fast_i2v = self.webui.build_workflow_4(
+            "MiniMaxH3-图生视频", dict(args, acceleration="turbo_fast")
+        )
+        fast_lora_id = next(
+            key for key, node in fast_i2v.items()
+            if node["class_type"] == "LoraLoaderModelOnly"
+        )
+        self.assertIn("4step_v1.0_768p_comfyui", fast_i2v[fast_lora_id]["inputs"]["lora_name"])
+        self.assertEqual(fast_i2v["25"]["inputs"]["shift_video"], 6.0)
+        self.assertEqual(fast_i2v["17"]["inputs"]["sampler_name"], "euler")
+        self.assertEqual(fast_i2v["9"]["inputs"]["steps"], 4)
 
     def test_acestep_model_choices_follow_installed_weights(self):
         model_root = self.output_dir / "fake-comfy"

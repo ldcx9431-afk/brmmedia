@@ -60,6 +60,8 @@ sudo "$release/refresh_h3_runtime_release.sh" "$release" "$runtime"
 # drained/stopped, but Nginx is never repointed to the canary.
 sudo systemctl stop baorong-backend
 sudo "$runtime/prepare_minimax_h3_canary.sh"
+# ComfyUI v0.32/CUDA13/Attention/fast-disk 的完整隔离 A/B 流程见
+# H3_V032_RUNTIME_AB.md。默认候选为 workflow-Sage、fast-disk=off、默认缓存。
 sudo "$runtime/start_minimax_h3_canary.sh"
 sudo BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
   BRMMEDIA_BACKEND_UNIT=baorong-backend-h3-canary \
@@ -108,8 +110,8 @@ H3 未验收时保持 `BRMMEDIA_VIDEO_ENGINE=ltx23`（默认）；需回退 Comf
 
 确认没有媒体任务运行、H3 权重导入完成后，先停止 `baorong-backend`，以候选目录运行
 `prepare_minimax_h3_canary.sh` 与 `start_minimax_h3_canary.sh`。Canary 使用独立的
-ComfyUI 工作副本、物理隔离的 Python venv（默认
-`<candidate-root>/runtime-locks/venvs/h3-canary`）、Gradio `127.0.0.1:9001` 和 REST
+ComfyUI v0.32 工作副本、物理隔离的 Python venv（默认
+`<candidate-root>/runtime-locks/venvs/h3-v032-canary`）、Gradio `127.0.0.1:9001` 和 REST
 `127.0.0.1:9101`，不会被 Nginx 公开；其输出也与生产历史素材隔离。该 venv 从现网
 环境做独立副本，H3 所需的 ComfyUI 依赖只会写入副本，绝不会修改生产 `.venv`。先在
 Canary 上完成文生视频、图生视频各三次
@@ -163,6 +165,30 @@ sudo ./accept_media_regression.sh
 IndexTTS2 冒烟会自动使用本次 ACE-Step 冒烟产生的最新音频，不能依赖历史输出中某个固定序号的文件名。
 
 H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
+
+H3 加速采用显式灰度参数，不替换默认质量路径：`acceleration=standard` 保持 20 步，
+`turbo_balanced` 使用经固定校验的 LightX2V v1.0 8 步 LoRA；`turbo_fast` 使用 4 步
+768P LoRA，但只允许 quality + 横向 16:9，并规范化到 1344×768。部署前先执行
+`download_minimax_h3_turbo_models.sh` 和 `import_minimax_h3_turbo_models.sh`；Canary 会再次
+核对两个权重的 SHA-256。固定 seed、提示词和输入图分别运行：
+
+```bash
+BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
+  BRMMEDIA_H3_BENCHMARK_PROFILE=preview \
+  BRMMEDIA_H3_BENCHMARK_ACCELERATION=standard \
+  ./benchmark_h3_profiles.sh
+BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
+  BRMMEDIA_H3_BENCHMARK_PROFILE=preview \
+  BRMMEDIA_H3_BENCHMARK_ACCELERATION=turbo_balanced \
+  ./benchmark_h3_profiles.sh
+BRMMEDIA_LAN_API_BASE=http://127.0.0.1:9101/api/v1 \
+  BRMMEDIA_H3_BENCHMARK_PROFILE=quality \
+  BRMMEDIA_H3_BENCHMARK_ACCELERATION=turbo_fast \
+  ./benchmark_h3_profiles.sh
+```
+
+在成品音视频、提示词遵循、运动连续性和重启恢复都通过前，生产默认必须保持
+`standard`；LightX2V/ModelTC 发布不等同于 MiniMax 官方加速器。
 
 ## 内网访问
 

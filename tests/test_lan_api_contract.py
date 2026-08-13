@@ -152,12 +152,12 @@ class LanApiContractTests(unittest.TestCase):
         draft_args = self.api._normal_text_to_video(
             {"prompt": "fast composition", "profile": "draft"}, {}
         )
-        self.assertEqual(draft_args, ["fast composition", "768 × 1024", 3, "draft"])
+        self.assertEqual(draft_args, ["fast composition", "768 × 1024", 3, "draft", "standard"])
 
         text_args = self.api._normal_text_to_video(
             {"prompt": "morning city", "profile": "quality"}, {}
         )
-        self.assertEqual(text_args, ["morning city", "768 × 1024", 6, "quality"])
+        self.assertEqual(text_args, ["morning city", "768 × 1024", 6, "quality", "standard"])
 
         asset = self.api.AssetRecord(
             asset_id="a" * 32, kind="image", filename="source.png",
@@ -167,12 +167,23 @@ class LanApiContractTests(unittest.TestCase):
             {"prompt": "animate", "image_asset_id": asset.asset_id, "profile": "quality"},
             {asset.asset_id: asset},
         )
-        self.assertEqual(image_args, ["animate", "source.png", "768 × 1024", 6, "quality"])
+        self.assertEqual(image_args, ["animate", "source.png", "768 × 1024", 6, "quality", "standard"])
 
         explicit_preview = self.api._normal_text_to_video(
             {"prompt": "morning city", "profile": "preview", "seconds": 4}, {}
         )
-        self.assertEqual(explicit_preview[-2:], [4, "preview"])
+        self.assertEqual(explicit_preview[-3:], [4, "preview", "standard"])
+
+        fast_args = self.api._normal_text_to_video({
+            "prompt": "fast", "profile": "quality", "size": "1920 × 1080",
+            "acceleration": "turbo_fast",
+        }, {})
+        self.assertEqual(fast_args[-1], "turbo_fast")
+        with self.assertRaises(self.api.HTTPException):
+            self.api._normal_text_to_video({
+                "prompt": "bad fast", "profile": "quality", "size": "768 × 1024",
+                "acceleration": "turbo_fast",
+            }, {})
 
     def test_h3_capabilities_publish_structured_form_schema(self) -> None:
         previous = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
@@ -186,6 +197,11 @@ class LanApiContractTests(unittest.TestCase):
 
         self.assertTrue(text_schema["prompt"]["required"])
         self.assertEqual(text_schema["profile"]["enum"], ["draft", "preview", "quality"])
+        self.assertEqual(
+            text_schema["acceleration"]["enum"],
+            ["standard", "turbo_balanced", "turbo_fast"],
+        )
+        self.assertEqual(text_schema["acceleration"]["default"], "standard")
         self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")

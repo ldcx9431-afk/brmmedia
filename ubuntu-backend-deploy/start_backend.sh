@@ -41,8 +41,15 @@ export CUDA_VISIBLE_DEVICES="${COMFYUI_CUDA_VISIBLE_DEVICES:-0}"
 mkdir -p "$HF_HOME" "$TORCH_HOME"
 
 case " ${COMFYUI_ARGS:-} " in
-  *" --highvram "*|*" --gpu-only "*|*" --disable-smart-memory "*|*" --cache-none "*)
-    echo "[ERROR] --highvram/--gpu-only/--disable-smart-memory/--cache-none are incompatible with the MiniMax H3 dynamic-offload profile."
+  *" --highvram "*|*" --gpu-only "*|*" --lowvram "*|*" --novram "*|*" --disable-smart-memory "*|*" --cache-none "*|*" --disable-dynamic-vram "*|*" --disable-async-offload "*)
+    echo "[ERROR] --highvram/--gpu-only/--lowvram/--novram/--disable-smart-memory/--cache-none/--disable-dynamic-vram/--disable-async-offload are incompatible with the MiniMax H3 dynamic asynchronous-offload profile."
+    exit 1
+    ;;
+esac
+
+case " ${COMFYUI_ARGS:-} " in
+  *" --use-ck-attention "*" --use-sage-attention "*|*" --use-sage-attention "*" --use-ck-attention "*)
+    echo "[ERROR] Select exactly one global attention backend; Kitchen and Sage must be benchmarked in separate candidate cells."
     exit 1
     ;;
 esac

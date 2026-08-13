@@ -51,6 +51,27 @@ SIZE_VALUES = [
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
 MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
 H3_PROFILE_VALUES = ["draft", "preview", "quality"]
+H3_ACCELERATION_VALUES = ["standard", "turbo_balanced", "turbo_fast"]
+H3_ACCELERATION_DETAILS = {
+    "standard": {
+        "engine": "MiniMax H3 Base", "steps": 20,
+        "sampler": "res_multistep", "shift_video": 12, "shift_audio": 3,
+        "purpose": "Official quality path and safe fallback; no Turbo LoRA.",
+    },
+    "turbo_balanced": {
+        "engine": "MiniMax H3 + LightX2V Turbo v1.0 8-step", "steps": 8,
+        "sampler": "euler", "shift_video": 12, "shift_audio": 3,
+        "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+        "purpose": "Balanced acceleration for mixed aspect ratios.",
+    },
+    "turbo_fast": {
+        "engine": "MiniMax H3 + LightX2V Turbo v1.0 4-step 768P", "steps": 4,
+        "sampler": "euler", "shift_video": 6, "shift_audio": 3,
+        "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        "purpose": "Fast 768P landscape path; initially restricted to quality + 16:9 landscape and normalized to 1344 × 768.",
+        "constraints": {"profile": "quality", "aspect_ratio": "16:9 landscape", "effective_size": "1344 × 768"},
+    },
+}
 H3_PROFILE_DETAILS = {
     "draft": {"target_megapixels": 0.4, "frames": 73, "default_seconds": 3, "minimum_seconds": 3, "maximum_seconds": 3,
               "purpose": "Fast official H3 prompt/composition/motion draft."},
@@ -71,6 +92,11 @@ H3_COMMON_PARAMS = {
         "type": "string", "required": False, "default": "preview",
         "enum": H3_PROFILE_VALUES,
         "description": "draft uses the official ~0.4MP / 73-frame template; preview uses a 480px short edge; quality uses a 768px short edge.",
+    },
+    "acceleration": {
+        "type": "string", "required": False, "default": "standard",
+        "enum": H3_ACCELERATION_VALUES,
+        "description": "standard is the unchanged official 20-step path; turbo_balanced is LightX2V v1.0 8-step; turbo_fast is the restricted 4-step 768P path.",
     },
     "seconds": {
         "type": "integer", "required": False, "minimum": 3, "maximum": 15,
@@ -108,7 +134,7 @@ class TaskSubmission(BaseModel):
 
 app = FastAPI(
     title="BRMMedia LAN API",
-    version="1.1.0",
+    version="1.2.0",
     description="Authenticated LAN automation API for BRMMedia generation workflows.",
     openapi_url=f"{API_PREFIX}/openapi.json",
     docs_url=f"{API_PREFIX}/docs",
@@ -229,27 +255,48 @@ def _normal_image_edit(params: dict[str, Any], assets: dict[str, AssetRecord]) -
 
 def _normal_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     profile = _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview")
+    acceleration = _choice(
+        params.get("acceleration"), "acceleration", H3_ACCELERATION_VALUES, "standard"
+    )
+    size = _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024")
+    _validate_h3_acceleration(profile, size, acceleration)
     return [
         _trim_text(params.get("prompt"), "prompt"),
-        _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
+        size,
         _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
                 minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
                 maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
-        profile,
+        profile, acceleration,
     ]
 
 
 def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     image = _asset(params, assets, "image_asset_id", "image")
     profile = _choice(params.get("profile"), "profile", H3_PROFILE_VALUES, "preview")
+    acceleration = _choice(
+        params.get("acceleration"), "acceleration", H3_ACCELERATION_VALUES, "standard"
+    )
+    size = _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024")
+    _validate_h3_acceleration(profile, size, acceleration)
     return [
         _trim_text(params.get("prompt"), "prompt"), image.filename,
-        _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024"),
+        size,
         _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
                 minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
                 maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
-        profile,
+        profile, acceleration,
     ]
+
+
+def _validate_h3_acceleration(profile: str, size: str, acceleration: str) -> None:
+    match = re.search(r"(\d+)\s*[×xX*]\s*(\d+)", size)
+    is_landscape_16_9 = bool(
+        match
+        and int(match.group(1)) > int(match.group(2))
+        and abs(int(match.group(1)) / int(match.group(2)) - 16 / 9) <= 0.02
+    )
+    if acceleration == "turbo_fast" and (profile != "quality" or not is_landscape_16_9):
+        _fail(422, "turbo_fast initially requires profile=quality and a 16:9 landscape size")
 
 
 def _normal_ltx_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
@@ -316,6 +363,7 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
         "submit_workflow_3_h3", "MiniMax H3 本地文生视频（含同步立体声音频）", {},
         _normal_text_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
+         "default_acceleration": "standard", "accelerations": H3_ACCELERATION_DETAILS,
          "seconds": {"minimum": 3, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17k+5 frame grid"},
          "size_rule": "size selects aspect ratio; draft is ~0.4MP/73 frames, preview uses a 480px short edge and quality uses 768px short edge (max long edge 1344)",
          "params": H3_COMMON_PARAMS},
@@ -324,6 +372,7 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
         "submit_workflow_4_h3", "MiniMax H3 本地图生视频（含同步立体声音频）", {"image_asset_id": "image"},
         _normal_image_to_video,
         {"engine": "MiniMax H3 Base", "default_profile": "preview", "profiles": H3_PROFILE_DETAILS,
+         "default_acceleration": "standard", "accelerations": H3_ACCELERATION_DETAILS,
          "seconds": {"minimum": 3, "maximum": 15, "frame_grid": "24fps; effective duration is adjusted to H3's 17k+5 frame grid"},
          "size_rule": "size selects output aspect ratio; the source image is fitted to the H3 canvas",
          "params": {

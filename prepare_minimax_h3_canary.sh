@@ -8,14 +8,15 @@ APP_ROOT="${BRMMEDIA_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
 BACKEND_ENV="$BACKEND_DIR/.env"
 SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
-CANARY_COMFY_ROOT="${BRMMEDIA_H3_CANARY_COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-canary}"
-CANARY_ENV="$APP_ROOT/runtime-locks/h3-canary.env"
+CANARY_COMFY_ROOT="${BRMMEDIA_H3_CANARY_COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-v032-canary}"
+CANARY_ENV="${BRMMEDIA_H3_CANARY_ENV:-$APP_ROOT/runtime-locks/h3-v032-canary.env}"
+RUNTIME_LOCK="${BRMMEDIA_H3_RUNTIME_LOCK:-$APP_ROOT/runtime-locks/h3-comfyui-v0.32.0.env}"
 CANARY_OUTPUT_DIR="$BACKEND_DIR/outputs-h3-canary"
 CANARY_WORKFLOW_DIR="$APP_ROOT/runtime-locks/h3-canary-workflows"
 # The staged H3 runtime normally links .venv to the active release to retain
 # normal-service dependencies.  A canary must not mutate that shared venv when
 # ComfyUI installs the H3 requirements, so it always receives a physical copy.
-CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-canary}"
+CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-v032-canary}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "[ERROR] Run with sudo: sudo $0" >&2
@@ -25,6 +26,12 @@ if [ ! -f "$BACKEND_ENV" ] || [ ! -x "$BACKEND_DIR/start_backend.sh" ]; then
   echo "[ERROR] Candidate runtime is incomplete: $APP_ROOT" >&2
   exit 1
 fi
+if [ ! -f "$RUNTIME_LOCK" ]; then
+  echo "[ERROR] Reviewed ComfyUI v0.32 runtime lock is missing: $RUNTIME_LOCK" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$RUNTIME_LOCK"
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   echo "[ERROR] Linux service user does not exist: $SERVICE_USER" >&2
   exit 1
@@ -178,6 +185,13 @@ set_dotenv_value BRMMEDIA_VIDEO_ENGINE h3
 set_dotenv_value BRM_OUTPUT_DIR "$CANARY_OUTPUT_DIR"
 set_dotenv_value BRMMEDIA_WORKFLOW_DIR "$CANARY_WORKFLOW_DIR"
 set_dotenv_value BRMMEDIA_H3_CANARY_ROOT "$CANARY_COMFY_ROOT"
+set_dotenv_value BRMMEDIA_H3_COMFYUI_VERSION "$BRMMEDIA_H3_COMFYUI_VERSION"
+set_dotenv_value BRMMEDIA_H3_COMFYUI_REF "$BRMMEDIA_H3_COMFYUI_REF"
+set_dotenv_value BRMMEDIA_H3_AB_ATTENTION workflow-sage
+set_dotenv_value BRMMEDIA_H3_AB_FAST_DISK off
+set_dotenv_value BRMMEDIA_H3_AB_CACHE default
+set_dotenv_value BRMMEDIA_H3_AB_CELL workflow-sage-fastdisk_off-cache_default
+set_dotenv_value COMFYUI_ARGS ""
 
 echo "[1/2] Verifying imported H3 components through the shared E: model store..."
 # `wait_import_minimax_h3_models.sh` has already content-verified the complete
@@ -201,11 +215,48 @@ for relative in "${!h3_sizes[@]}"; do
 done
 echo '[OK] Four H3 components are present in the shared E: model store.'
 
+echo '[gate] Verifying optional LightX2V Turbo LoRAs before exposing Turbo choices...'
+declare -A turbo_sha256=(
+  ["minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"]="2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
+  ["minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"]="c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc"
+)
+for name in "${!turbo_sha256[@]}"; do
+  model="$CANARY_COMFY_ROOT/models/loras/$name"
+  if [ ! -f "$model" ]; then
+    echo "[ERROR] Reviewed LightX2V Turbo model is missing: $model" >&2
+    echo "        Run import_minimax_h3_turbo_models.sh after its pinned download verifies both files." >&2
+    exit 1
+  fi
+  actual_hash="$(sha256sum "$model" | awk '{print $1}')"
+  if [ "$actual_hash" != "${turbo_sha256[$name]}" ]; then
+    echo "[ERROR] LightX2V Turbo model checksum mismatch: $name" >&2
+    exit 1
+  fi
+done
+echo '[OK] Two pinned LightX2V Turbo LoRAs are present and content verified.'
+
 echo "[2/2] Preparing the pinned native-H3 ComfyUI canary checkout..."
 runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$CANARY_COMFY_ROOT" \
   COMFYUI_PYTHON="$CANARY_PYTHON" BRMMEDIA_BACKEND_VENV="$CANARY_VENV" \
-  BRMMEDIA_APP_ROOT="$APP_ROOT" \
+  BRMMEDIA_APP_ROOT="$APP_ROOT" BRMMEDIA_H3_COMFYUI_REF="$BRMMEDIA_H3_COMFYUI_REF" \
   "$APP_ROOT/prepare_minimax_h3_comfyui.sh"
+
+actual_ref="$(git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" rev-parse HEAD)"
+if [ "$actual_ref" != "$BRMMEDIA_H3_COMFYUI_REF" ]; then
+  echo "[ERROR] ComfyUI v0.32 canary commit drift: $actual_ref (expected $BRMMEDIA_H3_COMFYUI_REF)" >&2
+  exit 1
+fi
+actual_version="$(runuser -u "$SERVICE_USER" -- "$CANARY_PYTHON" - "$CANARY_COMFY_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from comfyui_version import __version__
+print(__version__)
+PY
+)"
+if [ "$actual_version" != "$BRMMEDIA_H3_COMFYUI_VERSION" ]; then
+  echo "[ERROR] ComfyUI candidate version drift: $actual_version (expected $BRMMEDIA_H3_COMFYUI_VERSION)" >&2
+  exit 1
+fi
 
 echo "[OK] H3 canary prepared. Start it with: sudo $APP_ROOT/start_minimax_h3_canary.sh"
 echo "     env=$CANARY_ENV comfy=$CANARY_COMFY_ROOT gradio=127.0.0.1:9001 api=127.0.0.1:9101"

@@ -2,7 +2,7 @@
 
 > **Windows 11 + WSL2 MiniMax H3 目标 Profile：** ComfyUI/Gradio 的所有媒体流程使用
 > GPU0（RTX A5000），Qwen3.5-4B AWQ vLLM 使用 GPU1（RTX A4000）；两项服务需同时在线。
-> ComfyUI 使用动态卸载，不允许 `--highvram` 或 `--gpu-only`。实际切换与验收以仓库根目录的
+> ComfyUI 使用动态卸载，禁止 `--highvram`、`--gpu-only`。实际切换与验收以仓库根目录的
 > `WSL_TEST_DEPLOY.md` 和 `runtime-locks/minimax-h3-target-profile-2026-08-05.md` 为准。
 
 > **重要：本页后续大量内容是 2026-06 的通用/旧 GPU 参考，不可直接用于当前服务器。**
@@ -109,7 +109,7 @@ chmod +x check_ubuntu_ready.sh tune_nvidia_performance.sh
 | `COMFYUI_PYTHON` | 用来启动 ComfyUI 的 Python，建议使用本包 `.venv/bin/python` |
 | `COMFYUI_HOST` | ComfyUI 监听地址，默认 `127.0.0.1` |
 | `COMFYUI_PORT` | ComfyUI 端口，默认 `8188` |
-| `COMFYUI_ARGS` | 额外 ComfyUI 参数；H3 基线保持为空，禁止 `--highvram`、`--gpu-only`、`--disable-smart-memory`、`--cache-none`；`--fast-disk` 只能在 A/B 验证通过后启用 |
+| `COMFYUI_ARGS` | 额外 ComfyUI 参数；H3 基线保持为空，禁止 `--highvram`、`--gpu-only` 以及其他强制 VRAM/关闭动态异步卸载/关闭智能缓存的参数；`--fast-disk`、`--cache-lru 1`、`--use-ck-attention` 只能按 `H3_V032_RUNTIME_AB.md` 在隔离候选做 A/B |
 | `COMFYUI_STARTUP_TIMEOUT` | ComfyUI 启动等待秒数 |
 | `COMFYUI_TASK_TIMEOUT` | 单个任务最大等待秒数 |
 | `BRM_H3_TASK_TIMEOUT` | 仅 H3 的最大等待秒数，默认 14400（4 小时）；超时后后端会请求中断 ComfyUI，任务记录为“已超时” |
@@ -118,6 +118,7 @@ chmod +x check_ubuntu_ready.sh tune_nvidia_performance.sh
 
 当前 A5000 媒体优先 Profile 固定使用 `balanced` 与动态卸载。即使服务器专用于
 推理，也不要通过 `COMFYUI_ARGS` 启用 `--highvram`、`--gpu-only`、
+`--lowvram`、`--novram`、`--disable-dynamic-vram`、`--disable-async-offload`、
 `--disable-smart-memory` 或 `--cache-none`：MiniMax H3
 需要在同一张 A5000 上按需装卸 Qwen3-VL 编码器，强制常驻会破坏任务稳定性。
 如需调优并发，只能通过工作台的“全局设置”或运行时配置调整队列数量；H3 保持单并发。

@@ -7,12 +7,21 @@ set -euo pipefail
 API_BASE="${BRMMEDIA_LAN_API_BASE:-http://127.0.0.1:9100/api/v1}"
 REPORT_DIR="${BRMMEDIA_H3_BENCHMARK_DIR:-./ubuntu-backend-deploy/outputs/benchmarks}"
 PROFILE="${BRMMEDIA_H3_BENCHMARK_PROFILE:-draft}"
+ACCELERATION="${BRMMEDIA_H3_BENCHMARK_ACCELERATION:-standard}"
 RUNS="${BRMMEDIA_H3_BENCHMARK_RUNS:-3}"
 POLL_SECONDS="${BRMMEDIA_H3_POLL_SECONDS:-10}"
 TIMEOUT_SECONDS="${BRMMEDIA_H3_TASK_TIMEOUT_SECONDS:-14400}"
 COMFY_LOG="${BRMMEDIA_COMFY_LOG_FILE:-./ubuntu-backend-deploy/comfyui_runtime.log}"
 
 case "$PROFILE" in draft|preview|quality) ;; *) echo "[ERROR] profile must be draft, preview or quality" >&2; exit 2;; esac
+case "$ACCELERATION" in
+  standard|turbo_balanced|turbo_fast) ;;
+  *) echo "[ERROR] acceleration must be standard, turbo_balanced or turbo_fast" >&2; exit 2;;
+esac
+if [ "$ACCELERATION" = turbo_fast ] && [ "$PROFILE" != quality ]; then
+  echo "[ERROR] turbo_fast is trained for the quality 1344x768 cell" >&2
+  exit 2
+fi
 case "$RUNS" in ''|*[!0-9]*) echo "[ERROR] runs must be a positive integer" >&2; exit 2;; esac
 [ "$RUNS" -ge 1 ] || { echo "[ERROR] runs must be >= 1" >&2; exit 2; }
 seconds=3; [ "$PROFILE" = draft ] || seconds=4
@@ -75,9 +84,9 @@ fi
 image_asset_id="$(curl --fail --silent --show-error -F "file=@${benchmark_image};type=image/png" "$API_BASE/files?kind=image" | json_value asset_id)"
 for kind in text-to-video image-to-video; do
   for n in $(seq 1 "$RUNS"); do
-    payload="{\"workflow\":\"$kind\",\"params\":{\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\"}}"
+    payload="{\"workflow\":\"$kind\",\"params\":{\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\",\"acceleration\":\"$ACCELERATION\"}}"
     if [ "$kind" = "image-to-video" ]; then
-      payload="{\"workflow\":\"$kind\",\"params\":{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\"}}"
+      payload="{\"workflow\":\"$kind\",\"params\":{\"image_asset_id\":\"$image_asset_id\",\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\",\"acceleration\":\"$ACCELERATION\"}}"
     fi
     start="$(date +%s)"; gpu_before="$(snapshot_gpu)"; id="$(submit "$kind" "$payload")"
     response="$(wait_task "$id")"; end="$(date +%s)"; gpu_after="$(snapshot_gpu)"
@@ -90,11 +99,11 @@ with open(path, "a", encoding="utf-8") as f:
 PY
   done
 done
-report="$REPORT_DIR/h3-${PROFILE}-$(date -u +%Y%m%dT%H%M%SZ).json"
-python3 - "$results" "$report" "$PROFILE" "$seconds" "$COMFY_LOG" "$before_log_lines" <<'PY'
+report="$REPORT_DIR/h3-${PROFILE}-${ACCELERATION}-$(date -u +%Y%m%dT%H%M%SZ).json"
+python3 - "$results" "$report" "$PROFILE" "$ACCELERATION" "$seconds" "$COMFY_LOG" "$before_log_lines" <<'PY'
 import json, os, sys
 from datetime import datetime, timezone
-source, target, profile, seconds, log, start_line = sys.argv[1:]
+source, target, profile, acceleration, seconds, log, start_line = sys.argv[1:]
 items=[json.loads(line) for line in open(source, encoding="utf-8")]
 tail=[]
 if os.path.exists(log):
@@ -102,7 +111,7 @@ if os.path.exists(log):
         tail=f.readlines()[int(start_line):]
 keywords=("cuda backend", "sage", "prompt executed", "loaded partially")
 evidence=[line.strip() for line in tail if any(k in line.lower() for k in keywords)][-200:]
-payload={"suite":"h3-profile-benchmark","profile":profile,"requested_seconds":int(seconds),"runs":items,"log_evidence":evidence,"created_at":datetime.now(timezone.utc).isoformat()}
+payload={"suite":"h3-profile-benchmark","profile":profile,"acceleration":acceleration,"requested_seconds":int(seconds),"runs":items,"log_evidence":evidence,"created_at":datetime.now(timezone.utc).isoformat()}
 with open(target,"w",encoding="utf-8") as f: json.dump(payload,f,ensure_ascii=False,indent=2); f.write("\n")
 print(target)
 PY

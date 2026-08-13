@@ -1,6 +1,6 @@
 # BRMMedia 局域网 API
 
-> **更新日期：2026-08-05**
+> **更新日期：2026-08-13**
 > 推荐业务系统调用稳定 REST API v1。原有 Gradio API 保留给既有脚本与工作台调试，不建议新业务继续依赖它的 SSE 协议。
 
 ## 1. 入口、认证与快速检查
@@ -121,8 +121,8 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | --- | --- | --- |
 | `text-to-image` | `prompt` | `size`（默认 `1024 × 1024`）、`batch`（1–4） |
 | `image-edit` | `prompt`、`image_asset_id` | 图片编辑 |
-| `text-to-video` | `prompt` | MiniMax H3 Base；`size` 表示画幅比例（默认 `768 × 1024`）、`seconds`（按档位限制）、`profile`（`draft` / `preview` 默认 / `quality`） |
-| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3 Base；`size` 表示输出画幅比例（默认 `768 × 1024`）、`seconds`（按档位限制）、`profile`（`draft` / `preview` 默认 / `quality`） |
+| `text-to-video` | `prompt` | MiniMax H3；`size` 表示画幅比例、`seconds`、`profile`（`draft` / `preview` 默认 / `quality`）、`acceleration`（`standard` 默认 / `turbo_balanced` / `turbo_fast`） |
+| `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3；其余视频参数同文生视频 |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | `temperature`（0–1.5，默认 0.8） |
@@ -144,7 +144,11 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 `text-to-video` 与 `image-to-video` 已保留原 REST workflow 标识，调用方不需要迁移路径；实际引擎为本地开源 **MiniMax H3 Base**，输出是带模型原生同步立体声音频的 MP4。
 
 - `profile=draft` 是官方模板同规格的极速草稿：约 `0.4MP`、`73` 帧、约 `3` 秒，仅用于提示词、构图与运动预览；它只接受 `seconds=3`。
-- `profile=preview`（默认）使用约 `480` 像素短边，适合稳定验证，接受 `4–6` 秒，省略时为 `5` 秒。`quality` 使用约 `768` 像素短边，当前验收期同样限制为 `4–6` 秒，省略时为 `6` 秒。最长边都不超过 `1344`；本轮验收完成前不开放 15 秒质量请求。
+- `profile=preview`（默认）使用约 `480` 像素短边，省略时为 `5` 秒；`quality` 使用约 `768` 像素短边，省略时为 `6` 秒。两者允许 `4–15` 秒，最长边不超过 `1344`。15 秒质量档计算量很大，优先配合 8 步模式；结果时长仍以实际帧网格为准。
+- `acceleration=standard` 是原官方 20 步 `res_multistep` 质量与回退路径，不加载 LoRA。
+- `acceleration=turbo_balanced` 使用 LightX2V/ModelTC v1.0 8 步 LoRA、Euler、Sigma `12/3`，支持各档位与画幅；这是首选加速候选，但在质量验收前不会替换默认值。
+- `acceleration=turbo_fast` 使用 LightX2V/ModelTC v1.0 4 步 768P LoRA、Euler、Sigma `6/3`。首版仅接受 `profile=quality` 与横向 `16:9`，并按其训练规格实际生成 `1344 × 768`。
+- 两个 Turbo 权重均固定 Hugging Face revision、文件大小与 SHA-256；启动门禁校验不通过时，候选拒绝启动。LightX2V 是第三方官方发布，并非 MiniMax 官方加速器，必须与 `standard` 做画面、运动、提示词遵循和原生音频 A/B 后再决定默认策略。
 - `size` 只表达画幅比例；服务会计算模型可用的 32 像素网格画布。图生视频会把上传图适配到该画布。
 - H3 使用 24fps、`17k+5` 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
 - 业务系统应先读取 `GET /capabilities` 中 H3 workflow 的 `options.params` 构建表单。它明确列出 `profile` 枚举、`seconds.default_by_profile`、`size` 的 `enum_source` 和图生视频所需的 `image_asset_id`。
@@ -154,7 +158,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 ```bash
 curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
   -H 'Content-Type: application/json' \
-  -d '{"workflow":"text-to-video","params":{"prompt":"雨后街道反射霓虹灯，电影感，环境声","size":"1920 × 1080","seconds":5,"profile":"preview"}}' \
+  -d '{"workflow":"text-to-video","params":{"prompt":"雨后街道反射霓虹灯，电影感，环境声","size":"1920 × 1080","seconds":5,"profile":"preview","acceleration":"turbo_balanced"}}' \
   "$BRM_API/tasks"
 ```
 
@@ -176,6 +180,10 @@ H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其
   "error": null,
   "effective_settings": {
     "profile": "preview",
+    "acceleration": "turbo_balanced",
+    "engine": "MiniMax H3 + LightX2V Turbo v1.0 8-step",
+    "steps": 8,
+    "sampler": "euler",
     "requested_size": "1920 × 1080",
     "requested_seconds": 5,
     "width": 864,
@@ -192,6 +200,32 @@ H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其
 }
 ```
 
+运行中的任务还会返回 ComfyUI 执行关联和进度。`prompt_id` 会在 ComfyUI
+接受工作流后立即持久化；服务重启时会用它重新附着到原任务，不会重复提交生成：
+
+```json
+{
+  "task_id": "0123456789abcdef0123456789abcdef",
+  "state": "running",
+  "prompt_id": "35ef78c7-772f-43aa-b82e-a7fa018259af",
+  "execution": {
+    "stage": "sampling",
+    "node_id": "15",
+    "current_step": 3,
+    "total_steps": 8,
+    "progress": 0.375,
+    "last_progress_at": 1780000060.0,
+    "recovered_after_restart": false
+  }
+}
+```
+
+`execution.stage` 可能依次出现 `queued`、`building_workflow`、`submitted`、
+`execution_start`、`executing`、`sampling`、`finalizing`、`saving_artifacts`、
+`completed`；异常终态为 `interrupted`、`timed_out` 或 `failed`。WebSocket
+暂时不可用时后端自动回退到 `/history/{prompt_id}` 轮询，因此客户端只需继续
+查询本 REST 接口。
+
 可按 2–5 秒间隔轮询。`state` 的含义：
 
 | state | 含义 |
@@ -200,7 +234,7 @@ H3 示例完成状态（`1920 × 1080`、`preview`、请求 5 秒）如下。其
 | `running` | 正在生成 |
 | `completed` | 已完成，可下载 `artifacts` |
 | `cancelled` | 已由工作台操作员中断或清空队列 |
-| `timed_out` | 已超过 H3 等待上限，后端已向 ComfyUI 发送中断请求；查看 `error` 确认请求结果 |
+| `timed_out` | 已超过 H3 4 小时等待上限；后端会按 `prompt_id` 执行 `/interrupt`、从 `/queue` 删除目标并轮询 `/queue`/`/history` 确认，不会仅改变工作台状态后让 GPU 继续运行。查看 `error` 中的确认摘要 |
 | `failed` | 生成失败，查看安全摘要 `error` |
 
 下载时复用 Basic Auth。客户端应直接使用服务返回的 `download_url`，不要猜测文件名或内部目录：
