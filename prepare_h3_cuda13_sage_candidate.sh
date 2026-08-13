@@ -13,6 +13,12 @@ TORCHVISION_VERSION="${BRMMEDIA_H3_TORCHVISION_VERSION:-0.26.0}"
 TORCHAUDIO_VERSION="${BRMMEDIA_H3_TORCHAUDIO_VERSION:-2.11.0}"
 TORCH_INDEX="${BRMMEDIA_H3_TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
 SAGE_WHEEL_URL="${BRMMEDIA_H3_SAGE_WHEEL_URL:-}"
+SAGE_SOURCE_BUILD="${BRMMEDIA_H3_SAGE_SOURCE_BUILD:-0}"
+SAGE_SOURCE_REPO="${BRMMEDIA_H3_SAGE_SOURCE_REPO:-https://github.com/thu-ml/SageAttention.git}"
+# Pinned official v2.2.0 tag.  Keep the full commit in the manifest so a
+# candidate can be recreated without trusting an unpinned branch head.
+SAGE_SOURCE_COMMIT="${BRMMEDIA_H3_SAGE_SOURCE_COMMIT:-eb615cf6cf4d221338033340ee2de1c37fbdba4a}"
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
 MANIFEST="$APP_ROOT/runtime-locks/h3-cuda13-sage-candidate.json"
 
 die() { echo "[ERROR] $*" >&2; exit 1; }
@@ -37,17 +43,18 @@ printf '%s\n' "$gpu" | grep -E '^0, (NVIDIA )?RTX A5000, .*8\.6, (24[0-9]{3}|2[5
 mem_kib="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
 [ "${mem_kib:-0}" -ge 64000000 ] || die "WSL must expose >=64GB before a H3 candidate (currently ${mem_kib:-0} KiB)"
 
-if [ -z "$SAGE_WHEEL_URL" ]; then
+if [ -z "$SAGE_WHEEL_URL" ] && [ "$SAGE_SOURCE_BUILD" != "1" ]; then
   cat >&2 <<'EOF'
 [ERROR] Set BRMMEDIA_H3_SAGE_WHEEL_URL to the reviewed Linux x86_64 wheel.
-        It must match Python/PyTorch/CUDA 13 (or a vendor-documented stable-ABI
-        build that explicitly supports this runtime).  This guard intentionally
-        refuses `pip install sageattention`: PyPI's package is a source wrapper,
-        not the prebuilt CUDA kernel wheel required by this server.
+        Or set BRMMEDIA_H3_SAGE_SOURCE_BUILD=1 to build the pinned official
+        SageAttention source in this isolated candidate venv. This guard
+        intentionally refuses unpinned `pip install sageattention` installs.
 EOF
   exit 2
 fi
-case "$SAGE_WHEEL_URL" in https://*) ;; *) die "Sage wheel must use an explicit HTTPS URL";; esac
+if [ -n "$SAGE_WHEEL_URL" ]; then
+  case "$SAGE_WHEEL_URL" in https://*) ;; *) die "Sage wheel must use an explicit HTTPS URL";; esac
+fi
 
 note "Snapshotting candidate package set before CUDA 13 upgrade..."
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$MANIFEST")"
@@ -64,10 +71,35 @@ comfy_root="$(sed -n 's/^COMFYUI_ROOT=//p' "$CANARY_ENV" | tail -n1)"
 [ -f "$comfy_root/requirements.txt" ] || die "Canary ComfyUI requirements are missing: $comfy_root"
 runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip install -r "$comfy_root/requirements.txt"
 
-note "Installing reviewed SageAttention wheel in the candidate..."
-wheel_tmp="$(mktemp /tmp/brmmedia-sageattention.XXXXXX.whl)"
-trap 'rm -f "$wheel_tmp"' EXIT
-curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$wheel_tmp" "$SAGE_WHEEL_URL"
+if [ "$SAGE_SOURCE_BUILD" = "1" ]; then
+  [ -x "$CUDA_HOME/bin/nvcc" ] || die "Official CUDA toolkit compiler is required: $CUDA_HOME/bin/nvcc"
+  source_dir="$APP_ROOT/runtime-locks/sageattention-${SAGE_SOURCE_COMMIT}"
+  wheel_dir="$APP_ROOT/runtime-locks/sage-wheels"
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$wheel_dir"
+  if [ ! -d "$source_dir/.git" ]; then
+    runuser -u "$SERVICE_USER" -- git clone "$SAGE_SOURCE_REPO" "$source_dir"
+  fi
+  runuser -u "$SERVICE_USER" -- git -C "$source_dir" fetch --tags --force
+  runuser -u "$SERVICE_USER" -- git -C "$source_dir" checkout --detach "$SAGE_SOURCE_COMMIT"
+  actual_commit="$(git -C "$source_dir" rev-parse HEAD)"
+  [ "$actual_commit" = "$SAGE_SOURCE_COMMIT" ] || die "SageAttention source commit mismatch: $actual_commit"
+  note "Building pinned official SageAttention source for sm86 in the candidate..."
+  rm -f "$wheel_dir"/sageattention-*.whl
+  runuser -u "$SERVICE_USER" -- env \
+    PATH="$CUDA_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    CUDA_HOME="$CUDA_HOME" TORCH_CUDA_ARCH_LIST=8.6 MAX_JOBS=2 \
+    "$CANARY_VENV/bin/python" -m pip wheel --no-build-isolation --no-deps --wheel-dir "$wheel_dir" "$source_dir"
+  wheel_tmp="$(find "$wheel_dir" -maxdepth 1 -name 'sageattention-*.whl' -print -quit)"
+  [ -n "$wheel_tmp" ] || die "Pinned SageAttention source build produced no wheel"
+  sage_origin="${SAGE_SOURCE_REPO}@${SAGE_SOURCE_COMMIT}"
+else
+  note "Installing reviewed SageAttention wheel in the candidate..."
+  wheel_tmp="$(mktemp /tmp/brmmedia-sageattention.XXXXXX.whl)"
+  trap 'rm -f "$wheel_tmp"' EXIT
+  curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --output "$wheel_tmp" "$SAGE_WHEEL_URL"
+  sage_origin="$SAGE_WHEEL_URL"
+fi
+wheel_sha256="$(sha256sum "$wheel_tmp" | awk '{print $1}')"
 runuser -u "$SERVICE_USER" -- "$CANARY_VENV/bin/python" -m pip install --no-deps --force-reinstall "$wheel_tmp"
 
 note "Running CUDA/Sage imports and H3 node availability checks..."
@@ -89,10 +121,10 @@ print("gpu", torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))
 print("sageattention", importlib.util.find_spec("sageattention").origin)
 PY
 
-python3 - "$MANIFEST" "$before" "$TORCH_VERSION" "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" "$SAGE_WHEEL_URL" <<'PY'
+python3 - "$MANIFEST" "$before" "$TORCH_VERSION" "$TORCHVISION_VERSION" "$TORCHAUDIO_VERSION" "$sage_origin" "$wheel_sha256" <<'PY'
 import json, sys
 from datetime import datetime, timezone
-path, before, torch_version, torchvision_version, torchaudio_version, wheel = sys.argv[1:]
+path, before, torch_version, torchvision_version, torchaudio_version, source, wheel_sha256 = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump({
         "candidate": "cuda13-sageattention",
@@ -100,7 +132,8 @@ with open(path, "w", encoding="utf-8") as handle:
         "torch": f"{torch_version}+cu130",
         "torchvision": f"{torchvision_version}+cu130",
         "torchaudio": f"{torchaudio_version}+cu130",
-        "sage_wheel": wheel,
+        "sage_source_or_wheel": source,
+        "sage_wheel_sha256": wheel_sha256,
         "rollback_pip_freeze": before,
         "next": "Start loopback canary, verify native CUDA logs and Sage patch, then benchmark draft T2V/I2V.",
     }, handle, ensure_ascii=False, indent=2)

@@ -70,7 +70,9 @@ with open(sys.argv[1], 'wb') as f:
     f.write(chunk(b'IEND', b''))
 PY
 fi
-image_asset_id="$(curl --fail --silent --show-error -F "kind=image" -F "file=@${benchmark_image};type=image/png" "$API_BASE/files" | json_value asset_id)"
+# `kind` is a FastAPI query parameter, not multipart form content.  Sending it
+# in the URL keeps the benchmark compatible with the documented upload API.
+image_asset_id="$(curl --fail --silent --show-error -F "file=@${benchmark_image};type=image/png" "$API_BASE/files?kind=image" | json_value asset_id)"
 for kind in text-to-video image-to-video; do
   for n in $(seq 1 "$RUNS"); do
     payload="{\"workflow\":\"$kind\",\"params\":{\"prompt\":\"A small paper boat moves gently across a quiet blue pond with soft synchronized water ambience.\",\"size\":\"1344 × 768\",\"seconds\":$seconds,\"profile\":\"$PROFILE\"}}"
