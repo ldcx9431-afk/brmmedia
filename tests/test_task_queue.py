@@ -177,7 +177,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertFalse(live_update["visible"])
         self.assertEqual(live_update["value"], "")
 
-    def test_completed_audio_row_plays_directly_without_dropdown(self):
+    def test_completed_audio_choice_plays_directly_without_dropdown(self):
         audio_path = self.output_dir / "direct-listen.mp3"
         audio_path.write_bytes(b"audio-fixture")
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
@@ -190,16 +190,14 @@ class TaskQueueTests(unittest.TestCase):
         previous_queue = self.webui.task_queue
         self.webui.task_queue = queue
         try:
-            _, _, _, _, audio_update, audio_paths, _ = self.webui.render_queue()
+            _, _, _, _, audio_update, _ = self.webui.render_queue()
         finally:
             self.webui.task_queue = previous_queue
 
         resolved_audio_path = str(audio_path.resolve())
-        self.assertEqual(audio_update["value"], [[audio_path.name]])
-        self.assertEqual(audio_paths, [resolved_audio_path])
-        event = types.SimpleNamespace(index=(0, 0))
+        self.assertEqual(audio_update["choices"], [(audio_path.name, resolved_audio_path)])
         self.assertEqual(
-            self.webui.play_completed_audio_from_row(audio_paths, event),
+            self.webui.play_completed_audio(resolved_audio_path),
             resolved_audio_path,
         )
 
@@ -208,8 +206,8 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('elem_id="workflow-tabs"', source)
         self.assertNotIn('elem_id="workflow-categories"', source)
         self.assertIn('position: absolute !important;', source)
-        self.assertIn('completed_audio_list.select(', source)
-        self.assertIn('play_completed_audio_from_row', source)
+        self.assertIn('completed_audio_list.change(', source)
+        self.assertIn('play_completed_audio', source)
         self.assertIn('columns=7,', source)
         self.assertIn('rows=3,', source)
         self.assertIn('height=420,', source)

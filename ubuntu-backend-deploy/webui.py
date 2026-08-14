@@ -932,31 +932,25 @@ footer {
     border-radius: 9px !important;
     font-size: 0.9rem !important;
 }
-/* 完成音频即是一张可点选的素材列表；选中后右侧播放器立刻试听并提供下载。 */
+/* 完成音频是一张可直接点选的素材清单；选中后右侧播放器立刻试听并提供下载。 */
 #completed-audio-list {
     border: 1px solid #d8e2ee;
     border-radius: 10px;
     overflow: hidden;
     background: #ffffff;
 }
-#completed-audio-list table { width: 100%; }
-#completed-audio-list th {
-    padding: 8px 11px !important;
-    background: #f2f8fb !important;
-    color: #31566d;
-    font-size: 0.84rem;
-    font-weight: 750;
-    text-align: left;
-}
-#completed-audio-list td {
-    padding: 8px 11px !important;
+#completed-audio-list label {
+    margin: 0 !important;
+    padding: 7px 11px !important;
+    border-bottom: 1px solid #edf2f7;
     color: #334155;
     cursor: pointer;
 }
-#completed-audio-list tbody tr:hover td {
+#completed-audio-list label:hover {
     background: #e8f5f6 !important;
     color: #0f5d70;
 }
+#completed-audio-list label:last-child { border-bottom: 0; }
 #completed-media { margin-top: 18px; }
 #completed-media-hint { margin: 8px 2px 0; color: #64748b; font-size: 0.86rem; }
 /* 素材库优先展示更多真实产物，完整素材仍在点击后通过原查看器展示。 */
@@ -2480,19 +2474,15 @@ def close_completed_media_viewer():
     return gr.update(value="", visible=False), gr.update(visible=False)
 
 
-def play_completed_audio_from_row(audio_paths, evt: gr.SelectData):
-    """点击完成音频的一行后，直接把对应文件送入内置播放器。"""
-    try:
-        selected_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
-        path = _completed_output_path(audio_paths[selected_index])
-    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
-        path = None
+def play_completed_audio(path):
+    """点击完成音频清单中的文件名后，直接把它送入内置播放器。"""
+    path = _completed_output_path(path)
     return str(path) if path and path.suffix.lower() in AUDIO_EXTS else None
 
 
 def clear_completed_audio_preview():
     """停止并移除当前试听音频，避免旧音频持续占据播放器。"""
-    return None
+    return gr.update(value=None), None
 
 
 def render_queue():
@@ -2570,14 +2560,13 @@ def render_queue():
                     audios.append(str(path))
     gallery_paths = imgs[:DONE_GALLERY_MAX]
     audio_paths = audios[:DONE_TASKS_MAX]
-    audio_rows = [[Path(path).name] for path in audio_paths]
+    audio_choices = [(Path(path).name, path) for path in audio_paths]
     return (
         summary,
         gr.update(value=_render_live_progress(running), visible=bool(running)),
         table_md,
         gallery_paths,
-        gr.update(value=audio_rows),
-        audio_paths,
+        gr.update(choices=audio_choices),
         gallery_paths,
     )
 
@@ -3216,14 +3205,11 @@ def build_ui():
                 interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
         op_status = gr.Markdown("")
         with gr.Row():
-            completed_audio_list = gr.Dataframe(
-                headers=["已完成音频 · 点击任一行即可试听"],
-                datatype=["str"],
-                value=[],
-                interactive=False,
-                show_row_numbers=False,
-                max_height=176,
-                wrap=True,
+            completed_audio_list = gr.Radio(
+                label="已完成音频 · 点击名称即可试听",
+                choices=[],
+                value=None,
+                interactive=True,
                 scale=1,
                 elem_id="completed-audio-list",
             )
@@ -3234,7 +3220,6 @@ def build_ui():
                 buttons=["download"],
                 scale=2,
             )
-        completed_audio_paths = gr.State([])
         clear_audio_preview_btn = gr.Button("停止并清除当前试听", variant="secondary")
         gr.Markdown("#### 素材库", elem_id="completed-media")
         q_gallery = gr.Gallery(
@@ -3261,15 +3246,15 @@ def build_ui():
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
         interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status, api_visibility="private")
-        completed_audio_list.select(
-            fn=play_completed_audio_from_row,
-            inputs=completed_audio_paths,
+        completed_audio_list.change(
+            fn=play_completed_audio,
+            inputs=completed_audio_list,
             outputs=completed_audio_player,
             api_visibility="private",
         )
         clear_audio_preview_btn.click(
             fn=clear_completed_audio_preview,
-            outputs=completed_audio_player,
+            outputs=[completed_audio_list, completed_audio_player],
             api_visibility="private",
         )
         q_gallery.select(
@@ -3293,7 +3278,6 @@ def build_ui():
                 q_table,
                 q_gallery,
                 completed_audio_list,
-                completed_audio_paths,
                 completed_gallery_paths,
             ],
             api_visibility="private",
