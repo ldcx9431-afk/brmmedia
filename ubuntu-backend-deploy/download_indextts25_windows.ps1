@@ -54,7 +54,9 @@ foreach ($item in $items) {
 
     Write-DownloadLog "START $relativePath $offset/$expectedSize"
     $uri = "https://huggingface.co/IndexTeam/IndexTTS-2.5/resolve/$Revision/$relativePath"
-    $chunkSize = [Int64](1MB)
+    # The server confirms 2 MiB HTTP ranges reliably.  This halves request
+    # setup overhead while retaining per-range retries and final SHA-256.
+    $chunkSize = [Int64](2MB)
     $stream = [IO.File]::Open($destination, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::Read)
     try {
         $offset = [Int64]$stream.Length
