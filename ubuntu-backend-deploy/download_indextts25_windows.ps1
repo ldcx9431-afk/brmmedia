@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ModelRoot = 'D:\model\IndexTTS-2.5',
-    [string]$Revision = 'c39ce5ba981572cb187443877ff559dfb246ce63'
+    [string]$Revision = 'c39ce5ba981572cb187443877ff559dfb246ce63',
+    [string[]]$OnlyFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,8 @@ $items = @(
     @('s2mel.pth', 414908601, '9b1b0003fc189c94cc349758d7ebc25f903b7eb2de4602879959cc64ce816456')
 )
 
-$logFile = Join-Path $ModelRoot 'download-indextts25.log'
+$logSuffix = if ($OnlyFile) { '-' + (($OnlyFile -join '_') -replace '[^A-Za-z0-9._-]', '_') } else { '' }
+$logFile = Join-Path $ModelRoot "download-indextts25$logSuffix.log"
 New-Item -ItemType Directory -Force -Path $ModelRoot | Out-Null
 
 function Write-DownloadLog([string]$Message) {
@@ -29,6 +31,7 @@ function Test-VerifiedFile([string]$Path, [Int64]$ExpectedSize, [string]$Sha256)
 
 foreach ($item in $items) {
     $relativePath = $item[0]
+    if ($OnlyFile -and $relativePath -notin $OnlyFile) { continue }
     $expectedSize = [Int64]$item[1]
     $expectedSha = $item[2]
     $destination = Join-Path $ModelRoot ($relativePath -replace '/', '\\')
