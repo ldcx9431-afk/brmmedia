@@ -62,14 +62,15 @@ H3_ACCELERATION_DETAILS = {
         "engine": "MiniMax H3 + LightX2V Turbo v1.0 8-step", "steps": 8,
         "sampler": "euler", "shift_video": 12, "shift_audio": 3,
         "lora": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-        "purpose": "Balanced acceleration for mixed aspect ratios.",
+        "purpose": "Balanced acceleration for mixed aspect ratios; 7–15 second requests use the stable PyTorch attention path on A5000.",
+        "constraints": {"maximum_seconds": 15, "long_sequence_attention": "pytorch-stable"},
     },
     "turbo_fast": {
         "engine": "MiniMax H3 + LightX2V Turbo v1.0 4-step 768P", "steps": 4,
         "sampler": "euler", "shift_video": 6, "shift_audio": 3,
         "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
         "purpose": "Fast 768P landscape path; initially restricted to quality + 16:9 landscape and normalized to 1344 × 768.",
-        "constraints": {"profile": "quality", "aspect_ratio": "16:9 landscape", "effective_size": "1344 × 768"},
+        "constraints": {"profile": "quality", "aspect_ratio": "16:9 landscape", "effective_size": "1344 × 768", "maximum_seconds": 15, "long_sequence_attention": "pytorch-stable"},
     },
 }
 H3_PROFILE_DETAILS = {
@@ -96,7 +97,7 @@ H3_COMMON_PARAMS = {
     "acceleration": {
         "type": "string", "required": False, "default": "standard",
         "enum": H3_ACCELERATION_VALUES,
-        "description": "standard is the unchanged official 20-step path; turbo_balanced is LightX2V v1.0 8-step; turbo_fast is the restricted 4-step 768P path.",
+        "description": "All modes accept up to 15 seconds. Turbo requests longer than 6 seconds automatically use the stable PyTorch attention path on the production A5000.",
     },
     "seconds": {
         "type": "integer", "required": False, "minimum": 3, "maximum": 15,
@@ -259,13 +260,14 @@ def _normal_text_to_video(params: dict[str, Any], assets: dict[str, AssetRecord]
         params.get("acceleration"), "acceleration", H3_ACCELERATION_VALUES, "standard"
     )
     size = _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024")
+    seconds = _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
+                      minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
+                      maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True)
     _validate_h3_acceleration(profile, size, acceleration)
     return [
         _trim_text(params.get("prompt"), "prompt"),
         size,
-        _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
-                minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
-                maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
+        seconds,
         profile, acceleration,
     ]
 
@@ -277,13 +279,14 @@ def _normal_image_to_video(params: dict[str, Any], assets: dict[str, AssetRecord
         params.get("acceleration"), "acceleration", H3_ACCELERATION_VALUES, "standard"
     )
     size = _choice(params.get("size"), "size", SIZE_VALUES, "768 × 1024")
+    seconds = _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
+                      minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
+                      maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True)
     _validate_h3_acceleration(profile, size, acceleration)
     return [
         _trim_text(params.get("prompt"), "prompt"), image.filename,
         size,
-        _number(params.get("seconds", H3_PROFILE_DETAILS[profile]["default_seconds"]), "seconds",
-                minimum=H3_PROFILE_DETAILS[profile]["minimum_seconds"],
-                maximum=H3_PROFILE_DETAILS[profile]["maximum_seconds"], integer=True),
+        seconds,
         profile, acceleration,
     ]
 

@@ -85,6 +85,7 @@ START_ARGS = DEFAULT_ARGS + EXTRA_ARGS
 
 _process: subprocess.Popen | None = None
 _log_thread: threading.Thread | None = None
+_process_watch_thread: threading.Thread | None = None
 _stop_logging = threading.Event()
 
 
@@ -469,6 +470,25 @@ def _stream_output(proc: subprocess.Popen, log_path: Path) -> None:
         print(f"[Launcher] log thread error: {e}")
 
 
+def _watch_process_exit(proc: subprocess.Popen) -> None:
+    """Fail the parent backend when its managed ComfyUI child crashes.
+
+    Leaving Gradio alive after a CUDA process failure makes every queued task
+    fail against a dead port.  Exiting non-zero lets systemd restart the whole
+    media backend and restore one coherent ComfyUI/worker pair.
+    """
+    exit_code = proc.wait()
+    if _stop_logging.is_set() or proc is not _process:
+        return
+    print(
+        f"[Launcher] managed ComfyUI exited unexpectedly with code {exit_code}; "
+        "terminating backend for systemd recovery.",
+        file=sys.stderr,
+        flush=True,
+    )
+    os._exit(70)
+
+
 def _wait_until_ready(timeout: int = STARTUP_TIMEOUT) -> None:
     print(f"[Launcher] waiting for ComfyUI ({timeout}s max): {BASE}")
     start = time.time()
@@ -483,7 +503,7 @@ def _wait_until_ready(timeout: int = STARTUP_TIMEOUT) -> None:
 
 
 def start_comfyui(wait: bool = True):
-    global _process, _log_thread
+    global _process, _log_thread, _process_watch_thread
 
     if is_comfy_ready():
         print(f"[Launcher] existing ComfyUI detected at {BASE}; reusing it.")
@@ -527,6 +547,10 @@ def start_comfyui(wait: bool = True):
     )
     _log_thread = threading.Thread(target=_stream_output, args=(_process, LOG_FILE), daemon=True)
     _log_thread.start()
+    _process_watch_thread = threading.Thread(
+        target=_watch_process_exit, args=(_process,), daemon=True
+    )
+    _process_watch_thread.start()
     atexit.register(stop_comfyui)
 
     if wait:

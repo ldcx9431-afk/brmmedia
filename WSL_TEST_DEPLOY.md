@@ -164,7 +164,7 @@ sudo ./accept_media_regression.sh
 
 IndexTTS2 冒烟会自动使用本次 ACE-Step 冒烟产生的最新音频，不能依赖历史输出中某个固定序号的文件名。
 
-H3 默认 `preview`，时长 4–15 秒，并会输出带原生音频的 MP4。
+H3 默认 `preview`，所有 `standard` / `turbo_balanced` / `turbo_fast` 模式均允许最长 15 秒，并会输出带原生音频的 MP4。A5000 上 Turbo 超过 6 秒时自动使用 `pytorch-stable` attention；短任务与 standard 继续使用已验收的工作流级 Sage。
 
 H3 加速采用显式灰度参数，不替换默认质量路径：`acceleration=standard` 保持 20 步，
 `turbo_balanced` 使用经固定校验的 LightX2V v1.0 8 步 LoRA；`turbo_fast` 使用 4 步

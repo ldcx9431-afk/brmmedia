@@ -925,6 +925,7 @@ H3_PROFILES = {
 }
 H3_MAX_LONG_EDGE = 1344
 H3_FPS = 24
+H3_TURBO_SAGE_MAX_SECONDS = 6
 H3_ACCELERATION_MODES = {
     "standard": {
         "label": "官方质量（20 步）",
@@ -956,7 +957,7 @@ H3_ACCELERATION_MODES = {
 }
 H3_EFFECTIVE_SETTING_KEYS = (
     "profile", "acceleration", "engine", "base_model", "steps",
-    "shift_video", "shift_audio", "sampler", "lora_name",
+    "shift_video", "shift_audio", "sampler", "lora_name", "attention_backend",
     "requested_size", "requested_seconds", "width", "height", "frames",
     "effective_seconds",
 )
@@ -984,7 +985,6 @@ def normalise_h3_request(
         raise gr.Error(
             f"MiniMax H3 {profile} 档位仅支持 {limits['min_seconds']}–{limits['max_seconds']} 秒"
         )
-
     requested_width, requested_height = _parse_size(size)
     if acceleration == "turbo_fast" and (
         profile != "quality"
@@ -1014,6 +1014,11 @@ def normalise_h3_request(
     frames = round(requested_seconds * H3_FPS)
     frames += (5 - frames % 17) % 17
     acceleration_config = H3_ACCELERATION_MODES[acceleration]
+    attention_backend = (
+        "pytorch-stable"
+        if acceleration != "standard" and requested_seconds > H3_TURBO_SAGE_MAX_SECONDS
+        else "sage-auto"
+    )
     return {
         "profile": profile,
         "acceleration": acceleration,
@@ -1024,6 +1029,7 @@ def normalise_h3_request(
         "shift_audio": acceleration_config["shift_audio"],
         "sampler": acceleration_config["sampler"],
         "lora_name": acceleration_config["lora_name"],
+        "attention_backend": attention_backend,
         "requested_size": size,
         "requested_seconds": requested_seconds,
         "width": width,
@@ -1033,7 +1039,7 @@ def normalise_h3_request(
     }
 
 
-def h3_profile_duration_update(profile: str):
+def h3_profile_duration_update(profile: str, acceleration: str = "standard"):
     """Reset and constrain duration after an H3 profile switch.
 
     Browsers can retain a value from an older page bundle. Updating the
@@ -1041,12 +1047,20 @@ def h3_profile_duration_update(profile: str):
     visible and prevents stale values reaching Gradio's schema validator.
     """
     limits = H3_PROFILES.get(str(profile), H3_PROFILES["preview"])
+    acceleration = str(acceleration or "standard")
+    maximum = limits["max_seconds"]
+    value = limits["default_seconds"]
+    mode_note = (
+        "；Turbo 7–15 秒会自动切换到更稳健的 PyTorch attention 执行链"
+        if acceleration != "standard" and profile != "draft"
+        else ""
+    )
     update = {
-        "value": limits["default_seconds"],
+        "value": value,
         "minimum": limits["min_seconds"],
-        "maximum": limits["max_seconds"],
-        "label": f"视频时长（秒，{limits['min_seconds']}–{limits['max_seconds']}）",
-        "info": f"{limits['label']}；切换档位会自动重置时长。",
+        "maximum": maximum,
+        "label": f"视频时长（秒，{limits['min_seconds']}–{maximum}）",
+        "info": f"{limits['label']}；切换档位或加速模式会自动重置时长{mode_note}。",
     }
     # Gradio's update helper is available in the production runtime.  Keeping
     # the plain mapping fallback also supports compatible versions (and makes
@@ -1366,6 +1380,14 @@ def _configure_h3_acceleration(wf: dict, args: dict) -> None:
     })
     wf["17"]["inputs"]["sampler_name"] = config["sampler"]
     wf["9"]["inputs"]["steps"] = config["steps"]
+    if args.get("attention_backend") == "pytorch-stable":
+        # SageAttention is retained for standard and short Turbo requests.
+        # On the A5000, long Turbo latents plus dynamic LoRA patching have
+        # produced a reproducible illegal-address failure in the fused Sage
+        # path.  Keep the LoRA acceleration but route the two model consumers
+        # directly to the sigma-shifted model for the 7–15 second cell.
+        wf["9"]["inputs"]["model"] = ["25", 0]
+        wf["16"]["inputs"]["model"] = ["25", 0]
 
 
 def build_workflow_ltx3(workflow_name: str, args: dict) -> dict:
@@ -2137,7 +2159,7 @@ def build_ui():
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
-                                info="preview / quality 支持 4–15 秒；draft 固定为 3 秒。切换档位会自动重置时长。" if H3_ENABLED else None,
+                                info="所有模式支持最长 15 秒；Turbo 7–15 秒会自动采用稳健 attention 执行链；draft 固定 3 秒。" if H3_ENABLED else None,
                             )
                             profile3 = gr.Dropdown(
                                 label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -2151,7 +2173,7 @@ def build_ui():
                                     for key, config in H3_ACCELERATION_MODES.items()
                                 ],
                                 value="standard",
-                                info="standard 保持官方 20 步；Turbo 为 LightX2V v1.0 可选加速，默认不启用。",
+                                info="所有模式支持最长 15 秒；Turbo 7–15 秒自动绕过长序列下不稳定的 Sage 融合核，避免 CUDA 非法访存。",
                                 visible=H3_ENABLED,
                             )
                         submit_btn3 = gr.Button("提交", variant="primary")
@@ -2163,7 +2185,13 @@ def build_ui():
                 )
                 profile3.change(
                     fn=h3_profile_duration_update,
-                    inputs=profile3,
+                    inputs=[profile3, acceleration3],
+                    outputs=seconds3,
+                    api_visibility="private",
+                )
+                acceleration3.change(
+                    fn=h3_profile_duration_update,
+                    inputs=[profile3, acceleration3],
                     outputs=seconds3,
                     api_visibility="private",
                 )
@@ -2181,7 +2209,7 @@ def build_ui():
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
-                                info="preview / quality 支持 4–15 秒；draft 固定为 3 秒。切换档位会自动重置时长。" if H3_ENABLED else None,
+                                info="所有模式支持最长 15 秒；Turbo 7–15 秒会自动采用稳健 attention 执行链；draft 固定 3 秒。" if H3_ENABLED else None,
                             )
                         profile4 = gr.Dropdown(
                             label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -2195,7 +2223,7 @@ def build_ui():
                                 for key, config in H3_ACCELERATION_MODES.items()
                             ],
                             value="standard",
-                            info="4 步极速首版仅支持 quality + 16:9 横版，并统一生成 1344 × 768；其他请求请选择平衡 8 步或官方 20 步。",
+                            info="所有模式支持最长 15 秒；Turbo 7–15 秒自动使用稳健 attention。4 步极速仍要求 quality + 16:9 横版并统一生成 1344 × 768。",
                             visible=H3_ENABLED,
                         )
                     with gr.Column(scale=1):
@@ -2214,7 +2242,13 @@ def build_ui():
                 )
                 profile4.change(
                     fn=h3_profile_duration_update,
-                    inputs=profile4,
+                    inputs=[profile4, acceleration4],
+                    outputs=seconds4,
+                    api_visibility="private",
+                )
+                acceleration4.change(
+                    fn=h3_profile_duration_update,
+                    inputs=[profile4, acceleration4],
                     outputs=seconds4,
                     api_visibility="private",
                 )

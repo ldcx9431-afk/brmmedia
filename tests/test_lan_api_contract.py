@@ -184,6 +184,16 @@ class LanApiContractTests(unittest.TestCase):
             "acceleration": "turbo_fast",
         }, {})
         self.assertEqual(trained_cell_args[-1], "turbo_fast")
+        long_balanced_args = self.api._normal_text_to_video({
+            "prompt": "long balanced", "profile": "quality", "size": "1920 × 1080",
+            "seconds": 15, "acceleration": "turbo_balanced",
+        }, {})
+        self.assertEqual(long_balanced_args[-3:], [15, "quality", "turbo_balanced"])
+        long_fast_args = self.api._normal_text_to_video({
+            "prompt": "long fast", "profile": "quality", "size": "1920 × 1080",
+            "seconds": 15, "acceleration": "turbo_fast",
+        }, {})
+        self.assertEqual(long_fast_args[-3:], [15, "quality", "turbo_fast"])
         with self.assertRaises(self.api.HTTPException):
             self.api._normal_text_to_video({
                 "prompt": "bad fast", "profile": "quality", "size": "768 × 1024",
@@ -208,6 +218,11 @@ class LanApiContractTests(unittest.TestCase):
         )
         self.assertEqual(text_schema["acceleration"]["default"], "standard")
         self.assertEqual(text_schema["seconds"]["default_by_profile"]["quality"], 6)
+        self.assertEqual(
+            capabilities["workflows"]["text-to-video"]["options"]["accelerations"]
+            ["turbo_balanced"]["constraints"]["maximum_seconds"],
+            15,
+        )
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")
         self.assertEqual(capabilities["video_engine"], {"active": "h3", "h3_available": True})

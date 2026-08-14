@@ -165,6 +165,40 @@ class ComfyUiTaskLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "queue_cleared=False"):
                 self.comfy.wait_for_outputs("pid-1", timeout=1, stop_event=stop)
 
+    def test_managed_comfy_crash_terminates_parent_for_systemd_recovery(self):
+        class ExitedProcess:
+            def wait(self):
+                return 139
+
+        proc = ExitedProcess()
+        previous = self.comfy._process
+        try:
+            self.comfy._process = proc
+            self.comfy._stop_logging.clear()
+            with patch.object(self.comfy.os, "_exit") as exit_process:
+                self.comfy._watch_process_exit(proc)
+            exit_process.assert_called_once_with(70)
+        finally:
+            self.comfy._process = previous
+            self.comfy._stop_logging.clear()
+
+    def test_intentional_comfy_stop_does_not_terminate_parent(self):
+        class ExitedProcess:
+            def wait(self):
+                return 0
+
+        proc = ExitedProcess()
+        previous = self.comfy._process
+        try:
+            self.comfy._process = proc
+            self.comfy._stop_logging.set()
+            with patch.object(self.comfy.os, "_exit") as exit_process:
+                self.comfy._watch_process_exit(proc)
+            exit_process.assert_not_called()
+        finally:
+            self.comfy._process = previous
+            self.comfy._stop_logging.clear()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

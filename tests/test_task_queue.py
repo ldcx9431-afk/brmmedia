@@ -360,11 +360,41 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(draft["value"], 3)
         self.assertEqual(draft["minimum"], 3)
         self.assertEqual(draft["maximum"], 3)
+        turbo_quality = self.webui.h3_profile_duration_update("quality", "turbo_balanced")
+        self.assertEqual(turbo_quality["maximum"], 15)
+        self.assertIn("稳健", turbo_quality["info"])
 
     def test_h3_quality_allows_15_second_production_request(self):
         quality = self.webui.normalise_h3_request("768 × 1024", 15, "quality")
         self.assertEqual(quality["requested_seconds"], 15)
         self.assertEqual(quality["frames"] % 17, 5)
+
+    def test_h3_turbo_modes_allow_15_seconds_with_stable_attention(self):
+        balanced = self.webui.normalise_h3_request(
+            "1920 × 1080", 15, "quality", "turbo_balanced"
+        )
+        fast = self.webui.normalise_h3_request(
+            "1920 × 1080", 15, "quality", "turbo_fast"
+        )
+        self.assertEqual(balanced["requested_seconds"], 15)
+        self.assertEqual(fast["requested_seconds"], 15)
+        self.assertEqual(balanced["attention_backend"], "pytorch-stable")
+        self.assertEqual(fast["attention_backend"], "pytorch-stable")
+
+        balanced["prompt"] = "long cinematic test"
+        wf = self.webui.build_workflow_3("MiniMaxH3-文生视频", balanced)
+        self.assertEqual(wf["9"]["inputs"]["model"], ["25", 0])
+        self.assertEqual(wf["16"]["inputs"]["model"], ["25", 0])
+
+    def test_h3_short_turbo_keeps_sage_attention(self):
+        balanced = self.webui.normalise_h3_request(
+            "1920 × 1080", 6, "quality", "turbo_balanced"
+        )
+        self.assertEqual(balanced["attention_backend"], "sage-auto")
+        balanced["prompt"] = "short cinematic test"
+        wf = self.webui.build_workflow_3("MiniMaxH3-文生视频", balanced)
+        self.assertEqual(wf["9"]["inputs"]["model"], ["26", 0])
+        self.assertEqual(wf["16"]["inputs"]["model"], ["26", 0])
 
     def test_h3_acceleration_defaults_to_unchanged_standard_path(self):
         request = self.webui.normalise_h3_request("1920 × 1080", 5, "preview")

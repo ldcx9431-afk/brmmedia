@@ -144,10 +144,11 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 `text-to-video` 与 `image-to-video` 已保留原 REST workflow 标识，调用方不需要迁移路径；实际引擎为本地开源 **MiniMax H3 Base**，输出是带模型原生同步立体声音频的 MP4。
 
 - `profile=draft` 是官方模板同规格的极速草稿：约 `0.4MP`、`73` 帧、约 `3` 秒，仅用于提示词、构图与运动预览；它只接受 `seconds=3`。
-- `profile=preview`（默认）使用约 `480` 像素短边，省略时为 `5` 秒；`quality` 使用约 `768` 像素短边，省略时为 `6` 秒。两者允许 `4–15` 秒，最长边不超过 `1344`。15 秒质量档计算量很大，优先配合 8 步模式；结果时长仍以实际帧网格为准。
+- `profile=preview`（默认）使用约 `480` 像素短边，省略时为 `5` 秒；`quality` 使用约 `768` 像素短边，省略时为 `6` 秒。所有加速模式均允许 `4–15` 秒，最长边不超过 `1344`；结果时长仍以实际帧网格为准。
 - `acceleration=standard` 是原官方 20 步 `res_multistep` 质量与回退路径，不加载 LoRA。
-- `acceleration=turbo_balanced` 使用 LightX2V/ModelTC v1.0 8 步 LoRA、Euler、Sigma `12/3`，支持各档位与画幅；这是首选加速候选，但在质量验收前不会替换默认值。
-- `acceleration=turbo_fast` 使用 LightX2V/ModelTC v1.0 4 步 768P LoRA、Euler、Sigma `6/3`。首版仅接受 `profile=quality` 与横向 `16:9`，并按其训练规格实际生成 `1344 × 768`。
+- `acceleration=turbo_balanced` 使用 LightX2V/ModelTC v1.0 8 步 LoRA、Euler、Sigma `12/3`，支持各档位与画幅。
+- `acceleration=turbo_fast` 使用 LightX2V/ModelTC v1.0 4 步 768P LoRA、Euler、Sigma `6/3`。仅接受 `profile=quality` 与横向 `16:9`，并按其训练规格实际生成 `1344 × 768`。
+- A5000 上的 Turbo 请求超过 6 秒时，服务保留 LoRA 与 4/8 步采样加速，但自动从 Sage 融合核切换到 `pytorch-stable` attention，规避长序列动态 LoRA 卸载时已观测到的 CUDA 非法访存。任务的 `effective_settings.attention_backend` 会明确返回实际路径。
 - 两个 Turbo 权重均固定 Hugging Face revision、文件大小与 SHA-256；启动门禁校验不通过时，候选拒绝启动。LightX2V 是第三方官方发布，并非 MiniMax 官方加速器，必须与 `standard` 做画面、运动、提示词遵循和原生音频 A/B 后再决定默认策略。
 - `size` 只表达画幅比例；服务会计算模型可用的 32 像素网格画布。图生视频会把上传图适配到该画布。
 - H3 使用 24fps、`17k+5` 帧网格，实际帧数和时长可能略上调；在 `GET /tasks/{task_id}` 的 `effective_settings` 中读取真实 `width`、`height`、`frames` 和 `effective_seconds`。
