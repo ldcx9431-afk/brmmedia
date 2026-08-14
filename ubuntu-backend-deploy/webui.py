@@ -757,16 +757,41 @@ footer {
 }
 /* 任务表格:铺满宽度,高度与右侧两个按钮一致,内容超出时出现滚动条。 */
 #q-table-md {
-    height: 160px;                 /* 约等于右侧两个按钮的总高度,可按需微调 */
+    height: 210px;
     width: 100%;
-    overflow-y: auto;
+    overflow: auto;
     box-sizing: border-box;
-    padding: 0 12px;
+    padding: 0;
     border: 1px solid var(--border-color-primary, #e5e7eb);
     border-radius: var(--radius-lg, 8px);
 }
 #q-table-md table {
-    width: 100%;                  /* 表格占满整个容器宽度 */
+    width: 100%;
+    min-width: 980px;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+#q-table-md th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #f8fafc;
+}
+#q-table-md th,
+#q-table-md td {
+    padding: 10px 12px;
+    vertical-align: top;
+    line-height: 1.45;
+}
+#q-table-md th:nth-child(1),
+#q-table-md td:nth-child(1) { min-width: 230px; }
+#q-table-md th:nth-child(3),
+#q-table-md td:nth-child(3) { min-width: 170px; }
+#q-table-md th:nth-child(6),
+#q-table-md td:nth-child(6) {
+    min-width: 260px;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 /* 独立的浏览器主体素材查看器，HTML 直接在固定层中渲染。 */
 #media-viewer {
@@ -2234,7 +2259,7 @@ def render_queue():
     pending_positions = {task.id: index for index, task in enumerate(pending, start=1)}
     rows = [
         "| 任务名称 | 状态 | 实时进度 | 提交时间 | 耗时 | 备注 |",
-        "| --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for t in all_tasks:
         icon = STATUS_ICONS.get(t.status, "")

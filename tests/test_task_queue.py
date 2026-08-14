@@ -154,6 +154,10 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn("38%", live_html)
         self.assertIn("&lt;正在生成&gt;", live_html)
         self.assertIn("实时进度", table_md)
+        self.assertEqual(
+            table_md.splitlines()[1],
+            "| --- | --- | --- | --- | --- | --- |",
+        )
         self.assertIn("正在采样生成", table_md)
         self.assertIn("3/8 步", table_md)
 
