@@ -1191,6 +1191,13 @@ def run_indextts25(task: Task) -> list[str]:
         raise RuntimeError("IndexTTS-2.5 候选服务不可用，未回退到旧版。请联系管理员检查服务状态。") from exc
     if health.status_code != 200:
         raise RuntimeError(f"IndexTTS-2.5 健康检查失败（HTTP {health.status_code}）")
+    try:
+        health_payload = health.json()
+    except ValueError as exc:
+        raise RuntimeError("IndexTTS-2.5 健康检查返回了无效内容") from exc
+    if not health_payload.get("ok"):
+        detail = health_payload.get("detail") or health_payload.get("error") or "候选服务未就绪"
+        raise RuntimeError(f"IndexTTS-2.5 候选服务未就绪：{detail}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     wav_path = OUTPUT_DIR / f".{task.id}.indextts25.wav"
