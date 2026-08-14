@@ -32,6 +32,8 @@ class IndexTTS25ContractTests(unittest.TestCase):
         self.assertIn('"$UV_BIN" sync --locked --python "$VENV_PYTHON"', prepare)
         self.assertNotIn("--default-index", prepare)
         self.assertIn("mirror must fail closed", prepare)
+        self.assertIn("UNIDIC_SHA256=\"db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245\"", prepare)
+        self.assertIn('"$UV_BIN" pip install --python "$VENV_PYTHON" --no-deps "$UNIDIC_ARCHIVE"', prepare)
         self.assertIn("/mnt/d/model/IndexTTS-2.5", prepare)
         self.assertIn("rsync -a --checksum", prepare)
         self.assertIn("--host \"${INDEXTTS25_HOST:-127.0.0.1}\"", start)

@@ -80,6 +80,23 @@ else
 fi
 "$UV_BIN" venv --clear --python "$PYTHON_SELECTOR" "$VENV_ROOT"
 VENV_PYTHON="$VENV_ROOT/bin/python"
+
+# `unidic-lite` is a 47 MiB source distribution needed for Japanese support.
+# Keep a checksum-verified copy in the isolated candidate cache so an
+# unreliable PyPI connection cannot repeatedly corrupt its archive mid-build.
+ARTIFACT_DIR="$RUNTIME_ROOT/artifacts"
+UNIDIC_ARCHIVE="$ARTIFACT_DIR/unidic-lite-1.0.8.tar.gz"
+UNIDIC_SHA256="db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245"
+install -d -m 0750 "$ARTIFACT_DIR"
+if [[ ! -f "$UNIDIC_ARCHIVE" ]] || [[ "$(sha256sum "$UNIDIC_ARCHIVE" | awk '{print $1}')" != "$UNIDIC_SHA256" ]]; then
+  rm -f "$UNIDIC_ARCHIVE"
+  curl --fail --location --retry 12 --retry-all-errors --connect-timeout 30 \
+    --output "$UNIDIC_ARCHIVE" \
+    "https://mirrors.aliyun.com/pypi/packages/55/2b/8cf7514cb57d028abcef625afa847d60ff1ffbf0049c36b78faa7c35046f/unidic-lite-1.0.8.tar.gz"
+fi
+[[ "$(sha256sum "$UNIDIC_ARCHIVE" | awk '{print $1}')" == "$UNIDIC_SHA256" ]] || fail "unidic-lite artifact SHA-256 mismatch"
+"$UV_BIN" pip install --python "$VENV_PYTHON" --no-deps "$UNIDIC_ARCHIVE"
+
 # The official project's locked CUDA 12.8 Torch dependencies are resolved in
 # this private venv.  Do not request the optional DeepSpeed extra.
 (
