@@ -57,8 +57,12 @@ elif [[ ! -d "$SOURCE_ROOT/.git" ]]; then
   git -c http.version=HTTP/1.1 clone --depth 1 --branch "$INDEXTTS25_SOURCE_TAG" \
     "$INDEXTTS25_SOURCE_REPOSITORY" "$SOURCE_ROOT"
 fi
-git -C "$SOURCE_ROOT" checkout --detach "$INDEXTTS25_SOURCE_COMMIT"
-[[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" == "$INDEXTTS25_SOURCE_COMMIT" ]] || { echo "[ERROR] source revision mismatch" >&2; exit 1; }
+if [[ -d "$SOURCE_ROOT/.git" ]]; then
+  git -C "$SOURCE_ROOT" checkout --detach "$INDEXTTS25_SOURCE_COMMIT"
+  [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" == "$INDEXTTS25_SOURCE_COMMIT" ]] || { echo "[ERROR] source revision mismatch" >&2; exit 1; }
+else
+  [[ "$(<"$SOURCE_ROOT/.brmmedia-source-commit")" == "$INDEXTTS25_SOURCE_COMMIT" ]] || { echo "[ERROR] imported source revision mismatch" >&2; exit 1; }
+fi
 
 uv python install "$INDEXTTS25_PYTHON"
 uv venv --python "$INDEXTTS25_PYTHON" "$VENV_ROOT"
