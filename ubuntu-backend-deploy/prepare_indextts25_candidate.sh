@@ -81,6 +81,21 @@ fi
 "$UV_BIN" venv --clear --python "$PYTHON_SELECTOR" "$VENV_ROOT"
 VENV_PYTHON="$VENV_ROOT/bin/python"
 
+# Keep the upstream lock immutable in the provenance directory.  The official
+# documentation also publishes the Aliyun mirror for unstable regions.  A
+# candidate-local lock changes only the registry URL, not package versions or
+# hashes, then remains `--locked` and checksum-verifiable.
+UPSTREAM_LOCK_SHA256="2bcec9c6bd4d20d733bdc0537a2f52b39fd67a2e88ad2308836f56fd72da1283"
+MIRROR_LOCK_SHA256="3bfe618597eac0eee4aeb921f987adb9bb9583ec008aded85c92ff64050fd9b9"
+LOCK_FILE="$SOURCE_ROOT/uv.lock"
+PROVENANCE_DIR="$RUNTIME_ROOT/provenance"
+install -d -m 0750 "$PROVENANCE_DIR"
+if [[ "$(sha256sum "$LOCK_FILE" | awk '{print $1}')" == "$UPSTREAM_LOCK_SHA256" ]]; then
+  cp -f "$LOCK_FILE" "$PROVENANCE_DIR/uv.lock.upstream"
+  sed -i 's#https://pypi.org/simple#https://mirrors.aliyun.com/pypi/simple#g' "$LOCK_FILE"
+fi
+[[ "$(sha256sum "$LOCK_FILE" | awk '{print $1}')" == "$MIRROR_LOCK_SHA256" ]] || fail "unexpected IndexTTS candidate lockfile"
+
 # `unidic-lite` is a 47 MiB source distribution needed for Japanese support.
 # Keep a checksum-verified copy in the isolated candidate cache so an
 # unreliable PyPI connection cannot repeatedly corrupt its archive mid-build.
@@ -101,10 +116,10 @@ fi
 # this private venv.  Do not request the optional DeepSpeed extra.
 (
   cd "$SOURCE_ROOT"
+# The candidate mirror lock above matches this explicitly configured index.
 UV_NO_MANAGED_PYTHON=1 UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
-    "$UV_BIN" sync --locked --python "$VENV_PYTHON"
-# Do not override the index here. `uv --locked` validates configured
-# registries against the upstream lockfile, so a mirror must fail closed.
+    "$UV_BIN" sync --locked --python "$VENV_PYTHON" \
+    --default-index "https://mirrors.aliyun.com/pypi/simple"
 )
 "$UV_BIN" pip install --python "$VENV_PYTHON" "fastapi>=0.115,<1" "uvicorn[standard]>=0.30,<1" "python-multipart>=0.0.20,<1"
 
