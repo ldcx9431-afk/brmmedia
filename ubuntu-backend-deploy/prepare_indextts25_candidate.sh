@@ -40,7 +40,11 @@ if [[ "$(df --output=avail -B1 "$RUNTIME_ROOT" | tail -1 | tr -d ' ')" -lt $((30
   exit 1
 fi
 
-if [[ -d "$SOURCE_ROOT/.git" ]] && [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)" != "$INDEXTTS25_SOURCE_COMMIT" ]]; then
+if [[ -f "$SOURCE_ROOT/.brmmedia-source-commit" ]] && [[ "$(<"$SOURCE_ROOT/.brmmedia-source-commit")" == "$INDEXTTS25_SOURCE_COMMIT" ]]; then
+  # Air-gapped recovery can import an audited source archive.  The marker is
+  # written only after its source commit was checked on the staging machine.
+  echo "[INFO] Using verified imported IndexTTS-2.5 source archive."
+elif [[ -d "$SOURCE_ROOT/.git" ]] && [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)" != "$INDEXTTS25_SOURCE_COMMIT" ]]; then
   # Some WSL proxy paths reset HTTP/2 pack transfers; pin this tiny source
   # checkout to HTTP/1.1 and fetch only the required tag/commit.
   git -C "$SOURCE_ROOT" -c http.version=HTTP/1.1 fetch --depth 1 origin "$INDEXTTS25_SOURCE_COMMIT"
