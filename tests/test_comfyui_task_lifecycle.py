@@ -112,6 +112,12 @@ class ComfyUiTaskLifecycleTests(unittest.TestCase):
         wait.assert_called_once()
         self.assertEqual(wait.call_args.args[0], "pid-1")
 
+    def test_h3_submit_wait_can_use_the_full_task_budget(self):
+        with patch.object(self.comfy, "queue_prompt", return_value={"prompt_id": "pid-1"}) as submit, \
+             patch.object(self.comfy, "wait_for_outputs", return_value={}):
+            self.comfy.run_workflow({"1": {}}, timeout=14_400, submit_timeout=14_400)
+        submit.assert_called_once_with({"1": {}}, timeout=14_400)
+
     def test_run_workflow_reattaches_without_duplicate_submission(self):
         with patch.object(self.comfy, "queue_prompt") as submit, \
              patch.object(self.comfy, "get_history", return_value={}), \

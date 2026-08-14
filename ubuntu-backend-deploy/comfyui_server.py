@@ -56,6 +56,12 @@ TASK_TIMEOUT = int(os.environ.get("COMFYUI_TASK_TIMEOUT", "3600"))
 # falsely marking an active long video as failed while still allowing the
 # caller to interrupt the ComfyUI prompt once the budget is genuinely used.
 H3_TASK_TIMEOUT = int(os.environ.get("BRM_H3_TASK_TIMEOUT", "14400"))
+# ComfyUI's single event loop can defer the /prompt response while it is
+# swapping large H3 modules.  A short HTTP read timeout then marks the UI task
+# failed even though ComfyUI may still accept and run that prompt later.  Use a
+# conservative default for regular jobs; H3 receives its full task budget via
+# run_workflow so one application worker never creates duplicate prompts.
+SUBMIT_TIMEOUT = int(os.environ.get("COMFYUI_SUBMIT_TIMEOUT", "600"))
 LOG_FILE = Path(os.environ.get("COMFYUI_LOG_FILE", BASE_DIR / "comfyui_runtime.log"))
 
 DEFAULT_ARGS = ["--enable-manager", "--disable-auto-launch"]
@@ -112,9 +118,9 @@ def is_alive() -> bool:
     return is_comfy_ready()
 
 
-def queue_prompt(workflow: dict) -> dict:
+def queue_prompt(workflow: dict, timeout: int = SUBMIT_TIMEOUT) -> dict:
     payload = {"prompt": workflow, "client_id": CLIENT_ID}
-    r = requests.post(f"{BASE}/prompt", json=payload, timeout=30)
+    r = requests.post(f"{BASE}/prompt", json=payload, timeout=max(30, int(timeout)))
     if r.status_code != 200:
         raise RuntimeError(f"ComfyUI submit failed ({r.status_code}): {r.text[:500]}")
     data = r.json()
@@ -433,6 +439,7 @@ def audio_duration(filepath) -> float:
 def run_workflow(
     workflow: dict | None,
     timeout: int = TASK_TIMEOUT,
+    submit_timeout: int | None = None,
     stop_event: threading.Event | None = None,
     on_submitted: Callable[[str], None] | None = None,
     on_progress: ProgressCallback | None = None,
@@ -442,7 +449,7 @@ def run_workflow(
     if prompt_id is None:
         if workflow is None:
             raise ValueError("workflow is required when prompt_id is not supplied")
-        res = queue_prompt(workflow)
+        res = queue_prompt(workflow, timeout=submit_timeout or min(timeout, SUBMIT_TIMEOUT))
         prompt_id = str(res["prompt_id"])
         if on_submitted is not None:
             on_submitted(prompt_id)

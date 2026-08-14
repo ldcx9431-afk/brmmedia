@@ -69,8 +69,8 @@ H3_ACCELERATION_DETAILS = {
         "engine": "MiniMax H3 + LightX2V Turbo v1.0 4-step 768P", "steps": 4,
         "sampler": "euler", "shift_video": 6, "shift_audio": 3,
         "lora": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
-        "purpose": "Fast 768P landscape path; initially restricted to quality + 16:9 landscape and normalized to 1344 × 768.",
-        "constraints": {"profile": "quality", "aspect_ratio": "16:9 landscape", "effective_size": "1344 × 768", "maximum_seconds": 15, "long_sequence_attention": "pytorch-stable"},
+        "purpose": "Fast 768P landscape path for up to 6 seconds. A 7–15 second request is transparently executed by the compatible 8-step Turbo path with adaptive canvas on A5000.",
+        "constraints": {"profile": "quality", "aspect_ratio": "16:9 landscape", "effective_size": "1344 × 768 up to 6 seconds; adaptive 8-step fallback for 7–15 seconds", "maximum_seconds": 15, "long_sequence_attention": "pytorch-stable"},
     },
 }
 H3_PROFILE_DETAILS = {
@@ -97,7 +97,7 @@ H3_COMMON_PARAMS = {
     "acceleration": {
         "type": "string", "required": False, "default": "standard",
         "enum": H3_ACCELERATION_VALUES,
-        "description": "All modes accept up to 15 seconds. Turbo requests longer than 6 seconds automatically use the stable PyTorch attention path on the production A5000.",
+        "description": "All modes accept up to 15 seconds. Long quality requests use an adaptive canvas; Turbo requests longer than 6 seconds use stable PyTorch attention, and turbo_fast uses the compatible 8-step Turbo path.",
     },
     "seconds": {
         "type": "integer", "required": False, "minimum": 3, "maximum": 15,

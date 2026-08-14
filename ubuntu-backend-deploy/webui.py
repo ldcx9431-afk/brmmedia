@@ -926,6 +926,11 @@ H3_PROFILES = {
 H3_MAX_LONG_EDGE = 1344
 H3_FPS = 24
 H3_TURBO_SAGE_MAX_SECONDS = 6
+# H3 15-second jobs contain 362 frames.  The A5000 reliably completes up to
+# the 768x1024 (0.786MP) cell but 1344x768 (1.032MP) caused a CUDA illegal
+# address during model offload.  Cap only long requests, and publish the
+# actual canvas in effective_settings instead of rejecting the requested 15s.
+H3_LONG_VIDEO_MAX_PIXELS = 786_432
 H3_ACCELERATION_MODES = {
     "standard": {
         "label": "官方质量（20 步）",
@@ -956,7 +961,8 @@ H3_ACCELERATION_MODES = {
     },
 }
 H3_EFFECTIVE_SETTING_KEYS = (
-    "profile", "acceleration", "engine", "base_model", "steps",
+    "profile", "requested_acceleration", "acceleration", "execution_policy",
+    "engine", "base_model", "steps",
     "shift_video", "shift_audio", "sampler", "lora_name", "attention_backend",
     "requested_size", "requested_seconds", "width", "height", "frames",
     "effective_seconds",
@@ -970,8 +976,8 @@ def normalise_h3_request(
     profile = str(profile or "preview")
     if profile not in H3_PROFILES:
         raise gr.Error("H3 档位仅支持 draft、preview 或 quality")
-    acceleration = str(acceleration or "standard")
-    if acceleration not in H3_ACCELERATION_MODES:
+    requested_acceleration = str(acceleration or "standard")
+    if requested_acceleration not in H3_ACCELERATION_MODES:
         raise gr.Error("H3 加速模式仅支持 standard、turbo_balanced 或 turbo_fast")
     try:
         numeric_seconds = float(seconds)
@@ -986,7 +992,7 @@ def normalise_h3_request(
             f"MiniMax H3 {profile} 档位仅支持 {limits['min_seconds']}–{limits['max_seconds']} 秒"
         )
     requested_width, requested_height = _parse_size(size)
-    if acceleration == "turbo_fast" and (
+    if requested_acceleration == "turbo_fast" and (
         profile != "quality"
         or requested_width <= requested_height
         # The trained LightX2V cell is 1344x768 (ratio 1.75), close to but
@@ -1007,8 +1013,26 @@ def normalise_h3_request(
     height = max(32, int(round(requested_height * scale / 32)) * 32)
     # The 4-step v1.0 LoRA is trained specifically at 1344x768. Accept common
     # 16:9 selectors (for example 1920x1080) but execute on its native canvas.
+    acceleration = requested_acceleration
+    execution_policy = "native"
+    if requested_acceleration == "turbo_fast" and requested_seconds > H3_TURBO_SAGE_MAX_SECONDS:
+        # The 4-step LoRA is trained for a 1344x768 short-video cell.  Long
+        # 362-frame runs must lower the canvas on a 24GB A5000, so use the
+        # compatible 8-step Turbo LoRA rather than pretend a downscaled 4-step
+        # model remains in-distribution.
+        acceleration = "turbo_balanced"
+        execution_policy = "turbo_fast_long_fallback_to_balanced"
     if acceleration == "turbo_fast":
         width, height = 1344, 768
+    if requested_seconds > H3_TURBO_SAGE_MAX_SECONDS and width * height > H3_LONG_VIDEO_MAX_PIXELS:
+        downscale = (H3_LONG_VIDEO_MAX_PIXELS / (width * height)) ** 0.5
+        width = max(32, int(width * downscale // 32) * 32)
+        height = max(32, int(height * downscale // 32) * 32)
+        execution_policy = (
+            "long_duration_adaptive_canvas"
+            if execution_policy == "native"
+            else f"{execution_policy}+adaptive_canvas"
+        )
     # H3 accepts the native 17k+5 frame grid.  The official 0.4MP draft
     # template is 73 frames, so do not artificially force all profiles to 124.
     frames = round(requested_seconds * H3_FPS)
@@ -1021,7 +1045,9 @@ def normalise_h3_request(
     )
     return {
         "profile": profile,
+        "requested_acceleration": requested_acceleration,
         "acceleration": acceleration,
+        "execution_policy": execution_policy,
         "engine": acceleration_config["engine"],
         "base_model": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "steps": acceleration_config["steps"],
@@ -1060,7 +1086,7 @@ def h3_profile_duration_update(profile: str, acceleration: str = "standard"):
         "minimum": limits["min_seconds"],
         "maximum": maximum,
         "label": f"视频时长（秒，{limits['min_seconds']}–{maximum}）",
-        "info": f"{limits['label']}；切换档位或加速模式会自动重置时长{mode_note}。",
+        "info": f"{limits['label']}；切换档位或加速模式会自动重置时长{mode_note}。15 秒高画幅会按 A5000 容量自动下调实际画布。",
     }
     # Gradio's update helper is available in the production runtime.  Keeping
     # the plain mapping fallback also supports compatible versions (and makes
@@ -1589,6 +1615,7 @@ def process_task(task: Task) -> None:
     outputs = run_workflow(
         workflow,
         timeout=timeout if timeout is not None else TASK_TIMEOUT,
+        submit_timeout=timeout if timeout is not None else None,
         stop_event=task.cancel_event,
         prompt_id=task.prompt_id or None,
         on_submitted=submitted,
@@ -2159,7 +2186,7 @@ def build_ui():
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
-                                info="所有模式支持最长 15 秒；Turbo 7–15 秒会自动采用稳健 attention 执行链；draft 固定 3 秒。" if H3_ENABLED else None,
+                                info="所有模式支持最长 15 秒；15 秒高画幅会自动下调实际画布，Turbo 7–15 秒采用稳健 attention；draft 固定 3 秒。" if H3_ENABLED else None,
                             )
                             profile3 = gr.Dropdown(
                                 label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -2173,7 +2200,7 @@ def build_ui():
                                     for key, config in H3_ACCELERATION_MODES.items()
                                 ],
                                 value="standard",
-                                info="所有模式支持最长 15 秒；Turbo 7–15 秒自动绕过长序列下不稳定的 Sage 融合核，避免 CUDA 非法访存。",
+                                info="所有模式支持最长 15 秒；Turbo 7–15 秒自动绕过长序列下不稳定的 Sage 融合核。4 步极速在长时会切换到兼容的 8 步 Turbo 路径。",
                                 visible=H3_ENABLED,
                             )
                         submit_btn3 = gr.Button("提交", variant="primary")
@@ -2209,7 +2236,7 @@ def build_ui():
                                 minimum=PRIMARY_VIDEO_SECONDS_MIN,
                                 maximum=PRIMARY_VIDEO_SECONDS_MAX,
                                 precision=0,
-                                info="所有模式支持最长 15 秒；Turbo 7–15 秒会自动采用稳健 attention 执行链；draft 固定 3 秒。" if H3_ENABLED else None,
+                                info="所有模式支持最长 15 秒；15 秒高画幅会自动下调实际画布，Turbo 7–15 秒采用稳健 attention；draft 固定 3 秒。" if H3_ENABLED else None,
                             )
                         profile4 = gr.Dropdown(
                             label="生成档位", choices=list(H3_PROFILES), value="preview",
@@ -2223,7 +2250,7 @@ def build_ui():
                                 for key, config in H3_ACCELERATION_MODES.items()
                             ],
                             value="standard",
-                            info="所有模式支持最长 15 秒；Turbo 7–15 秒自动使用稳健 attention。4 步极速仍要求 quality + 16:9 横版并统一生成 1344 × 768。",
+                            info="所有模式支持最长 15 秒；Turbo 7–15 秒自动使用稳健 attention，4 步极速会转兼容的 8 步 Turbo。短时 4 步仍要求 quality + 16:9 横版并生成 1344 × 768。",
                             visible=H3_ENABLED,
                         )
                     with gr.Column(scale=1):

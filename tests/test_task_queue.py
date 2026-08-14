@@ -369,6 +369,14 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(quality["requested_seconds"], 15)
         self.assertEqual(quality["frames"] % 17, 5)
 
+    def test_h3_long_landscape_uses_a5000_safe_adaptive_canvas(self):
+        quality = self.webui.normalise_h3_request("1920 × 1080", 15, "quality")
+        self.assertEqual((quality["width"], quality["height"]), (1152, 640))
+        self.assertLessEqual(
+            quality["width"] * quality["height"], self.webui.H3_LONG_VIDEO_MAX_PIXELS
+        )
+        self.assertEqual(quality["execution_policy"], "long_duration_adaptive_canvas")
+
     def test_h3_turbo_modes_allow_15_seconds_with_stable_attention(self):
         balanced = self.webui.normalise_h3_request(
             "1920 × 1080", 15, "quality", "turbo_balanced"
@@ -380,6 +388,11 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(fast["requested_seconds"], 15)
         self.assertEqual(balanced["attention_backend"], "pytorch-stable")
         self.assertEqual(fast["attention_backend"], "pytorch-stable")
+        self.assertEqual((balanced["width"], balanced["height"]), (1152, 640))
+        self.assertEqual(fast["requested_acceleration"], "turbo_fast")
+        self.assertEqual(fast["acceleration"], "turbo_balanced")
+        self.assertEqual(fast["steps"], 8)
+        self.assertIn("fallback_to_balanced", fast["execution_policy"])
 
         balanced["prompt"] = "long cinematic test"
         wf = self.webui.build_workflow_3("MiniMaxH3-文生视频", balanced)
