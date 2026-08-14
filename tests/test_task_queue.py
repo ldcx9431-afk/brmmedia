@@ -52,6 +52,7 @@ def _install_import_stubs() -> None:
     comfy.TASK_TIMEOUT = 3600
     comfy.H3_TASK_TIMEOUT = 14400
     comfy.BASE = "http://127.0.0.1:8188"
+    comfy.COMFY_ROOT = REPO_ROOT / "ubuntu-backend-deploy" / "ComfyUI"
     comfy.WORKFLOW_DIR = REPO_ROOT / "ubuntu-backend-deploy" / "workflows"
     comfy.upload_image = lambda *args, **kwargs: "mock-input"
     comfy.audio_duration = lambda *args, **kwargs: 0.0

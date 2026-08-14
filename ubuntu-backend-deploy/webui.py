@@ -1285,6 +1285,27 @@ def submit_workflow_4(
     return submit("MiniMaxH3-图生视频", args)
 
 
+def submit_workflow_3_ltx(prompt, size, seconds):
+    """Queue the retained LTX2.3 text-to-video workflow explicitly.
+
+    H3 is the production default, but LTX must remain a first-class choice
+    rather than only becoming visible during an H3 rollback.
+    """
+    if not (prompt or "").strip():
+        raise gr.Error("请输入视频提示词")
+    return submit("LTX23-文生视频", {"prompt": prompt, "seconds": seconds, "size": size})
+
+
+def submit_workflow_4_ltx(prompt, input_filename, seconds):
+    """Queue the retained LTX2.3 image-to-video workflow explicitly."""
+    if not (prompt or "").strip() or not input_filename:
+        raise gr.Error("请输入提示词并上传源图片")
+    return submit(
+        "LTX23-图生视频",
+        {"prompt": prompt, "seconds": seconds, "input_filename": input_filename},
+    )
+
+
 def submit_workflow_5(prompt, input_filename1, input_filename2, seconds):
     # 工作流 JSON 的文件名(不含 .json)
     if not (prompt or "").strip() or not input_filename1 or not input_filename2:
@@ -1404,6 +1425,16 @@ def api_submit_workflow_4_h3(
     if VIDEO_ENGINE != "h3":
         raise gr.Error("MiniMax H3 尚未启用；当前视频引擎为 LTX2.3")
     return submit_workflow_4(prompt, input_filename, seconds, profile, size, acceleration)
+
+
+def api_submit_workflow_3_ltx(prompt: str, size: str, seconds: int) -> dict:
+    """Stable public endpoint for the explicitly selected LTX2.3 T2V path."""
+    return submit_workflow_3_ltx(prompt, size, seconds)
+
+
+def api_submit_workflow_4_ltx(prompt: str, input_filename: str, seconds: int) -> dict:
+    """Stable public endpoint for the explicitly selected LTX2.3 I2V path."""
+    return submit_workflow_4_ltx(prompt, input_filename, seconds)
 
 
 def api_submit_workflow_5(
@@ -2445,6 +2476,64 @@ def build_ui():
                 )
 
             # ========== Tab 5 ==========
+            # Keep the original LTX routes visible even while H3 is the
+            # default engine.  They share the global media queue, so this does
+            # not add A5000 concurrency or change H3's resource policy.
+            with gr.Tab("文生视频 LTX2.3"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        ltx_prompt3 = gr.Textbox(
+                            label="提示词", autofocus=True,
+                            value="雨后街道反射霓虹灯，电影感镜头缓慢推进", lines=3,
+                        )
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            ltx_size3 = gr.Dropdown(
+                                label="视频尺寸", choices=output_size, value="768 × 1024",
+                                info="LTX2.3 按此尺寸生成；与 H3 档位和加速模式互不混用。",
+                            )
+                            ltx_seconds3 = gr.Number(
+                                value=5, label="视频时长（秒）", minimum=2, maximum=360, precision=0,
+                            )
+                        ltx_submit_btn3 = gr.Button("提交 LTX2.3 文生视频", variant="primary")
+                ltx_submit_btn3.click(
+                    fn=submit_workflow_3_ltx,
+                    inputs=[ltx_prompt3, ltx_size3, ltx_seconds3],
+                    api_name="ui_submit_workflow_3_ltx",
+                    api_visibility="private",
+                )
+
+            # ========== Tab 6 ==========
+            with gr.Tab("图生视频 LTX2.3"):
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=1):
+                        ltx_prompt4 = gr.Textbox(
+                            label="提示词", autofocus=True, placeholder="输入运动与镜头提示词",
+                            lines=10, max_lines=10,
+                        )
+                        ltx_seconds4 = gr.Number(
+                            value=5, label="视频时长（秒）", minimum=2, maximum=360, precision=0,
+                            info="LTX2.3 图生视频沿用源图画幅；如需控制尺寸，请预先裁剪源图。",
+                        )
+                    with gr.Column(scale=1):
+                        ltx_reference_image4 = gr.Image(type="filepath", height=400)
+                        ltx_uploaded_name4 = gr.State("")
+                        ltx_submit_btn4 = gr.Button("提交 LTX2.3 图生视频", variant="primary")
+                ltx_reference_image4.upload(
+                    fn=on_ref_upload, inputs=ltx_reference_image4, outputs=ltx_uploaded_name4,
+                    api_visibility="private",
+                )
+                ltx_reference_image4.clear(
+                    fn=lambda: "", outputs=ltx_uploaded_name4, api_visibility="private",
+                )
+                ltx_submit_btn4.click(
+                    fn=submit_workflow_4_ltx,
+                    inputs=[ltx_prompt4, ltx_uploaded_name4, ltx_seconds4],
+                    api_name="ui_submit_workflow_4_ltx",
+                    api_visibility="private",
+                )
+
+            # ========== Tab 7 ==========
             with gr.Tab("首尾帧视频LTX2.3"):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
@@ -2477,7 +2566,7 @@ def build_ui():
                     api_visibility="private",
                 )
 
-            # ========== Tab 6 ==========
+            # ========== Tab 8 ==========
             with gr.Tab("数字人-语音驱动LTX2.3"):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
@@ -2744,6 +2833,8 @@ def build_ui():
         gr.api(api_submit_workflow_4, api_name="submit_workflow_4")
         gr.api(api_submit_workflow_3_h3, api_name="submit_workflow_3_h3")
         gr.api(api_submit_workflow_4_h3, api_name="submit_workflow_4_h3")
+        gr.api(api_submit_workflow_3_ltx, api_name="submit_workflow_3_ltx")
+        gr.api(api_submit_workflow_4_ltx, api_name="submit_workflow_4_ltx")
         gr.api(api_submit_workflow_5, api_name="submit_workflow_5")
         gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
         gr.api(api_submit_workflow_7, api_name="submit_workflow_7")

@@ -225,6 +225,15 @@ class LanApiContractTests(unittest.TestCase):
         )
         self.assertEqual(text_schema["size"]["enum_source"], "size_values")
         self.assertEqual(image_schema["image_asset_id"]["asset_kind"], "image")
+        self.assertEqual(
+            capabilities["workflows"]["ltx-text-to-video"]["options"]["engine"],
+            "LTX2.3",
+        )
+        self.assertEqual(
+            capabilities["workflows"]["ltx-image-to-video"]["options"]["params"]
+            ["image_asset_id"]["asset_kind"],
+            "image",
+        )
         self.assertEqual(capabilities["video_engine"], {"active": "h3", "h3_available": True})
 
     def test_ltx_capabilities_do_not_claim_h3_before_activation(self) -> None:
@@ -237,7 +246,9 @@ class LanApiContractTests(unittest.TestCase):
         text_video = capabilities["workflows"]["text-to-video"]
         self.assertEqual(capabilities["video_engine"], {"active": "ltx23", "h3_available": False})
         self.assertEqual(text_video["options"]["engine"], "LTX2.3")
-        self.assertNotIn("params", text_video["options"])
+        self.assertIn("params", text_video["options"])
+        self.assertIn("ltx-text-to-video", capabilities["workflows"])
+        self.assertIn("ltx-image-to-video", capabilities["workflows"])
 
     def test_h3_acceptance_follows_task_artifact_contract(self) -> None:
         text = H3_ACCEPTANCE.read_text(encoding="utf-8")

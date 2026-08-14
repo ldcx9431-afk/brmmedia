@@ -123,6 +123,8 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | `image-edit` | `prompt`、`image_asset_id` | 图片编辑 |
 | `text-to-video` | `prompt` | MiniMax H3；`size` 表示画幅比例、`seconds`、`profile`（`draft` / `preview` 默认 / `quality`）、`acceleration`（`standard` 默认 / `turbo_balanced` / `turbo_fast`） |
 | `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3；其余视频参数同文生视频 |
+| `ltx-text-to-video` | `prompt` | 原 LTX2.3 文生视频；`size` 为实际输出尺寸，`seconds`（2–360） |
+| `ltx-image-to-video` | `prompt`、`image_asset_id` | 原 LTX2.3 图生视频；`seconds`（2–360），沿用源图画幅 |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | IndexTTS‑2.5：`language`（`zh/en/ja/es/ar`，默认 `zh`）、`speed`（0.5–2.0，默认 1.0）；旧 `temperature` 仍接受但已废弃且不影响 2.5 推理 |
@@ -179,6 +181,21 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
   -H 'Content-Type: application/json' \
   -d '{"workflow":"text-to-video","params":{"prompt":"雨后街道反射霓虹灯，电影感，环境声","size":"1920 × 1080","seconds":5,"profile":"preview","acceleration":"turbo_balanced"}}' \
+  "$BRM_API/tasks"
+```
+
+### LTX2.3 视频规则
+
+为便于按任务选择引擎，原 LTX2.3 文生视频、图生视频始终以独立 workflow 暴露：`ltx-text-to-video` 与 `ltx-image-to-video`。它们与 H3 共用 A5000 的全局媒体队列，不会并发抢占显存；`text-to-video`、`image-to-video` 两个既有 slug 仍默认指向当前 H3 路径，调用方不会被迫迁移。
+
+- LTX 文生视频的 `size` 是实际画布尺寸，可从 `/capabilities` 的 `size_values` 选择；`seconds` 范围为 `2–360`。
+- LTX 图生视频不额外缩放画布，使用上传图片的画幅；需要确定成片尺寸时，应在上传前裁剪源图。
+- LTX 不提供 H3 的 `profile` 或 `acceleration` 参数，也不承诺 H3 的同步原生音频行为；任务详情会记录实际工作流名称和产物。
+
+```bash
+curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"workflow":"ltx-text-to-video","params":{"prompt":"夜晚的城市街道，镜头缓慢向前推进","size":"1024 × 768","seconds":5}}' \
   "$BRM_API/tasks"
 ```
 

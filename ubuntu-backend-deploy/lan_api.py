@@ -108,6 +108,39 @@ H3_COMMON_PARAMS = {
     },
 }
 
+# H3 remains the legacy ``text-to-video`` / ``image-to-video`` default while
+# it is active.  Expose the retained LTX2.3 paths under explicit slugs so LAN
+# callers can choose an engine instead of having to change the global H3
+# switch (which would also hide the H3 UI).
+LTX_TEXT_TO_VIDEO_OPTIONS = {
+    "engine": "LTX2.3",
+    "availability": "active",
+    "seconds": {"minimum": 2, "maximum": 360},
+    "params": {
+        "prompt": {"type": "string", "required": True, "maximum_length": 12000},
+        "size": {
+            "type": "string", "required": False, "default": "768 × 1024",
+            "enum_source": "size_values",
+            "description": "Literal LTX2.3 output canvas, unlike H3's aspect-ratio selector.",
+        },
+        "seconds": {"type": "integer", "required": False, "default": 5, "minimum": 2, "maximum": 360},
+    },
+}
+LTX_IMAGE_TO_VIDEO_OPTIONS = {
+    "engine": "LTX2.3",
+    "availability": "active",
+    "seconds": {"minimum": 2, "maximum": 360},
+    "size_rule": "LTX2.3 image-to-video retains the uploaded source image canvas.",
+    "params": {
+        "prompt": {"type": "string", "required": True, "maximum_length": 12000},
+        "image_asset_id": {
+            "type": "asset_id", "required": True, "asset_kind": "image",
+            "description": "An image asset_id returned by POST /files?kind=image.",
+        },
+        "seconds": {"type": "integer", "required": False, "default": 5, "minimum": 2, "maximum": 360},
+    },
+}
+
 
 @dataclass(frozen=True)
 class WorkflowSpec:
@@ -395,6 +428,14 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
              **H3_COMMON_PARAMS,
          }},
     ),
+    "ltx-text-to-video": WorkflowSpec(
+        "submit_workflow_3_ltx", "LTX2.3 文生视频", {},
+        _normal_ltx_text_to_video, LTX_TEXT_TO_VIDEO_OPTIONS,
+    ),
+    "ltx-image-to-video": WorkflowSpec(
+        "submit_workflow_4_ltx", "LTX2.3 图生视频", {"image_asset_id": "image"},
+        _normal_ltx_image_to_video, LTX_IMAGE_TO_VIDEO_OPTIONS,
+    ),
     "first-last-frame-video": WorkflowSpec("submit_workflow_5", "LTX2.3 首尾帧视频", {"first_image_asset_id": "image", "last_image_asset_id": "image"}, _normal_first_last_frame),
     "talking-head": WorkflowSpec("submit_workflow_6", "LTX2.3 单图数字人-语音驱动", {"image_asset_id": "image", "audio_asset_id": "audio"}, _normal_talking_head),
     "voice-clone": WorkflowSpec(
@@ -458,12 +499,12 @@ def _active_workflows() -> dict[str, WorkflowSpec]:
         workflows["text-to-video"] = WorkflowSpec(
             "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
             _normal_ltx_text_to_video,
-            {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+            LTX_TEXT_TO_VIDEO_OPTIONS,
         )
         workflows["image-to-video"] = WorkflowSpec(
             "submit_workflow_4", "LTX2.3 图生视频（H3 尚未启用）", {"image_asset_id": "image"},
             _normal_ltx_image_to_video,
-            {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+            LTX_IMAGE_TO_VIDEO_OPTIONS,
         )
     if _active_voice_engine() != "indextts25":
         workflows["voice-clone"] = INDEXTTS2_WORKFLOW
