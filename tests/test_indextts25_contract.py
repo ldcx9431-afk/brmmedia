@@ -34,6 +34,8 @@ class IndexTTS25ContractTests(unittest.TestCase):
         self.assertIn("UPSTREAM_LOCK_SHA256=\"2bcec9c6bd4d20d733bdc0537a2f52b39fd67a2e88ad2308836f56fd72da1283\"", prepare)
         self.assertIn("MIRROR_LOCK_SHA256=\"3bfe618597eac0eee4aeb921f987adb9bb9583ec008aded85c92ff64050fd9b9\"", prepare)
         self.assertIn("UNIDIC_SHA256=\"db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245\"", prepare)
+        self.assertIn("TORCH_SHA256=\"039b9dcdd6bdbaa10a8a5cd6be22c4cb3e3589a341e5f904cbb571ca28f55bed\"", prepare)
+        self.assertIn("missing verified PyTorch CUDA artifact", prepare)
         self.assertIn('"$UV_BIN" pip install --python "$VENV_PYTHON" --no-deps "$UNIDIC_ARCHIVE"', prepare)
         self.assertIn("/mnt/d/model/IndexTTS-2.5", prepare)
         self.assertIn("rsync -a --checksum", prepare)

@@ -100,9 +100,14 @@ fi
 # Keep a checksum-verified copy in the isolated candidate cache so an
 # unreliable PyPI connection cannot repeatedly corrupt its archive mid-build.
 ARTIFACT_DIR="$RUNTIME_ROOT/artifacts"
+TORCH_ARCHIVE="$ARTIFACT_DIR/torch-2.8.0+cu128-cp311-cp311-manylinux_2_28_x86_64.whl"
+TORCH_SHA256="039b9dcdd6bdbaa10a8a5cd6be22c4cb3e3589a341e5f904cbb571ca28f55bed"
 UNIDIC_ARCHIVE="$ARTIFACT_DIR/unidic-lite-1.0.8.tar.gz"
 UNIDIC_SHA256="db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245"
 install -d -m 0750 "$ARTIFACT_DIR"
+[[ -f "$TORCH_ARCHIVE" ]] || fail "missing verified PyTorch CUDA artifact: $TORCH_ARCHIVE"
+[[ "$(sha256sum "$TORCH_ARCHIVE" | awk '{print $1}')" == "$TORCH_SHA256" ]] || fail "PyTorch CUDA artifact SHA-256 mismatch"
+"$UV_BIN" pip install --python "$VENV_PYTHON" --no-deps "$TORCH_ARCHIVE"
 if [[ ! -f "$UNIDIC_ARCHIVE" ]] || [[ "$(sha256sum "$UNIDIC_ARCHIVE" | awk '{print $1}')" != "$UNIDIC_SHA256" ]]; then
   rm -f "$UNIDIC_ARCHIVE"
   curl --fail --location --retry 12 --retry-all-errors --connect-timeout 30 \
