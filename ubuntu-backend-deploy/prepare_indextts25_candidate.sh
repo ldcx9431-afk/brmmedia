@@ -76,7 +76,8 @@ VENV_PYTHON="$VENV_ROOT/bin/python"
 # this private venv.  Do not request the optional DeepSpeed extra.
 (
   cd "$SOURCE_ROOT"
-  UV_PROJECT_ENVIRONMENT="$VENV_ROOT" uv sync --locked --python "$VENV_PYTHON"
+  UV_NO_MANAGED_PYTHON=1 UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
+    uv sync --locked --python "$VENV_PYTHON"
 )
 uv pip install --python "$VENV_PYTHON" "fastapi>=0.115,<1" "uvicorn[standard]>=0.30,<1" "python-multipart>=0.0.20,<1"
 
