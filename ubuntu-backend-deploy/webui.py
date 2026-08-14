@@ -40,7 +40,7 @@ import requests
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
     start_comfyui, stop_comfyui, is_alive, run_workflow,
-    get_view_file, interrupt, BASE, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
+    get_view_file, interrupt, BASE, COMFY_ROOT, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
 )
 
 
@@ -1153,7 +1153,7 @@ def extract_result(outputs: dict, task: Task) -> list:
 
 def _indextts25_reference_path(filename: str) -> Path:
     """Resolve a ComfyUI-uploaded reference audio without accepting paths."""
-    input_root = (BASE / "input").resolve()
+    input_root = (COMFY_ROOT / "input").resolve()
     candidate = (input_root / Path(str(filename)).name).resolve()
     try:
         candidate.relative_to(input_root)
