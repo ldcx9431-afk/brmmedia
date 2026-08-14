@@ -21,6 +21,10 @@ PYTHON="$INDEXTTS25_VENV/bin/python"
 [[ -f "$INDEXTTS25_MODEL_DIR/config.yaml" ]] || { echo "[ERROR] Missing IndexTTS-2.5 model/config" >&2; exit 1; }
 
 export PYTHONPATH="$SCRIPT_DIR:$INDEXTTS25_SOURCE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+# PyTorch's JIT extension loader invokes the ``ninja`` executable rather than
+# importing its Python module.  The candidate service is launched by systemd,
+# whose PATH does not include the isolated venv by default.
+export PATH="$(dirname "$PYTHON"):$PATH"
 export PYTHONUNBUFFERED=1
 export CUDA_VISIBLE_DEVICES="${INDEXTTS25_CUDA_VISIBLE_DEVICES:-0}"
 export INDEXTTS25_RUN_DIR="${INDEXTTS25_RUN_DIR:-$SCRIPT_DIR/runtime-locks/indextts25-v2.5/run}"
