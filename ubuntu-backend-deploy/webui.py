@@ -63,6 +63,9 @@ if VIDEO_ENGINE not in {"ltx23", "h3"}:
 # During staging or rollback the same two tabs continue to work through LTX,
 # but must not present H3 profiles/audio promises that are unavailable.
 H3_ENABLED = VIDEO_ENGINE == "h3"
+VOICE_ENGINE = os.environ.get("BRMMEDIA_VOICE_ENGINE", "indextts2").strip().lower()
+if VOICE_ENGINE not in {"indextts2", "indextts25"}:
+    raise RuntimeError("BRMMEDIA_VOICE_ENGINE must be indextts2 or indextts25")
 PRIMARY_T2V_TAB_LABEL = "MiniMax H3 文生视频" if H3_ENABLED else "文生视频 LTX2.3（回退）"
 PRIMARY_I2V_TAB_LABEL = "MiniMax H3 图生视频" if H3_ENABLED else "图生视频 LTX2.3（回退）"
 PRIMARY_VIDEO_SECONDS_MIN = 3 if H3_ENABLED else 2
@@ -292,7 +295,7 @@ class TaskQueue:
             "last_progress_ts": task.last_progress_ts,
             "effective_settings": {
                 key: task.args[key]
-                for key in H3_EFFECTIVE_SETTING_KEYS
+                for key in TASK_EFFECTIVE_SETTING_KEYS
                 if key in task.args
             },
         }
@@ -333,7 +336,7 @@ class TaskQueue:
                 args={
                     key: value
                     for key, value in saved_settings.items()
-                    if key in H3_EFFECTIVE_SETTING_KEYS
+                    if key in TASK_EFFECTIVE_SETTING_KEYS
                 },
                 status=status,
                 submit_ts=float(record.get("submit_ts", 0.0)),
@@ -530,7 +533,7 @@ class TaskQueue:
                 },
                 "effective_settings": {
                     key: task.args[key]
-                    for key in H3_EFFECTIVE_SETTING_KEYS
+                    for key in TASK_EFFECTIVE_SETTING_KEYS
                     if key in task.args
                 },
             }
@@ -967,6 +970,21 @@ H3_EFFECTIVE_SETTING_KEYS = (
     "requested_size", "requested_seconds", "width", "height", "frames",
     "effective_seconds",
 )
+VOICE_CLONE_EFFECTIVE_SETTING_KEYS = (
+    "engine", "language", "speed", "output_format", "temperature_deprecated",
+)
+TASK_EFFECTIVE_SETTING_KEYS = H3_EFFECTIVE_SETTING_KEYS + VOICE_CLONE_EFFECTIVE_SETTING_KEYS
+
+INDEXTTS25_SERVICE_URL = os.environ.get(
+    "BRMMEDIA_INDEXTTS25_URL", "http://127.0.0.1:9205"
+).rstrip("/")
+INDEXTTS25_TIMEOUT_SECONDS = max(
+    30, int(os.environ.get("BRMMEDIA_INDEXTTS25_TIMEOUT_SECONDS", "1800"))
+)
+INDEXTTS25_MAX_OUTPUT_BYTES = max(
+    1_000_000, int(os.environ.get("BRMMEDIA_INDEXTTS25_MAX_OUTPUT_BYTES", str(256 * 1024 * 1024)))
+)
+INDEXTTS25_LANGUAGES = ("zh", "en", "ja", "es", "ar")
 
 
 def normalise_h3_request(
@@ -1133,6 +1151,88 @@ def extract_result(outputs: dict, task: Task) -> list:
     return saved
 
 
+def _indextts25_reference_path(filename: str) -> Path:
+    """Resolve a ComfyUI-uploaded reference audio without accepting paths."""
+    input_root = (BASE / "input").resolve()
+    candidate = (input_root / Path(str(filename)).name).resolve()
+    try:
+        candidate.relative_to(input_root)
+    except ValueError as exc:
+        raise RuntimeError("IndexTTS-2.5 参考音频路径无效") from exc
+    if not candidate.is_file():
+        raise RuntimeError("IndexTTS-2.5 找不到已上传的参考音频，请重新上传")
+    return candidate
+
+
+def run_indextts25(task: Task) -> list[str]:
+    """Invoke the isolated loopback IndexTTS-2.5 service and produce MP3.
+
+    The service is deliberately outside ComfyUI's Python 3.12 process.  This
+    prevents IndexTTS-2.5's Python 3.11/Torch runtime from changing media
+    workflows, while TaskQueue keeps the existing single-A5000 serialization.
+    """
+    prompt = str(task.args.get("prompt", "")).strip()
+    language = str(task.args.get("language", "zh")).strip().lower()
+    try:
+        speed = float(task.args.get("speed", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("IndexTTS-2.5 语速必须是数字") from exc
+    if language not in INDEXTTS25_LANGUAGES:
+        raise RuntimeError("IndexTTS-2.5 仅支持 zh、en、ja、es、ar")
+    if not 0.5 <= speed <= 2.0:
+        raise RuntimeError("IndexTTS-2.5 语速必须在 0.5–2.0 之间")
+    if not prompt:
+        raise RuntimeError("IndexTTS-2.5 合成文本不能为空")
+    reference = _indextts25_reference_path(task.args.get("ref_audio", ""))
+    task_queue.update_execution(task, {"stage": "checking_indextts25"})
+    try:
+        health = requests.get(f"{INDEXTTS25_SERVICE_URL}/health", timeout=(5, 10))
+    except requests.RequestException as exc:
+        raise RuntimeError("IndexTTS-2.5 候选服务不可用，未回退到旧版。请联系管理员检查服务状态。") from exc
+    if health.status_code != 200:
+        raise RuntimeError(f"IndexTTS-2.5 健康检查失败（HTTP {health.status_code}）")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    wav_path = OUTPUT_DIR / f".{task.id}.indextts25.wav"
+    mp3_path = OUTPUT_DIR / f"{task.name}.mp3"
+    task_queue.update_execution(task, {"stage": "synthesizing_indextts25"})
+    try:
+        with reference.open("rb") as audio_file:
+            response = requests.post(
+                f"{INDEXTTS25_SERVICE_URL}/v1/voice-clone",
+                data={"text": prompt, "language": language, "speed": f"{speed:.3f}"},
+                files={"reference_audio": (reference.name, audio_file, "application/octet-stream")},
+                timeout=(10, INDEXTTS25_TIMEOUT_SECONDS),
+            )
+        if response.status_code != 200:
+            detail = response.text[:500].replace("\n", " ")
+            raise RuntimeError(f"IndexTTS-2.5 合成失败（HTTP {response.status_code}）：{detail}")
+        if len(response.content) > INDEXTTS25_MAX_OUTPUT_BYTES:
+            raise RuntimeError("IndexTTS-2.5 返回音频过大，已拒绝保存")
+        wav_path.write_bytes(response.content)
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("未安装 ffmpeg，无法将 IndexTTS-2.5 WAV 转换为 MP3")
+        task_queue.update_execution(task, {"stage": "encoding_mp3"})
+        conversion = subprocess.run(
+            [ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", str(wav_path),
+             "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3_path)],
+            text=True, capture_output=True, timeout=180, check=False,
+        )
+        if conversion.returncode != 0 or not mp3_path.is_file():
+            raise RuntimeError(f"IndexTTS-2.5 MP3 转换失败：{conversion.stderr[-500:]}")
+    finally:
+        wav_path.unlink(missing_ok=True)
+    task.args.update({
+        "engine": "IndexTTS-2.5",
+        "language": language,
+        "speed": speed,
+        "output_format": "MP3（源服务输出 22.05kHz WAV）",
+        "temperature_deprecated": "已接收但在 IndexTTS-2.5 中不参与推理",
+    })
+    return [str(mp3_path)]
+
+
 # ---------------------------------------------------------------------------
 # 提交工作流
 # ---------------------------------------------------------------------------
@@ -1209,16 +1309,38 @@ def submit_workflow_6(prompt, image, audio, uploaded_dur, size):
     )
 
 
-def submit_workflow_7(prompt, ref_audio, temperature=0.8):
-    # 语音克隆 / TTS(IndexTTS2)。
+def submit_workflow_7(prompt, ref_audio, temperature=0.8, language="zh", speed=1.0):
+    """Queue the isolated IndexTTS-2.5 voice-clone service.
+
+    ``temperature`` remains in the public signature for existing LAN callers,
+    but IndexTTS-2.5 uses native language and duration/pace control instead.
+    """
     if not prompt or not prompt.strip():
         raise gr.Error("请输入要合成的文本")
     if not ref_audio:
         raise gr.Error("请上传参考音频(克隆音色来源)")
-    return submit("TTS-语音克隆", {
+    if VOICE_ENGINE == "indextts2":
+        # Candidate code can be released while the historical ComfyUI workflow
+        # remains the active production route until human A/B acceptance.
+        return submit("TTS-语音克隆", {
+            "prompt": prompt, "ref_audio": ref_audio, "temperature": temperature,
+            "engine": "IndexTTS-2（回退）",
+        })
+    language = str(language or "zh").lower()
+    if language not in INDEXTTS25_LANGUAGES:
+        raise gr.Error("语言仅支持中文、英语、日语、西语或阿语")
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        raise gr.Error("语速必须是 0.5–2.0 的数字") from None
+    if not 0.5 <= speed <= 2.0:
+        raise gr.Error("语速仅支持 0.5–2.0")
+    return submit("IndexTTS-2.5-语音克隆", {
         "prompt": prompt,
         "ref_audio": ref_audio,
         "temperature": temperature,
+        "language": language,
+        "speed": speed,
     })
 
 
@@ -1289,8 +1411,16 @@ def api_submit_workflow_6(
     return submit_workflow_6(prompt, image, audio, duration, size)
 
 
-def api_submit_workflow_7(prompt: str, ref_audio: str, temperature: float) -> dict:
-    return submit_workflow_7(prompt, ref_audio, temperature)
+def api_submit_workflow_7(
+    prompt: str, ref_audio: str, temperature: float = 0.8,
+    language: str = "zh", speed: float = 1.0,
+) -> dict:
+    return submit_workflow_7(prompt, ref_audio, temperature, language, speed)
+
+
+def ui_submit_workflow_7(prompt: str, ref_audio: str, language: str, speed: float) -> dict:
+    """UI adapter: do not expose legacy temperature on the refreshed tab."""
+    return submit_workflow_7(prompt, ref_audio, 0.8, language, speed)
 
 
 def api_submit_workflow_8(
@@ -1577,7 +1707,9 @@ WORKFLOW_BUILDERS = {
     "LTX23-图生视频": (build_workflow_ltx4, "LTX2.3 图生视频（回退）"),
     "LTX23-首尾帧视频": (build_workflow_5, "首尾帧视频"),
     "LTX23-单图数字人-语音驱动": (build_workflow_6, "单图数字人-语音驱动"),
+    # Keep the existing ComfyUI workflow available for a deliberate rollback.
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),
+    "IndexTTS-2.5-语音克隆": (build_workflow_7, "语音克隆 IndexTTS-2.5"),
     "音乐生成": (build_workflow_8, "音乐生成"),
 }
 
@@ -1595,6 +1727,13 @@ H3_STAGE_BY_NODE = {
 
 def process_task(task: Task) -> None:
     """一次完整执行:构建工作流 -> 提交并等待 -> 解析并保存结果。供任务队列调用。"""
+    if task.workflow_name == "IndexTTS-2.5-语音克隆":
+        # Keep IndexTTS-2.5 out of ComfyUI's Python 3.12 runtime.  It still
+        # runs inside the same TaskQueue worker, so it cannot contend with H3
+        # or the other A5000 media workflows.
+        task.result = run_indextts25(task)
+        task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
+        return
     workflow = None
     if not task.prompt_id:
         builder = WORKFLOW_BUILDERS.get(task.workflow_name)
@@ -2367,31 +2506,45 @@ def build_ui():
                 )
 
             # ========== Tab 7 ==========
-            with gr.Tab("语音克隆IndexTTS2"):
+            with gr.Tab("语音克隆 IndexTTS-2.5" if VOICE_ENGINE == "indextts25" else "语音克隆 IndexTTS-2（回退）"):
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt7 = gr.Textbox(label="合成文本", autofocus=True, placeholder="输入要合成的文本",
                                              value="你好，这是一段语音克隆测试。", lines=8, max_lines=12)
                     with gr.Column(scale=1):
-                        # 参考音频:用 on_audio_upload 复用上传(它走 /upload/image 到 input 目录)
-                        # 同时返回 ComfyUI 文件名 + 时长,这里只需文件名
-                        reference_audio7 = gr.Audio(label="参考音频(克隆音色来源,建议10-30秒清晰人声)",
+                        reference_audio7 = gr.Audio(label="参考音频（克隆音色来源，建议 10–30 秒清晰人声）",
                                                     type="filepath")
-                        uploaded_name7   = gr.State("")   # ComfyUI 文件名
-                        uploaded_dur7    = gr.State(0.0)  # 时长(本工作流用不到,但 on_audio_upload 返回两个值)
-                        temperature7     = gr.Slider(0.1, 1.5, value=0.8, step=0.05,
-                                                     label="采样温度(越高越多样,越低越稳定)")
+                        uploaded_name7 = gr.State("")
+                        uploaded_dur7 = gr.State(0.0)
+                        if VOICE_ENGINE == "indextts25":
+                            language7 = gr.Dropdown(
+                                choices=[("中文", "zh"), ("English", "en"), ("日本語", "ja"),
+                                         ("Español", "es"), ("العربية", "ar")],
+                                value="zh", label="语言",
+                            )
+                            speed7 = gr.Slider(0.5, 2.0, value=1.0, step=0.05,
+                                               label="原生语速（1.0 为正常）")
+                            gr.Markdown("IndexTTS‑2.5 使用语言与原生语速控制；旧 API 的 `temperature` 参数仍可传入，但不会影响本次推理。")
+                        else:
+                            temperature7 = gr.Slider(0.1, 1.5, value=0.8, step=0.05,
+                                                     label="采样温度（IndexTTS‑2 回退模式）")
                         submit_btn7 = gr.Button("提交", variant="primary")
                 reference_audio7.upload(fn=on_audio_upload, inputs=reference_audio7,
                                         outputs=[uploaded_name7, uploaded_dur7], api_visibility="private")
                 reference_audio7.clear(fn=lambda: ("", 0.0), outputs=[uploaded_name7, uploaded_dur7],
                                        api_visibility="private")
-                submit_btn7.click(
-                    fn=submit_workflow_7,
-                    inputs=[prompt7, uploaded_name7, temperature7],
-                    api_name="ui_submit_workflow_7",
-                    api_visibility="private",
-                )
+                if VOICE_ENGINE == "indextts25":
+                    submit_btn7.click(
+                        fn=ui_submit_workflow_7,
+                        inputs=[prompt7, uploaded_name7, language7, speed7],
+                        api_name="ui_submit_workflow_7", api_visibility="private",
+                    )
+                else:
+                    submit_btn7.click(
+                        fn=submit_workflow_7,
+                        inputs=[prompt7, uploaded_name7, temperature7],
+                        api_name="ui_submit_workflow_7", api_visibility="private",
+                    )
 
             # ========== Tab 8 ==========
             with gr.Tab("音乐生成ACE-Step 1.5"):

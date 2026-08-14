@@ -49,6 +49,7 @@ SIZE_VALUES = [
     "2560 × 1440", "1440 × 2560", "3840 × 2160", "2160 × 3840",
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
+VOICE_CLONE_LANGUAGE_VALUES = ["zh", "en", "ja", "es", "ar"]
 MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
 H3_PROFILE_VALUES = ["draft", "preview", "quality"]
 H3_ACCELERATION_VALUES = ["standard", "turbo_balanced", "turbo_fast"]
@@ -135,7 +136,7 @@ class TaskSubmission(BaseModel):
 
 app = FastAPI(
     title="BRMMedia LAN API",
-    version="1.2.0",
+    version="1.3.0",
     description="Authenticated LAN automation API for BRMMedia generation workflows.",
     openapi_url=f"{API_PREFIX}/openapi.json",
     docs_url=f"{API_PREFIX}/docs",
@@ -344,7 +345,12 @@ def _normal_voice_clone(params: dict[str, Any], assets: dict[str, AssetRecord]) 
     audio = _asset(params, assets, "ref_audio_asset_id", "audio")
     return [
         _trim_text(params.get("prompt"), "prompt"), audio.filename,
+        # Retain this positional value for existing Gradio/API callers.  The
+        # IndexTTS-2.5 submitter records it as deprecated and deliberately
+        # ignores it in inference.
         _number(params.get("temperature", 0.8), "temperature", minimum=0, maximum=1.5),
+        _choice(params.get("language"), "language", VOICE_CLONE_LANGUAGE_VALUES, "zh"),
+        _number(params.get("speed", 1.0), "speed", minimum=0.5, maximum=2.0),
     ]
 
 
@@ -391,45 +397,76 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
     ),
     "first-last-frame-video": WorkflowSpec("submit_workflow_5", "LTX2.3 首尾帧视频", {"first_image_asset_id": "image", "last_image_asset_id": "image"}, _normal_first_last_frame),
     "talking-head": WorkflowSpec("submit_workflow_6", "LTX2.3 单图数字人-语音驱动", {"image_asset_id": "image", "audio_asset_id": "audio"}, _normal_talking_head),
-    "voice-clone": WorkflowSpec("submit_workflow_7", "IndexTTS2 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone),
+    "voice-clone": WorkflowSpec(
+        "submit_workflow_7", "IndexTTS-2.5 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone,
+        {"engine": "IndexTTS-2.5", "service_boundary": "127.0.0.1 only; routed through the global A5000 media queue",
+         "output": {"service_format": "WAV", "sample_rate_hz": 22050, "workspace_format": "MP3"},
+         "languages": VOICE_CLONE_LANGUAGE_VALUES,
+         "params": {
+             "prompt": {"type": "string", "required": True, "maximum_length": 12000},
+             "ref_audio_asset_id": {"type": "asset_id", "required": True, "asset_kind": "audio"},
+             "language": {"type": "string", "required": False, "default": "zh", "enum": VOICE_CLONE_LANGUAGE_VALUES,
+                          "description": "Synthesis language for IndexTTS-2.5."},
+             "speed": {"type": "number", "required": False, "default": 1.0, "minimum": 0.5, "maximum": 2.0,
+                       "description": "Native speech speed; 1.0 is normal."},
+             "temperature": {"type": "number", "required": False, "default": 0.8, "minimum": 0, "maximum": 1.5,
+                             "deprecated": True, "description": "Accepted for IndexTTS-2 compatibility; ignored by IndexTTS-2.5."},
+         }},
+    ),
     "music-generate": WorkflowSpec("submit_workflow_8", "ACE-Step 1.5 音乐生成", {}, _normal_music),
 }
 
+INDEXTTS2_WORKFLOW = WorkflowSpec(
+    "submit_workflow_7", "IndexTTS-2 语音克隆（回退）", {"ref_audio_asset_id": "audio"}, _normal_voice_clone,
+    {"engine": "IndexTTS-2", "availability": "active", "rollback": True,
+     "params": {"temperature": {"type": "number", "required": False, "default": 0.8,
+                                 "minimum": 0, "maximum": 1.5}}},
+)
 
-def _active_video_engine() -> str:
-    """Read the candidate backend's active engine without caching its dotenv.
+
+def _active_env_value(name: str, default: str) -> str:
+    """Read a backend engine toggle without caching its dotenv.
 
     The LAN API is started before H3 activation and remains running while the
     activation script updates the candidate `.env`; reading per request keeps
     capability discovery truthful throughout that transition.
     """
-    override = os.environ.get("BRMMEDIA_VIDEO_ENGINE")
+    override = os.environ.get(name)
     if override:
         return override.strip().lower()
     try:
         for line in (BASE_DIR / ".env").read_text(encoding="utf-8").splitlines():
-            if line.startswith("BRMMEDIA_VIDEO_ENGINE="):
+            if line.startswith(f"{name}="):
                 return line.split("=", 1)[1].strip().strip('"').lower()
     except OSError:
         pass
-    return "ltx23"
+    return default
+
+
+def _active_video_engine() -> str:
+    return _active_env_value("BRMMEDIA_VIDEO_ENGINE", "ltx23")
+
+
+def _active_voice_engine() -> str:
+    return _active_env_value("BRMMEDIA_VOICE_ENGINE", "indextts2")
 
 
 def _active_workflows() -> dict[str, WorkflowSpec]:
     """Keep stable REST slugs while advertising the engine that can run now."""
-    if _active_video_engine() == "h3":
-        return WORKFLOWS
     workflows = dict(WORKFLOWS)
-    workflows["text-to-video"] = WorkflowSpec(
-        "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
-        _normal_ltx_text_to_video,
-        {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
-    )
-    workflows["image-to-video"] = WorkflowSpec(
-        "submit_workflow_4", "LTX2.3 图生视频（H3 尚未启用）", {"image_asset_id": "image"},
-        _normal_ltx_image_to_video,
-        {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
-    )
+    if _active_video_engine() != "h3":
+        workflows["text-to-video"] = WorkflowSpec(
+            "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
+            _normal_ltx_text_to_video,
+            {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+        )
+        workflows["image-to-video"] = WorkflowSpec(
+            "submit_workflow_4", "LTX2.3 图生视频（H3 尚未启用）", {"image_asset_id": "image"},
+            _normal_ltx_image_to_video,
+            {"engine": "LTX2.3", "availability": "active", "seconds": {"minimum": 2, "maximum": 360}},
+        )
+    if _active_voice_engine() != "indextts25":
+        workflows["voice-clone"] = INDEXTTS2_WORKFLOW
     return workflows
 
 

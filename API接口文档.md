@@ -11,7 +11,7 @@
 | REST API 根路径 | `http://<Windows-LAN-IP>/api/v1` |
 | OpenAPI | `GET /api/v1/openapi.json`；交互文档 `GET /api/v1/docs` |
 | 认证 | Nginx HTTP Basic Auth；账号密码只保存在私有 `DEPLOYMENT.md` 或密码管理器，不进入 Git、代码与命令历史 |
-| 内部服务 | Gradio `9000`、ComfyUI `8188`、LAN API `9100`、Qwen `8000` 都只监听 WSL 回环地址，不能直接从局域网访问 |
+| 内部服务 | Gradio `9000`、ComfyUI `8188`、LAN API `9100`、IndexTTS‑2.5 `9205`、Qwen `8000` 都只监听 WSL 回环地址，不能直接从局域网访问 |
 
 Windows 使用 DHCP 时，LAN IP 可能变化。请以服务器物理网卡的 `ipconfig` IPv4 为准，或在路由器中为其设置 DHCP 固定租约；不要在客户端代码中写死旧地址。
 
@@ -125,7 +125,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | `image-to-video` | `prompt`、`image_asset_id` | MiniMax H3；其余视频参数同文生视频 |
 | `first-last-frame-video` | `prompt`、`first_image_asset_id`、`last_image_asset_id` | `seconds`（2–360） |
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
-| `voice-clone` | `prompt`、`ref_audio_asset_id` | `temperature`（0–1.5，默认 0.8） |
+| `voice-clone` | `prompt`、`ref_audio_asset_id` | IndexTTS‑2.5：`language`（`zh/en/ja/es/ar`，默认 `zh`）、`speed`（0.5–2.0，默认 1.0）；旧 `temperature` 仍接受但已废弃且不影响 2.5 推理 |
 | `music-generate` | `tags` | `lyrics`、`duration`（1–600）、`bpm`（30–300）、`language`、`model`（仅限 `/capabilities` 当前列出的已安装权重） |
 
 例如，图片编辑使用上传得到的引用：
@@ -138,6 +138,25 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 ```
 
 非法参数、类型不匹配的素材引用和过期素材均返回 `422`；工作台或 ComfyUI 不可用返回 `503`；文件上传到 ComfyUI 失败返回 `502`。
+
+### IndexTTS‑2.5 语音克隆规则
+
+当部署配置为 `BRMMEDIA_VOICE_ENGINE=indextts25` 时，`voice-clone` 由独立 Python 3.11 / CUDA 服务在 `127.0.0.1:9205` 合成，仍通过全局单媒体队列占用 A5000，因此不会与 H3、图片或音乐任务争抢显存。服务原生返回 **22.05 kHz WAV**，工作台和 REST 任务产物统一保存为可试听、可下载的 **MP3**。候选验收期间 `/capabilities` 会诚实显示仍在使用的 `IndexTTS-2（回退）`，不会把未切换的 2.5 伪装成现网能力。
+
+- `language` 只接受 `zh`、`en`、`ja`、`es`、`ar`；请让待合成文本与该值一致。
+- `speed` 是原生语速，范围 `0.5–2.0`，`1.0` 为正常速度。
+- `temperature` 仅为旧 IndexTTS‑2 调用兼容而保留。2.5 接收它但明确忽略，客户端应迁移到 `language` 与 `speed`。
+- 本轮不启用情绪文本、情绪向量或额外情绪参考音频，避免引入 QwenEmotion 模型及新的显存竞争。
+
+```bash
+AUDIO_JSON=$(curl --fail --user "$BRM_USER:$BRM_PASSWORD" -F 'file=@./speaker.wav' "$BRM_API/files?kind=audio")
+REF_ID=$(printf '%s' "$AUDIO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["asset_id"])')
+
+curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d "{\"workflow\":\"voice-clone\",\"params\":{\"prompt\":\"你好，这是 IndexTTS 二点五语音克隆测试。\",\"ref_audio_asset_id\":\"$REF_ID\",\"language\":\"zh\",\"speed\":1.0}}" \
+  "$BRM_API/tasks"
+```
 
 ### MiniMax H3 视频规则
 
