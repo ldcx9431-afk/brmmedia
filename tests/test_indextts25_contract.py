@@ -25,7 +25,7 @@ class IndexTTS25ContractTests(unittest.TestCase):
         prepare = PREPARE.read_text(encoding="utf-8")
         start = START.read_text(encoding="utf-8")
         self.assertIn("INDEXTTS25_PYTHON=3.11", lock)
-        self.assertIn("INDEXTTS25_SOURCE_COMMIT=39207d91c30899cad1e7b9eb678c241f678e55", lock)
+        self.assertIn("INDEXTTS25_SOURCE_COMMIT=39207d91c30899cad1e7c1b9eb678c241f678e55", lock)
         self.assertIn("INDEXTTS25_MODEL_REVISION=c39ce5ba981572cb187443877ff559dfb246ce63", lock)
         self.assertIn("INDEXTTS25_USE_DEEPSPEED=0", lock)
         self.assertIn("UV_PROJECT_ENVIRONMENT=\"$VENV_ROOT\" uv sync --locked", prepare)
