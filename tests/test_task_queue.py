@@ -39,6 +39,7 @@ def _install_import_stubs() -> None:
     gradio.Error = Error
     gradio.SelectData = SelectData
     gradio.Info = lambda *args, **kwargs: None
+    gradio.update = lambda **kwargs: kwargs
     gradio.set_static_paths = lambda **kwargs: None
     sys.modules["gradio"] = gradio
 
@@ -122,6 +123,39 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(saved["version"], 2)
         self.assertEqual(record["prompt_id"], "comfy-prompt-123")
         self.assertEqual(record["stage"], "sampling")
+
+    def test_queue_rendering_exposes_live_stage_steps_and_percent(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("render-progress-1", "<正在生成>", "MiniMaxH3-unit", {})
+        queue.enqueue(task)
+        with queue._lock:
+            queue._pending.clear()
+            task.status = self.webui.TaskStatus.RUNNING
+            task.start_ts = 1
+            queue._running[task.id] = task
+        queue.update_execution(task, {
+            "stage": "sampling",
+            "node_id": "14",
+            "current_step": 3,
+            "total_steps": 8,
+            "progress": 0.375,
+        })
+
+        previous_queue = self.webui.task_queue
+        self.webui.task_queue = queue
+        try:
+            summary, live_html, table_md, *_ = self.webui.render_queue()
+        finally:
+            self.webui.task_queue = previous_queue
+
+        self.assertIn("处理中 1", summary)
+        self.assertIn("正在采样生成", live_html)
+        self.assertIn("采样 3/8 步", live_html)
+        self.assertIn("38%", live_html)
+        self.assertIn("&lt;正在生成&gt;", live_html)
+        self.assertIn("实时进度", table_md)
+        self.assertIn("正在采样生成", table_md)
+        self.assertIn("3/8 步", table_md)
 
     def test_restart_reattaches_running_prompt_without_resubmitting(self):
         history = {

@@ -691,6 +691,70 @@ footer {
     margin: 0 auto !important;
     padding: 10px !important;
 }
+/* 任务实时进度：任务仍在运行时，在表格前方持续展示节点、采样步数和百分比。 */
+#q-live-progress {
+    margin: 0 0 12px;
+}
+#q-live-progress:empty {
+    display: none;
+}
+#q-live-progress .brm-live-progress-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 10px;
+}
+#q-live-progress .brm-live-progress-card {
+    padding: 13px 15px;
+    border: 1px solid #bfdbfe;
+    border-left: 4px solid #2563eb;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #f8fbff 0%, #eff6ff 100%);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+}
+#q-live-progress .brm-live-progress-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    color: #172554;
+    font-weight: 700;
+}
+#q-live-progress .brm-live-progress-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+#q-live-progress .brm-live-progress-percent {
+    flex: 0 0 auto;
+    color: #1d4ed8;
+    font-variant-numeric: tabular-nums;
+}
+#q-live-progress .brm-live-progress-detail {
+    margin-top: 5px;
+    color: #475569;
+    font-size: 0.9rem;
+}
+#q-live-progress .brm-live-progress-track {
+    height: 8px;
+    margin-top: 10px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #dbeafe;
+}
+#q-live-progress .brm-live-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #2563eb, #38bdf8);
+    transition: width 0.35s ease;
+}
+#q-live-progress .brm-live-progress-fill.is-indeterminate {
+    width: 42% !important;
+    animation: brm-progress-sweep 1.35s ease-in-out infinite;
+}
+@keyframes brm-progress-sweep {
+    from { transform: translateX(-125%); }
+    to { transform: translateX(255%); }
+}
 /* 任务表格:铺满宽度,高度与右侧两个按钮一致,内容超出时出现滚动条。 */
 #q-table-md {
     height: 160px;                 /* 约等于右侧两个按钮的总高度,可按需微调 */
@@ -1985,6 +2049,109 @@ STATUS_ICONS = {
 }
 
 
+# 任务阶段来自 ComfyUI WebSocket、IndexTTS 服务与队列本身。中文化展示在
+# 前端完成，持久化仍使用稳定的机器可读 stage 值，避免影响 REST 查询和恢复。
+STAGE_LABELS = {
+    "queued": "等待队列",
+    "recovering": "正在重新附着任务",
+    "building_workflow": "正在构建工作流",
+    "submitted": "已提交至 ComfyUI",
+    "execution_start": "开始执行",
+    "executing": "正在执行节点",
+    "finalizing": "正在完成节点",
+    "loading_diffusion_model": "正在加载视频模型",
+    "loading_text_encoder": "正在加载文本编码器",
+    "encoding_prompt": "正在编码提示词",
+    "sampling": "正在采样生成",
+    "decoding_video": "正在解码视频",
+    "decoding_audio": "正在解码音频",
+    "muxing": "正在合成音视频",
+    "checking_indextts25": "正在检查语音服务",
+    "synthesizing_indextts25": "正在合成语音",
+    "encoding_mp3": "正在编码 MP3",
+    "saving_artifacts": "正在保存素材",
+    "completed": "已完成",
+    "timed_out": "等待超时",
+    "interrupted": "已中断",
+    "failed": "执行失败",
+}
+
+
+def _stage_label(stage: str | None) -> str:
+    """Return a user-facing stage label without exposing raw backend values."""
+    value = str(stage or "").strip()
+    if not value:
+        return "正在准备"
+    return STAGE_LABELS.get(value, value.replace("_", " "))
+
+
+def _progress_ratio(task: Task) -> float | None:
+    """Return a clamped task ratio when ComfyUI has reported one."""
+    if task.progress is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(task.progress)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_progress_text(task: Task, queue_position: int | None = None) -> str:
+    """Compact progress text for the queue table and API-independent UI."""
+    if task.status == TaskStatus.PENDING:
+        return f"排队第 {queue_position} 位" if queue_position else "等待队列"
+    if task.status != TaskStatus.RUNNING:
+        return _stage_label(task.stage)
+
+    stage = _stage_label(task.stage)
+    ratio = _progress_ratio(task)
+    steps = ""
+    if task.current_step is not None and task.total_steps:
+        steps = f"{task.current_step}/{task.total_steps} 步"
+    if ratio is not None:
+        percent = f"{ratio * 100:.0f}%"
+        return " · ".join(part for part in (stage, steps, percent) if part)
+    return " · ".join(part for part in (stage, steps or "等待 ComfyUI 上报进度") if part)
+
+
+def _render_live_progress(running: list[Task]) -> str:
+    """Render live cards for running tasks; values are refreshed by gr.Timer."""
+    if not running:
+        return ""
+
+    cards = []
+    now = time.time()
+    for task in sorted(running, key=lambda item: item.start_ts or item.submit_ts):
+        ratio = _progress_ratio(task)
+        percent = f"{ratio * 100:.0f}%" if ratio is not None else "进行中"
+        if task.current_step is not None and task.total_steps:
+            step_detail = f"采样 {escape(str(task.current_step))}/{escape(str(task.total_steps))} 步"
+        elif task.node_id:
+            step_detail = f"节点 {escape(str(task.node_id))}"
+        else:
+            step_detail = "等待 ComfyUI 上报节点进度"
+        elapsed = _fmt_duration(now - (task.start_ts or task.submit_ts))
+        updated = ""
+        if task.last_progress_ts:
+            updated = f" · 最近更新 {_fmt_duration(max(0, now - task.last_progress_ts))}前"
+        if ratio is None:
+            fill = '<div class="brm-live-progress-fill is-indeterminate"></div>'
+            aria_value = ""
+        else:
+            fill = f'<div class="brm-live-progress-fill" style="width:{ratio * 100:.2f}%"></div>'
+            aria_value = f' aria-valuenow="{ratio * 100:.2f}"'
+        cards.append(
+            '<article class="brm-live-progress-card">'
+            '<div class="brm-live-progress-heading">'
+            f'<span class="brm-live-progress-name" title="{escape(task.name)}">{escape(task.name)}</span>'
+            f'<span class="brm-live-progress-percent">{percent}</span>'
+            '</div>'
+            f'<div class="brm-live-progress-detail">{escape(_stage_label(task.stage))} · {step_detail} · 已运行 {elapsed}{updated}</div>'
+            f'<div class="brm-live-progress-track" role="progressbar" aria-label="{escape(task.name)} 生成进度" aria-valuemin="0" aria-valuemax="100"{aria_value}>'
+            f'{fill}</div></article>'
+        )
+    return '<section class="brm-live-progress-list" aria-live="polite">' + "".join(cards) + '</section>'
+
+
 def _md_cell(text: str) -> str:
     """转义 Markdown 表格单元格里的特殊字符,并把换行压成空格。"""
     return (text or "").replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
@@ -2040,7 +2207,7 @@ def clear_completed_audio_preview():
 
 
 def render_queue():
-    """把队列快照渲染成 概览文本 / 任务表格(Markdown) / 已完成画廊。"""
+    """Render the summary, live execution cards, queue table, and artifacts."""
     pending, running, done = task_queue.snapshot()
 
     def note(t: Task) -> str:
@@ -2064,8 +2231,9 @@ def render_queue():
     all_tasks = list(pending) + list(running) + list(done)
     all_tasks.sort(key=lambda t: t.submit_ts, reverse=True)
 
+    pending_positions = {task.id: index for index, task in enumerate(pending, start=1)}
     rows = [
-        "| 任务名称 | 状态 | 提交时间 | 耗时 | 备注 |",
+        "| 任务名称 | 状态 | 实时进度 | 提交时间 | 耗时 | 备注 |",
         "| --- | --- | --- | --- | --- |",
     ]
     for t in all_tasks:
@@ -2073,12 +2241,13 @@ def render_queue():
         rows.append(
             f"| {_md_cell(t.name)} "
             f"| {icon} {t.status.value} "
+            f"| {_md_cell(_task_progress_text(t, pending_positions.get(t.id)))} "
             f"| {_fmt_ts(t.submit_ts)} "
             f"| {cost(t)} "
             f"| {_md_cell(note(t))} |"
         )
     if len(rows) == 2:      # 只有表头,说明暂无任务
-        rows.append("| 暂无任务 |  |  |  |  |")
+        rows.append("| 暂无任务 |  |  |  |  |  |")
     table_md = "\n".join(rows)
 
     ok = sum(1 for t in done if t.status == TaskStatus.DONE)
@@ -2108,6 +2277,7 @@ def render_queue():
     audio_choices = [(Path(path).name, path) for path in audio_paths]
     return (
         summary,
+        _render_live_progress(running),
         table_md,
         gallery_paths,
         audio_paths,
@@ -2740,6 +2910,7 @@ def build_ui():
         # ---- 共享的任务队列面板(所有 Tab 共用一个队列与后台 worker) ----
         gr.Markdown("### 任务队列")
         q_summary = gr.Markdown("队列状态加载中……")
+        q_live_progress = gr.HTML(value="", elem_id="q-live-progress")
         with gr.Row(equal_height=True):
             with gr.Column(scale=10):
                 q_table = gr.Markdown(elem_id="q-table-md")
@@ -2813,6 +2984,7 @@ def build_ui():
             fn=render_queue,
             outputs=[
                 q_summary,
+                q_live_progress,
                 q_table,
                 q_gallery,
                 q_audio,
