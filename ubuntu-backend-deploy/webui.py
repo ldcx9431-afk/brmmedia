@@ -767,7 +767,8 @@ footer {
 }
 #q-table-md table {
     width: 100%;
-    min-width: 980px;
+    min-width: 1040px;
+    table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
 }
@@ -776,6 +777,7 @@ footer {
     top: 0;
     z-index: 1;
     background: #f8fafc;
+    white-space: nowrap;
 }
 #q-table-md th,
 #q-table-md td {
@@ -784,12 +786,17 @@ footer {
     line-height: 1.45;
 }
 #q-table-md th:nth-child(1),
-#q-table-md td:nth-child(1) { min-width: 230px; }
+#q-table-md td:nth-child(1) { width: 28%; }
+#q-table-md th:nth-child(2),
+#q-table-md td:nth-child(2) { width: 112px; white-space: nowrap; }
 #q-table-md th:nth-child(3),
-#q-table-md td:nth-child(3) { min-width: 170px; }
+#q-table-md td:nth-child(3) { width: 18%; }
+#q-table-md th:nth-child(4),
+#q-table-md td:nth-child(4) { width: 112px; white-space: nowrap; }
+#q-table-md th:nth-child(5),
+#q-table-md td:nth-child(5) { width: 96px; white-space: nowrap; }
 #q-table-md th:nth-child(6),
 #q-table-md td:nth-child(6) {
-    min-width: 260px;
     white-space: normal;
     overflow-wrap: anywhere;
 }
