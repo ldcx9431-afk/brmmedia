@@ -70,7 +70,7 @@ if [[ "$PYTHON_SELECTOR" == */* ]]; then
 else
   uv python install "$PYTHON_SELECTOR"
 fi
-uv venv --python "$PYTHON_SELECTOR" "$VENV_ROOT"
+uv venv --clear --python "$PYTHON_SELECTOR" "$VENV_ROOT"
 VENV_PYTHON="$VENV_ROOT/bin/python"
 # The official project's locked CUDA 12.8 Torch dependencies are resolved in
 # this private venv.  Do not request the optional DeepSpeed extra.
