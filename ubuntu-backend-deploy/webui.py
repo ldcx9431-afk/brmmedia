@@ -1741,8 +1741,8 @@ WORKFLOW_BUILDERS = {
     "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图片编辑"),
     "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
     "MiniMaxH3-图生视频": (build_workflow_4, "MiniMax H3 图生视频"),
-    "LTX23-文生视频": (build_workflow_ltx3, "LTX2.3 文生视频（回退）"),
-    "LTX23-图生视频": (build_workflow_ltx4, "LTX2.3 图生视频（回退）"),
+    "LTX23-文生视频": (build_workflow_ltx3, "LTX2.3 文生视频"),
+    "LTX23-图生视频": (build_workflow_ltx4, "LTX2.3 图生视频"),
     "LTX23-首尾帧视频": (build_workflow_5, "首尾帧视频"),
     "LTX23-单图数字人-语音驱动": (build_workflow_6, "单图数字人-语音驱动"),
     # Keep the existing ComfyUI workflow available for a deliberate rollback.
