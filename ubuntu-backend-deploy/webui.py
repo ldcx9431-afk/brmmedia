@@ -1949,6 +1949,18 @@ output_size = [
     "3840 × 2160", "2160 × 3840",
 ]
 
+# H3 does not use the selected pixel dimensions as a literal output size: the
+# selected profile, requested duration and 32-pixel model grid determine the
+# actual canvas.  Keep only one representative per supported aspect ratio so
+# the UI cannot suggest nonexistent 2K/4K output options.
+H3_VIDEO_ASPECT_CHOICES = [
+    "1024 × 1024",  # 1:1
+    "1024 × 768",   # 4:3
+    "768 × 1024",   # 3:4
+    "1344 × 768",   # 16:9 (also the short turbo_fast native cell)
+    "768 × 1344",   # 9:16
+]
+
 def on_ref_upload(filepath):
     if not filepath:
         return ""
@@ -2179,7 +2191,12 @@ def build_ui():
                         prompt3 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的亚洲女孩在在花丛中散步", lines=3)
                     with gr.Column(scale=1):
                         with gr.Row():
-                            size3 = gr.Dropdown(label="视频尺寸", choices=output_size, value="768 × 1024")
+                            size3 = gr.Dropdown(
+                                label="视频画幅",
+                                choices=H3_VIDEO_ASPECT_CHOICES,
+                                value="768 × 1024",
+                                info="仅选择画幅比例；实际分辨率由档位、时长和 H3 网格决定。",
+                            )
                             seconds3 = gr.Number(
                                 value=PRIMARY_VIDEO_SECONDS_DEFAULT,
                                 label="视频时长（秒，4–15）" if H3_ENABLED else "视频时长（秒）",
@@ -2229,7 +2246,8 @@ def build_ui():
                     with gr.Column(scale=1):
                         prompt4 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=10, max_lines=10)
                         with gr.Row():
-                            size4 = gr.Dropdown(label="输出画幅", choices=output_size, value="768 × 1024")
+                            size4 = gr.Dropdown(label="输出画幅", choices=H3_VIDEO_ASPECT_CHOICES, value="768 × 1024",
+                                                info="仅选择画幅比例；实际分辨率由档位、时长和 H3 网格决定。")
                             seconds4 = gr.Number(
                                 value=PRIMARY_VIDEO_SECONDS_DEFAULT,
                                 label="视频时长（秒，4–15）" if H3_ENABLED else "视频时长（秒）",

@@ -345,6 +345,14 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual((quality["width"], quality["height"]), (768, 1344))
         self.assertEqual(quality["frames"], 158)
 
+    def test_h3_ui_only_exposes_real_aspect_ratio_choices(self):
+        self.assertEqual(
+            self.webui.H3_VIDEO_ASPECT_CHOICES,
+            ["1024 × 1024", "1024 × 768", "768 × 1024", "1344 × 768", "768 × 1344"],
+        )
+        self.assertNotIn("1920 × 1080", self.webui.H3_VIDEO_ASPECT_CHOICES)
+        self.assertNotIn("3840 × 2160", self.webui.H3_VIDEO_ASPECT_CHOICES)
+
     def test_h3_profile_switch_uses_the_documented_default_duration(self):
         self.assertEqual(self.webui.h3_profile_default_seconds("draft"), 3)
         self.assertEqual(self.webui.h3_profile_default_seconds("preview"), 5)
