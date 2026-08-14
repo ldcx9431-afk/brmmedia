@@ -188,7 +188,7 @@ QUEUE_CONCURRENCY = config_int(
     "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
 )
 DONE_TASKS_MAX = config_int("done_tasks_max", default=DONE_TASKS_MAX, min_value=20, max_value=500)
-DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=10, max_value=100)
+DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=24, max_value=100)
 
 
 def configured_free_disk_percent(default=10.0) -> float:
@@ -687,36 +687,85 @@ footer {
     display: none !important;
 }
 .fillable {
-    max-width: 1400px !important;
+    max-width: 1540px !important;
     margin: 0 auto !important;
-    padding: 10px !important;
+    padding: 18px 22px 34px !important;
 }
-/* 任务实时进度：任务仍在运行时，在表格前方持续展示节点、采样步数和百分比。 */
+/* 顶部的分类提示与原生工作流 Tab 配合使用：桌面端可完整扫读，窄屏可横滑。 */
+#workflow-categories {
+    margin: 6px 0 0;
+}
+#workflow-categories .brm-workflow-categories {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 0 4px;
+    color: #64748b;
+    font-size: 0.82rem;
+}
+#workflow-categories .brm-workflow-category {
+    padding: 5px 10px;
+    border: 1px solid #d8e2ee;
+    border-radius: 999px;
+    background: #f8fafc;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+#workflow-tabs [role="tablist"] {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 4px 6px !important;
+    overflow: visible !important;
+    padding: 8px 0 11px !important;
+    border-bottom: 1px solid #d9e2ec;
+}
+#workflow-tabs [role="tab"] {
+    min-width: auto !important;
+    margin: 0 !important;
+    padding: 9px 12px !important;
+    border-radius: 8px 8px 0 0;
+    color: #425466;
+    font-size: 0.94rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+#workflow-tabs [role="tab"]:hover { background: #f1f5f9; color: #0f4c5c; }
+#workflow-tabs [role="tab"][aria-selected="true"] {
+    color: #0f5d70 !important;
+    background: #edf8f8;
+    box-shadow: inset 0 -3px 0 #0f7186;
+}
+/* 视频、音频和智能工作流的起点，用细分隔线在同一套原生 Tab 中建立分区。 */
+#workflow-tabs [role="tab"]:nth-child(3),
+#workflow-tabs [role="tab"]:nth-child(9),
+#workflow-tabs [role="tab"]:nth-child(11) {
+    margin-left: 10px !important;
+    border-left: 1px solid #cbd5e1;
+}
+/* 任务实时进度：仅在有运行任务时显示，避免空 HTML 宿主占位。 */
 #q-live-progress {
-    margin: 0 0 12px;
-}
-#q-live-progress:empty {
-    display: none;
+    margin: 8px 0 10px;
 }
 #q-live-progress .brm-live-progress-list {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 10px;
+    gap: 8px;
 }
 #q-live-progress .brm-live-progress-card {
-    padding: 13px 15px;
-    border: 1px solid #bfdbfe;
-    border-left: 4px solid #2563eb;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #f8fbff 0%, #eff6ff 100%);
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+    padding: 10px 13px;
+    border: 1px solid #b9d7df;
+    border-left: 4px solid #0f7186;
+    border-radius: 9px;
+    background: #f4fbfc;
+    box-shadow: none;
 }
 #q-live-progress .brm-live-progress-heading {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    color: #172554;
+    color: #173b46;
     font-weight: 700;
 }
 #q-live-progress .brm-live-progress-name {
@@ -726,25 +775,25 @@ footer {
 }
 #q-live-progress .brm-live-progress-percent {
     flex: 0 0 auto;
-    color: #1d4ed8;
+    color: #0f7186;
     font-variant-numeric: tabular-nums;
 }
 #q-live-progress .brm-live-progress-detail {
     margin-top: 5px;
-    color: #475569;
-    font-size: 0.9rem;
+    color: #526675;
+    font-size: 0.86rem;
 }
 #q-live-progress .brm-live-progress-track {
     height: 8px;
-    margin-top: 10px;
+    margin-top: 7px;
     overflow: hidden;
     border-radius: 999px;
-    background: #dbeafe;
+    background: #cce9ed;
 }
 #q-live-progress .brm-live-progress-fill {
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, #2563eb, #38bdf8);
+    background: linear-gradient(90deg, #0f7186, #32a0ae);
     transition: width 0.35s ease;
 }
 #q-live-progress .brm-live-progress-fill.is-indeterminate {
@@ -755,15 +804,71 @@ footer {
     from { transform: translateX(-125%); }
     to { transform: translateX(255%); }
 }
-/* 任务表格:铺满宽度,高度与右侧两个按钮一致,内容超出时出现滚动条。 */
+/* 任务中心：摘要、运行态和历史列表采用同一张紧凑卡片。 */
+#task-center {
+    margin: 26px 0 0;
+    padding: 18px;
+    border: 1px solid #d8e2ee;
+    border-top: 3px solid #0f7186;
+    border-radius: 14px;
+    background: #ffffff;
+    box-shadow: 0 10px 28px rgba(15, 42, 60, 0.08);
+}
+#task-center-title { margin: 0 0 4px; }
+#q-summary { margin: 0; }
+#q-summary .brm-queue-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    min-height: 34px;
+}
+#q-summary .brm-queue-health {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #f1f5f9;
+    color: #334155;
+    font-size: 0.86rem;
+    font-weight: 750;
+}
+#q-summary .brm-queue-health i {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #64748b;
+}
+#q-summary .brm-queue-health.is-online { background: #eaf8f0; color: #166534; }
+#q-summary .brm-queue-health.is-online i { background: #16a34a; }
+#q-summary .brm-queue-health.is-offline { background: #fff1f2; color: #b91c1c; }
+#q-summary .brm-queue-health.is-offline i { background: #dc2626; }
+#q-summary .brm-queue-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
+#q-summary .brm-queue-metric {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 5px 8px;
+    border-radius: 7px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 0.82rem;
+}
+#q-summary .brm-queue-metric strong { color: #23364a; font-variant-numeric: tabular-nums; }
+#q-summary .brm-queue-metric.is-active { background: #e7f5f7; color: #0f5d70; }
+#q-summary .brm-queue-metric.is-success { background: #edf9f1; color: #207044; }
+#q-summary .brm-queue-metric.is-warning { background: #fff8e7; color: #9a6700; }
+#q-summary .brm-queue-metric.is-danger { background: #fff1f2; color: #b42318; }
+/* 任务表格:给历史任务更多高度，右侧操作保持紧凑。 */
 #q-table-md {
-    height: 210px;
+    height: 258px;
     width: 100%;
     overflow: auto;
     box-sizing: border-box;
     padding: 0;
     border: 1px solid var(--border-color-primary, #e5e7eb);
-    border-radius: var(--radius-lg, 8px);
+    border-radius: 10px;
 }
 #q-table-md table {
     width: 100%;
@@ -781,10 +886,36 @@ footer {
 }
 #q-table-md th,
 #q-table-md td {
-    padding: 10px 12px;
+    padding: 8px 11px;
     vertical-align: top;
     line-height: 1.45;
 }
+#queue-actions { gap: 9px; }
+#queue-actions button {
+    min-height: 52px !important;
+    padding: 10px 12px !important;
+    border-radius: 9px !important;
+    font-size: 0.9rem !important;
+}
+#completed-media { margin-top: 18px; }
+#completed-media-hint { margin: 8px 2px 0; color: #64748b; font-size: 0.86rem; }
+/* 素材库优先展示更多真实产物，完整素材仍在点击后通过原查看器展示。 */
+#q-gallery {
+    border: 1px solid #d8e2ee;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #f8fafc;
+}
+#q-gallery .grid-wrap {
+    padding: 8px !important;
+    gap: 8px !important;
+}
+#q-gallery button {
+    transform: scale(0.84);
+    transform-origin: center;
+}
+#q-gallery img,
+#q-gallery video { border-radius: 7px !important; }
 #q-table-md th:nth-child(1),
 #q-table-md td:nth-child(1) { width: 28%; }
 #q-table-md th:nth-child(2),
@@ -935,6 +1066,28 @@ footer {
     min-width: 116px !important;
 }
 @media (max-width: 720px) {
+    .fillable { padding: 12px 12px 26px !important; }
+    #workflow-categories .brm-workflow-categories {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 8px;
+        scrollbar-width: thin;
+    }
+    #workflow-tabs [role="tablist"] {
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        padding-bottom: 8px !important;
+        scrollbar-width: thin;
+    }
+    #workflow-tabs [role="tab"] { font-size: 0.88rem; padding: 8px 10px !important; }
+    #workflow-tabs [role="tab"]:nth-child(3),
+    #workflow-tabs [role="tab"]:nth-child(9),
+    #workflow-tabs [role="tab"]:nth-child(11) { margin-left: 4px !important; }
+    #q-summary .brm-queue-summary { gap: 7px; }
+    #q-table-md { height: 242px; }
+    #task-center { padding: 10px; }
+    #q-gallery { height: 420px !important; }
+    #q-gallery .grid-wrap { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
     #global-settings-panel {
         width: 100% !important;
         padding: 18px;
@@ -952,6 +1105,9 @@ footer {
         max-width: 94vw !important;
         max-height: 100% !important;
     }
+}
+@media (min-width: 721px) and (max-width: 1200px) {
+    #q-gallery .grid-wrap { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
 }
 """
 
@@ -1923,7 +2079,7 @@ def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_galle
         queue_concurrency, QUEUE_CONCURRENCY, 1, MAX_MEDIA_QUEUE_CONCURRENCY
     )
     task_limit = _setting_int(done_tasks_max, DONE_TASKS_MAX, 20, 500)
-    gallery_limit = _setting_int(done_gallery_max, DONE_GALLERY_MAX, 10, 100)
+    gallery_limit = _setting_int(done_gallery_max, DONE_GALLERY_MAX, 24, 100)
     try:
         save_config({
             "queue_concurrency": concurrency,
@@ -2184,6 +2340,31 @@ def _render_live_progress(running: list[Task]) -> str:
     return '<section class="brm-live-progress-list" aria-live="polite">' + "".join(cards) + '</section>'
 
 
+def _render_queue_summary(*, backend: str, pending: int, running: int, completed: int,
+                          cancelled: int, timed_out: int, failed: int) -> str:
+    """Render the compact, scan-friendly queue status strip."""
+    state_class = "is-online" if backend == "在线" else "is-offline"
+    metrics = (
+        ("并发", QUEUE_CONCURRENCY, ""),
+        ("排队", pending, "is-active" if pending else ""),
+        ("处理中", running, "is-active" if running else ""),
+        ("完成", completed, "is-success" if completed else ""),
+        ("中断", cancelled, ""),
+        ("超时", timed_out, "is-warning" if timed_out else ""),
+        ("失败", failed, "is-danger" if failed else ""),
+    )
+    pills = "".join(
+        f'<span class="brm-queue-metric {css_class}"><b>{label}</b><strong>{value}</strong></span>'
+        for label, value, css_class in metrics
+    )
+    return (
+        '<section class="brm-queue-summary" aria-label="任务队列状态">'
+        f'<span class="brm-queue-health {state_class}"><i></i>ComfyUI {backend}</span>'
+        f'<div class="brm-queue-metrics">{pills}</div>'
+        '</section>'
+    )
+
+
 def _md_cell(text: str) -> str:
     """转义 Markdown 表格单元格里的特殊字符,并把换行压成空格。"""
     return (text or "").replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
@@ -2287,8 +2468,15 @@ def render_queue():
     timed_out = sum(1 for t in done if t.status == TaskStatus.TIMEOUT)
     err = sum(1 for t in done if t.status == TaskStatus.ERROR)
     backend = "在线" if is_alive() else "离线"
-    summary = (f"ComfyUI:{backend}　｜　并发 {QUEUE_CONCURRENCY}　｜　排队 {len(pending)}　｜　"
-               f"处理中 {len(running)}　｜　完成 {ok}　｜　中断 {cancelled}　｜　超时 {timed_out}　｜　失败 {err}")
+    summary = _render_queue_summary(
+        backend=backend,
+        pending=len(pending),
+        running=len(running),
+        completed=ok,
+        cancelled=cancelled,
+        timed_out=timed_out,
+        failed=err,
+    )
 
     # 图片与视频保持紧凑缩略图，点击后交给独立全屏查看器；音频提供下载列表和播放器选择器。
     imgs = []
@@ -2309,7 +2497,7 @@ def render_queue():
     audio_choices = [(Path(path).name, path) for path in audio_paths]
     return (
         summary,
-        _render_live_progress(running),
+        gr.update(value=_render_live_progress(running), visible=bool(running)),
         table_md,
         gallery_paths,
         audio_paths,
@@ -2499,7 +2687,7 @@ def build_ui():
                     label="已完成任务保留数",
                 )
                 setting_done_gallery = gr.Slider(
-                    10, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
+                    24, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
                     label="画廊最多显示产物数",
                 )
             with gr.Row():
@@ -2525,7 +2713,18 @@ def build_ui():
             lan_password_status = gr.Markdown("")
 
         # ---- 每个工作流一个 Tab。新增工作流时,复制一个 gr.Tab 块即可。 ----
-        with gr.Tabs():
+        # 原生 Tab 仍是一套稳定的二级工作流入口；分类提示和分隔线把它们
+        # 收束为图像、视频、音频和智能工具四个易扫读的操作分区。
+        gr.HTML(
+            '<nav class="brm-workflow-categories" aria-label="工作流分类">'
+            '<span class="brm-workflow-category">图像创作</span>'
+            '<span class="brm-workflow-category">视频创作</span>'
+            '<span class="brm-workflow-category">音频创作</span>'
+            '<span class="brm-workflow-category">智能工具</span>'
+            '</nav>',
+            elem_id="workflow-categories",
+        )
+        with gr.Tabs(elem_id="workflow-tabs"):
             # ========== Tab 1 ==========
             with gr.Tab("文生图Z-Image"):
                 with gr.Row():
@@ -2940,13 +3139,13 @@ def build_ui():
         gr.Markdown("---")
 
         # ---- 共享的任务队列面板(所有 Tab 共用一个队列与后台 worker) ----
-        gr.Markdown("### 任务队列")
-        q_summary = gr.Markdown("队列状态加载中……")
-        q_live_progress = gr.HTML(value="", elem_id="q-live-progress")
-        with gr.Row(equal_height=True):
+        gr.Markdown("### 任务中心", elem_id="task-center-title")
+        q_summary = gr.HTML(value="", elem_id="q-summary")
+        q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
+        with gr.Row(equal_height=True, elem_id="task-center"):
             with gr.Column(scale=10):
                 q_table = gr.Markdown(elem_id="q-table-md")
-            with gr.Column(scale=1, min_width=160):
+            with gr.Column(scale=1, min_width=168, elem_id="queue-actions"):
                 clear_btn = gr.Button("清空排队任务")
                 interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
         op_status = gr.Markdown("")
@@ -2966,11 +3165,12 @@ def build_ui():
                 scale=2,
             )
         clear_audio_preview_btn = gr.Button("清除当前试听", variant="secondary")
+        gr.Markdown("#### 素材库", elem_id="completed-media")
         q_gallery = gr.Gallery(
-            label="已完成图片/视频（累计）",
-            columns=5,
-            rows=1,
-            height=190,
+            label="已完成图片/视频（累计，最多 30 项）",
+            columns=7,
+            rows=3,
+            height=420,
             object_fit="cover",
             allow_preview=False,
             preview=False,
@@ -2982,8 +3182,10 @@ def build_ui():
         media_viewer_close_btn = gr.Button(
             "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
         )
-        gr.Markdown("点击图片或视频缩略图会打开浏览器主体大预览；可在预览内下载。画廊工具栏可下载全部。")
-        gr.Markdown("", height=20)
+        gr.Markdown(
+            "点击缩略图打开浏览器主体大预览；可在预览内下载，画廊工具栏可下载全部。",
+            elem_id="completed-media-hint",
+        )
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")

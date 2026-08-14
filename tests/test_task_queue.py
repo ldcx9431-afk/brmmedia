@@ -144,11 +144,15 @@ class TaskQueueTests(unittest.TestCase):
         previous_queue = self.webui.task_queue
         self.webui.task_queue = queue
         try:
-            summary, live_html, table_md, *_ = self.webui.render_queue()
+            summary, live_update, table_md, *_ = self.webui.render_queue()
         finally:
             self.webui.task_queue = previous_queue
 
-        self.assertIn("处理中 1", summary)
+        self.assertIn("处理中", summary)
+        self.assertIn("<strong>1</strong>", summary)
+        self.assertNotIn("｜", summary)
+        self.assertTrue(live_update["visible"])
+        live_html = live_update["value"]
         self.assertIn("正在采样生成", live_html)
         self.assertIn("采样 3/8 步", live_html)
         self.assertIn("38%", live_html)
@@ -160,6 +164,28 @@ class TaskQueueTests(unittest.TestCase):
         )
         self.assertIn("正在采样生成", table_md)
         self.assertIn("3/8 步", table_md)
+
+    def test_queue_hides_live_progress_without_running_task(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        previous_queue = self.webui.task_queue
+        self.webui.task_queue = queue
+        try:
+            _, live_update, _, *_ = self.webui.render_queue()
+        finally:
+            self.webui.task_queue = previous_queue
+
+        self.assertFalse(live_update["visible"])
+        self.assertEqual(live_update["value"], "")
+
+    def test_dense_workspace_layout_keeps_three_gallery_rows(self):
+        source = WEBUI_PATH.read_text(encoding="utf-8")
+        self.assertIn('elem_id="workflow-tabs"', source)
+        self.assertIn('elem_id="workflow-categories"', source)
+        self.assertIn('columns=7,', source)
+        self.assertIn('rows=3,', source)
+        self.assertIn('height=420,', source)
+        self.assertIn('min_value=24, max_value=100', source)
+        self.assertIn('visible=bool(running)', source)
 
     def test_restart_reattaches_running_prompt_without_resubmitting(self):
         history = {
