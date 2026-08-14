@@ -691,58 +691,93 @@ footer {
     margin: 0 auto !important;
     padding: 18px 22px 34px !important;
 }
-/* 顶部的分类提示与原生工作流 Tab 配合使用：桌面端可完整扫读，窄屏可横滑。 */
-#workflow-categories {
-    margin: 6px 0 0;
-}
-#workflow-categories .brm-workflow-categories {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 0 4px;
-    color: #64748b;
-    font-size: 0.82rem;
-}
-#workflow-categories .brm-workflow-category {
-    padding: 5px 10px;
-    border: 1px solid #d8e2ee;
-    border-radius: 999px;
-    background: #f8fafc;
-    font-weight: 700;
-    letter-spacing: 0.01em;
+/* 工作流导航：桌面端以真实 Gradio Tab 作为左侧粘性菜单。
+   不再额外渲染“看起来可点、实际上不可点”的分类胶囊。 */
+#workflow-tabs {
+    position: relative;
+    min-height: 460px;
+    margin-top: 12px;
+    padding: 18px 18px 18px 246px !important;
+    border: 1px solid #d9e2ec;
+    border-radius: 14px;
+    background: #fbfdff;
 }
 #workflow-tabs [role="tablist"] {
+    position: absolute !important;
+    top: 18px;
+    bottom: 18px;
+    left: 18px;
+    z-index: 2;
     display: flex !important;
-    flex-wrap: wrap !important;
-    gap: 4px 6px !important;
-    overflow: visible !important;
-    padding: 8px 0 11px !important;
-    border-bottom: 1px solid #d9e2ec;
+    width: 208px;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    gap: 3px !important;
+    overflow: auto !important;
+    padding: 4px 7px 12px 0 !important;
+    border: 0 !important;
+    scrollbar-width: thin;
+    scrollbar-color: #c7d5df transparent;
 }
 #workflow-tabs [role="tab"] {
-    min-width: auto !important;
+    position: relative;
+    min-height: 35px;
+    width: 100% !important;
+    min-width: 0 !important;
     margin: 0 !important;
-    padding: 9px 12px !important;
-    border-radius: 8px 8px 0 0;
+    padding: 8px 11px !important;
+    border: 1px solid transparent !important;
+    border-radius: 8px !important;
     color: #425466;
-    font-size: 0.94rem;
+    font-size: 0.88rem;
     font-weight: 650;
     white-space: nowrap;
+    text-align: left !important;
+    text-overflow: ellipsis;
+    overflow: hidden;
 }
-#workflow-tabs [role="tab"]:hover { background: #f1f5f9; color: #0f4c5c; }
+#workflow-tabs [role="tab"]:hover {
+    border-color: #c7dce3 !important;
+    background: #eef7f8;
+    color: #0f4c5c;
+}
 #workflow-tabs [role="tab"][aria-selected="true"] {
     color: #0f5d70 !important;
-    background: #edf8f8;
-    box-shadow: inset 0 -3px 0 #0f7186;
+    border-color: #a9ced7 !important;
+    background: #e7f5f6;
+    box-shadow: inset 3px 0 0 #0f7186;
 }
-/* 视频、音频和智能工作流的起点，用细分隔线在同一套原生 Tab 中建立分区。 */
+#workflow-tabs [role="tab"]:focus-visible {
+    outline: 3px solid rgba(15, 113, 134, 0.28) !important;
+    outline-offset: 1px;
+}
+/* 每一个标题都挂在可点击的原生 Tab 上，因此分区标题不会成为无效控件。 */
+#workflow-tabs [role="tab"]:nth-child(1)::before,
+#workflow-tabs [role="tab"]:nth-child(3)::before,
+#workflow-tabs [role="tab"]:nth-child(9)::before,
+#workflow-tabs [role="tab"]:nth-child(11)::before {
+    display: block;
+    margin: 3px 0 6px;
+    color: #78909c;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+#workflow-tabs [role="tab"]:nth-child(1)::before { content: "图像创作"; }
+#workflow-tabs [role="tab"]:nth-child(3)::before { content: "视频创作"; }
+#workflow-tabs [role="tab"]:nth-child(9)::before { content: "音频创作"; }
+#workflow-tabs [role="tab"]:nth-child(11)::before { content: "智能工具"; }
 #workflow-tabs [role="tab"]:nth-child(3),
 #workflow-tabs [role="tab"]:nth-child(9),
 #workflow-tabs [role="tab"]:nth-child(11) {
-    margin-left: 10px !important;
-    border-left: 1px solid #cbd5e1;
+    margin-top: 9px !important;
+    padding-top: 4px !important;
 }
+/* Gradio 的默认溢出菜单在左侧导航中没有价值，所有工作流均直接列出。 */
+#workflow-tabs [role="tablist"] > button:not([role="tab"]) { display: none !important; }
+#workflow-tabs [role="tabpanel"] { min-width: 0; }
 /* 任务实时进度：仅在有运行任务时显示，避免空 HTML 宿主占位。 */
 #q-live-progress {
     margin: 8px 0 10px;
@@ -896,6 +931,31 @@ footer {
     padding: 10px 12px !important;
     border-radius: 9px !important;
     font-size: 0.9rem !important;
+}
+/* 完成音频即是一张可点选的素材列表；选中后右侧播放器立刻试听并提供下载。 */
+#completed-audio-list {
+    border: 1px solid #d8e2ee;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #ffffff;
+}
+#completed-audio-list table { width: 100%; }
+#completed-audio-list th {
+    padding: 8px 11px !important;
+    background: #f2f8fb !important;
+    color: #31566d;
+    font-size: 0.84rem;
+    font-weight: 750;
+    text-align: left;
+}
+#completed-audio-list td {
+    padding: 8px 11px !important;
+    color: #334155;
+    cursor: pointer;
+}
+#completed-audio-list tbody tr:hover td {
+    background: #e8f5f6 !important;
+    color: #0f5d70;
 }
 #completed-media { margin-top: 18px; }
 #completed-media-hint { margin: 8px 2px 0; color: #64748b; font-size: 0.86rem; }
@@ -1067,22 +1127,34 @@ footer {
 }
 @media (max-width: 720px) {
     .fillable { padding: 12px 12px 26px !important; }
-    #workflow-categories .brm-workflow-categories {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        padding-bottom: 8px;
-        scrollbar-width: thin;
+    #workflow-tabs {
+        min-height: 0;
+        padding: 0 !important;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
     }
     #workflow-tabs [role="tablist"] {
+        position: static !important;
+        width: auto;
+        flex-direction: row !important;
         flex-wrap: nowrap !important;
         overflow-x: auto !important;
+        align-items: center !important;
         padding-bottom: 8px !important;
         scrollbar-width: thin;
+        border-bottom: 1px solid #d9e2ec !important;
     }
-    #workflow-tabs [role="tab"] { font-size: 0.88rem; padding: 8px 10px !important; }
+    #workflow-tabs [role="tab"] {
+        width: auto !important;
+        flex: 0 0 auto;
+        font-size: 0.88rem;
+        padding: 8px 10px !important;
+    }
+    #workflow-tabs [role="tab"]::before { display: none !important; }
     #workflow-tabs [role="tab"]:nth-child(3),
     #workflow-tabs [role="tab"]:nth-child(9),
-    #workflow-tabs [role="tab"]:nth-child(11) { margin-left: 4px !important; }
+    #workflow-tabs [role="tab"]:nth-child(11) { margin-top: 0 !important; }
     #q-summary .brm-queue-summary { gap: 7px; }
     #q-table-md { height: 242px; }
     #task-center { padding: 10px; }
@@ -2408,15 +2480,19 @@ def close_completed_media_viewer():
     return gr.update(value="", visible=False), gr.update(visible=False)
 
 
-def play_completed_audio(path):
-    """将用户从完成音频列表中选择的文件送入内置播放器。"""
-    path = _completed_output_path(path)
+def play_completed_audio_from_row(audio_paths, evt: gr.SelectData):
+    """点击完成音频的一行后，直接把对应文件送入内置播放器。"""
+    try:
+        selected_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else int(evt.index)
+        path = _completed_output_path(audio_paths[selected_index])
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        path = None
     return str(path) if path and path.suffix.lower() in AUDIO_EXTS else None
 
 
 def clear_completed_audio_preview():
     """停止并移除当前试听音频，避免旧音频持续占据播放器。"""
-    return gr.update(value=None), None
+    return None
 
 
 def render_queue():
@@ -2478,7 +2554,7 @@ def render_queue():
         failed=err,
     )
 
-    # 图片与视频保持紧凑缩略图，点击后交给独立全屏查看器；音频提供下载列表和播放器选择器。
+    # 图片与视频保持紧凑缩略图，点击后交给独立大预览；音频则以可点击列表直接送入播放器。
     imgs = []
     audios = []
     for t in done:
@@ -2494,14 +2570,14 @@ def render_queue():
                     audios.append(str(path))
     gallery_paths = imgs[:DONE_GALLERY_MAX]
     audio_paths = audios[:DONE_TASKS_MAX]
-    audio_choices = [(Path(path).name, path) for path in audio_paths]
+    audio_rows = [[Path(path).name] for path in audio_paths]
     return (
         summary,
         gr.update(value=_render_live_progress(running), visible=bool(running)),
         table_md,
         gallery_paths,
+        gr.update(value=audio_rows),
         audio_paths,
-        gr.update(choices=audio_choices),
         gallery_paths,
     )
 
@@ -2712,18 +2788,8 @@ def build_ui():
             change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
             lan_password_status = gr.Markdown("")
 
-        # ---- 每个工作流一个 Tab。新增工作流时,复制一个 gr.Tab 块即可。 ----
-        # 原生 Tab 仍是一套稳定的二级工作流入口；分类提示和分隔线把它们
-        # 收束为图像、视频、音频和智能工具四个易扫读的操作分区。
-        gr.HTML(
-            '<nav class="brm-workflow-categories" aria-label="工作流分类">'
-            '<span class="brm-workflow-category">图像创作</span>'
-            '<span class="brm-workflow-category">视频创作</span>'
-            '<span class="brm-workflow-category">音频创作</span>'
-            '<span class="brm-workflow-category">智能工具</span>'
-            '</nav>',
-            elem_id="workflow-categories",
-        )
+        # ---- 每个工作流一个 Tab。桌面端由 CSS 将原生 Tab 直接呈为左侧菜单；
+        # 所有名称都是可点击的真实入口，窄屏再退化为可横向滚动的原生导航。 ----
         with gr.Tabs(elem_id="workflow-tabs"):
             # ========== Tab 1 ==========
             with gr.Tab("文生图Z-Image"):
@@ -3149,22 +3215,27 @@ def build_ui():
                 clear_btn = gr.Button("清空排队任务")
                 interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
         op_status = gr.Markdown("")
-        q_audio = gr.File(label="已完成音频（累计，可下载）", file_count="multiple", height=110)
         with gr.Row():
-            completed_audio_selector = gr.Dropdown(
-                label="选择要试听的已完成音频",
-                choices=[],
-                value=None,
+            completed_audio_list = gr.Dataframe(
+                headers=["已完成音频 · 点击任一行即可试听"],
+                datatype=["str"],
+                value=[],
+                interactive=False,
+                show_row_numbers=False,
+                max_height=176,
+                wrap=True,
                 scale=1,
+                elem_id="completed-audio-list",
             )
             completed_audio_player = gr.Audio(
-                label="音频试听",
+                label="音频试听（播放器右上角可下载）",
                 type="filepath",
                 interactive=False,
                 buttons=["download"],
                 scale=2,
             )
-        clear_audio_preview_btn = gr.Button("清除当前试听", variant="secondary")
+        completed_audio_paths = gr.State([])
+        clear_audio_preview_btn = gr.Button("停止并清除当前试听", variant="secondary")
         gr.Markdown("#### 素材库", elem_id="completed-media")
         q_gallery = gr.Gallery(
             label="已完成图片/视频（累计，最多 30 项）",
@@ -3190,15 +3261,15 @@ def build_ui():
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
         interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status, api_visibility="private")
-        completed_audio_selector.change(
-            fn=play_completed_audio,
-            inputs=completed_audio_selector,
+        completed_audio_list.select(
+            fn=play_completed_audio_from_row,
+            inputs=completed_audio_paths,
             outputs=completed_audio_player,
             api_visibility="private",
         )
         clear_audio_preview_btn.click(
             fn=clear_completed_audio_preview,
-            outputs=[completed_audio_selector, completed_audio_player],
+            outputs=completed_audio_player,
             api_visibility="private",
         )
         q_gallery.select(
@@ -3221,8 +3292,8 @@ def build_ui():
                 q_live_progress,
                 q_table,
                 q_gallery,
-                q_audio,
-                completed_audio_selector,
+                completed_audio_list,
+                completed_audio_paths,
                 completed_gallery_paths,
             ],
             api_visibility="private",

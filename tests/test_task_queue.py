@@ -177,10 +177,39 @@ class TaskQueueTests(unittest.TestCase):
         self.assertFalse(live_update["visible"])
         self.assertEqual(live_update["value"], "")
 
+    def test_completed_audio_row_plays_directly_without_dropdown(self):
+        audio_path = self.output_dir / "direct-listen.mp3"
+        audio_path.write_bytes(b"audio-fixture")
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("audio-1", "试听音频", "voice-clone", {})
+        task.status = self.webui.TaskStatus.DONE
+        task.result = [str(audio_path)]
+        with queue._lock:
+            queue._done = [task]
+
+        previous_queue = self.webui.task_queue
+        self.webui.task_queue = queue
+        try:
+            _, _, _, _, audio_update, audio_paths, _ = self.webui.render_queue()
+        finally:
+            self.webui.task_queue = previous_queue
+
+        resolved_audio_path = str(audio_path.resolve())
+        self.assertEqual(audio_update["value"], [[audio_path.name]])
+        self.assertEqual(audio_paths, [resolved_audio_path])
+        event = types.SimpleNamespace(index=(0, 0))
+        self.assertEqual(
+            self.webui.play_completed_audio_from_row(audio_paths, event),
+            resolved_audio_path,
+        )
+
     def test_dense_workspace_layout_keeps_three_gallery_rows(self):
         source = WEBUI_PATH.read_text(encoding="utf-8")
         self.assertIn('elem_id="workflow-tabs"', source)
-        self.assertIn('elem_id="workflow-categories"', source)
+        self.assertNotIn('elem_id="workflow-categories"', source)
+        self.assertIn('position: absolute !important;', source)
+        self.assertIn('completed_audio_list.select(', source)
+        self.assertIn('play_completed_audio_from_row', source)
         self.assertIn('columns=7,', source)
         self.assertIn('rows=3,', source)
         self.assertIn('height=420,', source)
