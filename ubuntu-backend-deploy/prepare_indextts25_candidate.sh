@@ -84,9 +84,10 @@ VENV_PYTHON="$VENV_ROOT/bin/python"
 # this private venv.  Do not request the optional DeepSpeed extra.
 (
   cd "$SOURCE_ROOT"
-  UV_NO_MANAGED_PYTHON=1 UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
-    "$UV_BIN" sync --locked --python "$VENV_PYTHON" \
-      --default-index "${INDEXTTS25_DEFAULT_INDEX:-https://mirrors.aliyun.com/pypi/simple}"
+UV_NO_MANAGED_PYTHON=1 UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
+    "$UV_BIN" sync --locked --python "$VENV_PYTHON"
+# Do not override the index here. `uv --locked` validates configured
+# registries against the upstream lockfile, so a mirror must fail closed.
 )
 "$UV_BIN" pip install --python "$VENV_PYTHON" "fastapi>=0.115,<1" "uvicorn[standard]>=0.30,<1" "python-multipart>=0.0.20,<1"
 
