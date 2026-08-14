@@ -40,10 +40,18 @@ if [[ "$(df --output=avail -B1 "$RUNTIME_ROOT" | tail -1 | tr -d ' ')" -lt $((30
   exit 1
 fi
 
-if [[ -d "$SOURCE_ROOT/.git" ]]; then
-  git -C "$SOURCE_ROOT" fetch --tags --force origin
-else
-  git clone "$INDEXTTS25_SOURCE_REPOSITORY" "$SOURCE_ROOT"
+if [[ -d "$SOURCE_ROOT/.git" ]] && [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)" != "$INDEXTTS25_SOURCE_COMMIT" ]]; then
+  # Some WSL proxy paths reset HTTP/2 pack transfers; pin this tiny source
+  # checkout to HTTP/1.1 and fetch only the required tag/commit.
+  git -C "$SOURCE_ROOT" -c http.version=HTTP/1.1 fetch --depth 1 origin "$INDEXTTS25_SOURCE_COMMIT"
+elif [[ ! -d "$SOURCE_ROOT/.git" ]]; then
+  case "$SOURCE_ROOT" in
+    "$RUNTIME_ROOT"/source) ;;
+    *) echo "[ERROR] Refusing to replace an unexpected source directory: $SOURCE_ROOT" >&2; exit 1 ;;
+  esac
+  rm -rf "$SOURCE_ROOT"
+  git -c http.version=HTTP/1.1 clone --depth 1 --branch "$INDEXTTS25_SOURCE_TAG" \
+    "$INDEXTTS25_SOURCE_REPOSITORY" "$SOURCE_ROOT"
 fi
 git -C "$SOURCE_ROOT" checkout --detach "$INDEXTTS25_SOURCE_COMMIT"
 [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" == "$INDEXTTS25_SOURCE_COMMIT" ]] || { echo "[ERROR] source revision mismatch" >&2; exit 1; }
