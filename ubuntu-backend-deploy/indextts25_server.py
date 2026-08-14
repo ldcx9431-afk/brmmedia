@@ -43,7 +43,9 @@ _engine_lock = asyncio.Lock()
 
 
 def _model_paths() -> tuple[Path, Path]:
-    config = MODEL_DIR / "config_v2_5.yaml"
+    # The official IndexTTS-2.5 revision ships ``config.yaml``.  Keeping this
+    # explicit avoids accidentally starting against an unrelated legacy file.
+    config = MODEL_DIR / "config.yaml"
     if not config.is_file():
         raise RuntimeError(f"缺少 IndexTTS-2.5 配置文件：{config}")
     return config, MODEL_DIR
@@ -97,7 +99,7 @@ def _synthesize(reference: Path, text: str, language: str, speed: float, output:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    config_exists = bool(MODEL_DIR and (MODEL_DIR / "config_v2_5.yaml").is_file())
+    config_exists = bool(MODEL_DIR and (MODEL_DIR / "config.yaml").is_file())
     return {
         "ok": config_exists,
         "engine": SERVICE_NAME,
@@ -161,4 +163,3 @@ async def voice_clone(
         raise HTTPException(500, f"IndexTTS-2.5 推理失败：{exc}") from exc
     finally:
         shutil.rmtree(request_dir, ignore_errors=True)
-

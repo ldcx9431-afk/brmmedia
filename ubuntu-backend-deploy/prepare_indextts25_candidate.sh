@@ -128,15 +128,16 @@ UV_NO_MANAGED_PYTHON=1 UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
 )
 "$UV_BIN" pip install --python "$VENV_PYTHON" "fastapi>=0.115,<1" "uvicorn[standard]>=0.30,<1" "python-multipart>=0.0.20,<1"
 
-if [[ ! -f "$MODEL_SOURCE_DIR/config_v2_5.yaml" ]]; then
+if [[ ! -f "$MODEL_SOURCE_DIR/config.yaml" ]]; then
   echo "[INFO] Downloading fixed IndexTTS-2.5 model revision to D source copy..."
   "$VENV_ROOT/bin/hf" download "$INDEXTTS25_MODEL_REPOSITORY" \
     --revision "$INDEXTTS25_MODEL_REVISION" --local-dir "$MODEL_SOURCE_DIR"
 fi
-[[ -f "$MODEL_SOURCE_DIR/config_v2_5.yaml" ]] || { echo "[ERROR] Model source copy is incomplete" >&2; exit 1; }
+[[ -f "$MODEL_SOURCE_DIR/config.yaml" ]] || { echo "[ERROR] Model source copy is incomplete" >&2; exit 1; }
 echo "[INFO] Copying verified source model from D to E/NVMe runtime..."
-rsync -a --checksum "$MODEL_SOURCE_DIR/" "$MODEL_DIR/"
-[[ -f "$MODEL_DIR/config_v2_5.yaml" ]] || { echo "[ERROR] Runtime model copy is incomplete" >&2; exit 1; }
+rsync -a --checksum --exclude '.cache/' --exclude 'deps/' --exclude 'download-*.log' \
+  --exclude 'download_indextts25_windows.ps1' "$MODEL_SOURCE_DIR/" "$MODEL_DIR/"
+[[ -f "$MODEL_DIR/config.yaml" ]] || { echo "[ERROR] Runtime model copy is incomplete" >&2; exit 1; }
 
 "$VENV_PYTHON" - "$MODEL_DIR" "$REPORT_DIR/model-manifest.json" <<'PY'
 import hashlib, json, sys

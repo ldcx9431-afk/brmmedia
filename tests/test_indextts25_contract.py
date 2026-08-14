@@ -44,6 +44,12 @@ class IndexTTS25ContractTests(unittest.TestCase):
 
     def test_service_has_only_supported_controls(self) -> None:
         text = SERVER.read_text(encoding="utf-8")
+        start = START.read_text(encoding="utf-8")
+        prepare = PREPARE.read_text(encoding="utf-8")
+        self.assertIn('MODEL_DIR / "config.yaml"', text)
+        self.assertIn('INDEXTTS25_MODEL_DIR/config.yaml', start)
+        self.assertIn('MODEL_SOURCE_DIR/config.yaml', prepare)
+        self.assertNotIn("config_v2_5.yaml", text + start + prepare)
         self.assertIn('SUPPORTED_LANGUAGES = {"zh", "en", "ja", "es", "ar"}', text)
         self.assertIn("duration_factor=1.0 / speed", text)
         self.assertIn("use_bf16=USE_BF16", text)

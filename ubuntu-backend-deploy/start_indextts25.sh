@@ -18,7 +18,7 @@ set +a
 PYTHON="$INDEXTTS25_VENV/bin/python"
 [[ -x "$PYTHON" ]] || { echo "[ERROR] Missing candidate Python: $PYTHON" >&2; exit 1; }
 [[ -f "$INDEXTTS25_SOURCE_ROOT/indextts/infer_v2_5.py" ]] || { echo "[ERROR] Missing pinned IndexTTS-2.5 source" >&2; exit 1; }
-[[ -f "$INDEXTTS25_MODEL_DIR/config_v2_5.yaml" ]] || { echo "[ERROR] Missing IndexTTS-2.5 model/config" >&2; exit 1; }
+[[ -f "$INDEXTTS25_MODEL_DIR/config.yaml" ]] || { echo "[ERROR] Missing IndexTTS-2.5 model/config" >&2; exit 1; }
 
 export PYTHONPATH="$SCRIPT_DIR:$INDEXTTS25_SOURCE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
