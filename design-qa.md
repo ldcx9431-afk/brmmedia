@@ -1,0 +1,46 @@
+# BRM AI 工作台设计还原验收
+
+## 验收范围
+
+- 设计来源：
+  - `/Users/mac/.codex/generated_images/01a00136-5847-7751-b8f2-aae7ca0c14cf/exec-1dec22fd-473e-4421-b38d-31ded1110352.png`（图像创作）
+  - `/Users/mac/.codex/generated_images/01a00136-5847-7751-b8f2-aae7ca0c14cf/exec-1a7be313-5e59-4f43-b60b-ff3a7b0884b2.png`（视频创作）
+  - `/Users/mac/.codex/generated_images/01a00136-5847-7751-b8f2-aae7ca0c14cf/exec-7f373f57-5d42-444f-99c1-233b6c4d383e.png`（音频创作）
+  - `/Users/mac/.codex/generated_images/01a00136-5847-7751-b8f2-aae7ca0c14cf/exec-dfeebe55-83d6-4e8b-8307-37c7088f816e.png`（Qwen 工具）
+- 实际实现：生产 Gradio 6.20.0 工作台，不新增前端框架、CDN、外网字体或装饰图片。
+- 保持不变：11 个真实工作流、13 个既有 Gradio 公共端点、LAN REST 标识、Basic Auth、任务历史与素材文件路径。
+
+## 视觉与交互验证
+
+| 视口 | 状态 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| 1920 × 1080 | 图像创作、任务中心、素材库 | 通过 | `design-evidence/home-1920.png` |
+| 1920 × 1080 | 视频创作及六个二级工作流 | 通过 | `design-evidence/video-1920.png` |
+| 1920 × 1080 | 音频创作与 IndexTTS-2.5 | 通过 | `design-evidence/audio-1920.png` |
+| 1920 × 1080 | Qwen 双栏问答工作区 | 通过 | `design-evidence/tools-1920.png` |
+| 1920 × 1080 | 全局设置打开态 | 通过 | `design-evidence/settings-1920.png` |
+| 1366 × 768 | 桌面/笔记本紧凑布局 | 通过 | `design-evidence/responsive-1366.png` |
+| 720 × 900 | 窄屏导航、表格内部滚动 | 通过 | `design-evidence/responsive-720.png` |
+
+已验证的主要交互：
+
+- 一级导航可切换“图像创作 / 视频创作 / 音频创作 / 智能工具”，选中态同步更新。
+- 二级导航仅展示当前分区的真实工作流，调用的仍是原生 Gradio Tab 切换。
+- 全局设置可打开和关闭；关闭后面板 `display: none`、高度为 `0`，没有空白残留。
+- 无运行任务时实时进度区保持隐藏；任务表、操作按钮和历史状态继续显示。
+- 720px 视口下文档宽度与视口一致（`scrollWidth = clientWidth = 720`），没有页面级横向溢出。
+- 使用新标签页冷启动检查浏览器控制台，错误和警告均为 `0`。反复强制 reload 时出现的 Gradio 流连接 AbortError 属于测试导航中断，不会在正常冷启动出现。
+
+## 对照迭代
+
+1. 第一轮发现 Gradio 自动溢出菜单只显示省略号，属于 P1 导航缺失；改为保留原生 Tab 事件并把菜单铺为可见二级导航，同时增加四个一级分区。
+2. 第二轮发现 Qwen 表单纵向堆叠、音频上传区过高，属于 P2 信息密度问题；调整为问答区 + 模型配置双栏，并收紧音频上传区。
+3. 最终将设计图与生产截图成对检查：色彩、层级、卡片、状态条、双栏表单和响应式密度均达到设计方向；没有剩余 P0、P1 或 P2 视觉问题。
+
+## 有意保留的实现差异
+
+- 不复制设计图中的装饰性侧栏、积分、用户头像和非现有业务入口，避免生成无功能控件。
+- 不伪造素材、任务或运行状态；页面使用生产环境真实历史和实际服务状态。
+- Gradio 的原生输入组件继续承担表单交互，因此尺寸选择保留现有有效下拉数据，而非复制设计稿中的静态示例按钮。
+
+final result: passed

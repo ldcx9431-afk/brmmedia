@@ -683,101 +683,230 @@ def check_health() -> None:
 
 
 CUSTOM_CSS = """
+:root {
+    --brm-ink: #14253a;
+    --brm-muted: #65758b;
+    --brm-line: #dbe4eb;
+    --brm-soft: #f4f7f9;
+    --brm-panel: #ffffff;
+    --brm-teal: #0b8793;
+    --brm-teal-dark: #086775;
+    --brm-teal-soft: #e8f6f6;
+    --brm-shadow: 0 10px 30px rgba(22, 45, 64, 0.075);
+}
 footer {
     display: none !important;
 }
-.fillable {
-    max-width: 1540px !important;
-    margin: 0 auto !important;
-    padding: 18px 22px 34px !important;
+.gradio-container {
+    color: var(--brm-ink) !important;
+    background: #f5f8fa !important;
 }
-/* 工作流导航：桌面端以真实 Gradio Tab 作为左侧粘性菜单。
-   不再额外渲染“看起来可点、实际上不可点”的分类胶囊。 */
+.fillable {
+    max-width: 1660px !important;
+    margin: 0 auto !important;
+    padding: 16px 24px 38px !important;
+}
+#global-toolbar {
+    position: relative;
+    z-index: 10;
+    align-items: center;
+    min-height: 68px;
+    margin: 0 0 12px;
+    padding: 10px 16px 10px 20px;
+    border: 1px solid var(--brm-line);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: var(--brm-shadow);
+}
+#brand-lockup { margin: 0; }
+#brand-lockup .brm-brand-title {
+    color: var(--brm-ink);
+    font-size: 1.42rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+#brand-lockup .brm-brand-subtitle {
+    margin-top: 2px;
+    color: var(--brm-muted);
+    font-size: 0.78rem;
+}
+#global-toolbar button {
+    min-height: 40px !important;
+    border-color: #cfd9e2 !important;
+    border-radius: 9px !important;
+    background: #fff !important;
+    color: #31465b !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+}
+/* 设计稿中的一级功能区。真实工作流仍由下面的原生 Gradio Tabs 承载。 */
+#primary-nav {
+    gap: 6px;
+    align-items: center;
+    margin: 0 0 10px;
+    padding: 6px;
+    border: 1px solid var(--brm-line);
+    border-radius: 13px;
+    background: #fff;
+    box-shadow: 0 5px 18px rgba(22, 45, 64, 0.045);
+}
+#primary-nav > div { min-width: 0 !important; }
+#primary-nav button {
+    min-height: 44px !important;
+    border: 1px solid transparent !important;
+    border-radius: 9px !important;
+    background: transparent !important;
+    color: #536477 !important;
+    font-size: 0.96rem !important;
+    font-weight: 720 !important;
+    box-shadow: none !important;
+}
+#primary-nav button:hover {
+    border-color: #cde2e5 !important;
+    background: #f2f9fa !important;
+    color: var(--brm-teal-dark) !important;
+}
+#primary-nav[data-active="image"] #nav-image,
+#primary-nav[data-active="video"] #nav-video,
+#primary-nav[data-active="audio"] #nav-audio,
+#primary-nav[data-active="tools"] #nav-tools {
+    border-color: #b9dfe2 !important;
+    background: var(--brm-teal-soft) !important;
+    color: var(--brm-teal-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
+}
+/* Gradio 会把超出宽度的 Tab 放进省略号菜单。这里保留原生按钮和
+   原生切换逻辑，只将菜单铺开为设计稿中的二级工作流横向导航。 */
 #workflow-tabs {
     position: relative;
-    min-height: 460px;
-    margin-top: 12px;
-    padding: 18px 18px 18px 246px !important;
-    border: 1px solid #d9e2ec;
-    border-radius: 14px;
-    background: #fbfdff;
+    min-height: 0;
+    margin: 0;
+    padding: 0 !important;
+    border: 0;
+    background: transparent;
 }
-#workflow-tabs [role="tablist"] {
-    position: absolute !important;
-    top: 18px;
-    bottom: 18px;
-    left: 18px;
-    z-index: 2;
+#workflow-tabs > .tab-wrapper {
     display: flex !important;
-    width: 208px;
-    flex-direction: column !important;
-    flex-wrap: nowrap !important;
-    align-items: stretch !important;
-    gap: 3px !important;
-    overflow: auto !important;
-    padding: 4px 7px 12px 0 !important;
-    border: 0 !important;
-    scrollbar-width: thin;
-    scrollbar-color: #c7d5df transparent;
+    align-items: center !important;
+    gap: 7px;
+    margin: 0 0 10px;
+    padding: 6px 9px !important;
+    overflow: hidden;
+    border: 1px solid var(--brm-line);
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 5px 18px rgba(22, 45, 64, 0.04);
 }
-#workflow-tabs [role="tab"] {
-    position: relative;
-    min-height: 35px;
-    width: 100% !important;
+#workflow-tabs .tab-container.visually-hidden { display: none !important; }
+#workflow-tabs [role="tablist"] {
+    flex: 0 0 auto;
+    border: 0 !important;
+}
+#workflow-tabs .overflow-menu {
+    display: flex !important;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+#workflow-tabs .overflow-menu > button { display: none !important; }
+#workflow-tabs .overflow-dropdown,
+#workflow-tabs .overflow-dropdown.hide {
+    position: static !important;
+    display: flex !important;
+    flex: 1 1 auto;
+    flex-wrap: nowrap !important;
+    gap: 5px;
+    min-width: 0;
+    max-width: none !important;
+    padding: 0 !important;
+    overflow-x: auto !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    scrollbar-width: thin;
+}
+#workflow-tabs [role="tab"],
+#workflow-tabs .overflow-dropdown button {
+    position: relative !important;
+    flex: 0 0 auto !important;
+    min-height: 38px !important;
+    width: auto !important;
     min-width: 0 !important;
     margin: 0 !important;
-    padding: 8px 11px !important;
+    padding: 8px 12px !important;
     border: 1px solid transparent !important;
     border-radius: 8px !important;
-    color: #425466;
-    font-size: 0.88rem;
-    font-weight: 650;
+    background: transparent !important;
+    color: #526477 !important;
+    font-size: 0.86rem !important;
+    font-weight: 680 !important;
     white-space: nowrap;
-    text-align: left !important;
-    text-overflow: ellipsis;
-    overflow: hidden;
+    box-shadow: none !important;
 }
-#workflow-tabs [role="tab"]:hover {
-    border-color: #c7dce3 !important;
-    background: #eef7f8;
-    color: #0f4c5c;
+#workflow-tabs [role="tab"]:hover,
+#workflow-tabs .overflow-dropdown button:hover {
+    border-color: #c8e0e3 !important;
+    background: #f0f8f9 !important;
+    color: var(--brm-teal-dark) !important;
 }
 #workflow-tabs [role="tab"][aria-selected="true"] {
-    color: #0f5d70 !important;
-    border-color: #a9ced7 !important;
-    background: #e7f5f6;
-    box-shadow: inset 3px 0 0 #0f7186;
+    border-color: #b7dce0 !important;
+    background: var(--brm-teal-soft) !important;
+    color: var(--brm-teal-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
 }
 #workflow-tabs [role="tab"]:focus-visible {
-    outline: 3px solid rgba(15, 113, 134, 0.28) !important;
+    outline: 3px solid rgba(11, 135, 147, 0.24) !important;
     outline-offset: 1px;
 }
-/* 每一个标题都挂在可点击的原生 Tab 上，因此分区标题不会成为无效控件。 */
-#workflow-tabs [role="tab"]:nth-child(1)::before,
-#workflow-tabs [role="tab"]:nth-child(3)::before,
-#workflow-tabs [role="tab"]:nth-child(9)::before,
-#workflow-tabs [role="tab"]:nth-child(11)::before {
-    display: block;
-    margin: 3px 0 6px;
-    color: #78909c;
-    font-size: 0.68rem;
-    font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+#workflow-tabs [role="tabpanel"] {
+    min-width: 0;
+    padding: 18px !important;
+    border: 1px solid var(--brm-line);
+    border-radius: 14px;
+    background: var(--brm-panel);
+    box-shadow: var(--brm-shadow);
 }
-#workflow-tabs [role="tab"]:nth-child(1)::before { content: "图像创作"; }
-#workflow-tabs [role="tab"]:nth-child(3)::before { content: "视频创作"; }
-#workflow-tabs [role="tab"]:nth-child(9)::before { content: "音频创作"; }
-#workflow-tabs [role="tab"]:nth-child(11)::before { content: "智能工具"; }
-#workflow-tabs [role="tab"]:nth-child(3),
-#workflow-tabs [role="tab"]:nth-child(9),
-#workflow-tabs [role="tab"]:nth-child(11) {
-    margin-top: 9px !important;
-    padding-top: 4px !important;
+#workflow-tabs [role="tabpanel"] .row { gap: 14px; }
+#workflow-tabs [role="tabpanel"] .block {
+    border-color: #dce5ec !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
 }
-/* Gradio 的默认溢出菜单在左侧导航中没有价值，所有工作流均直接列出。 */
-#workflow-tabs [role="tablist"] > button:not([role="tab"]) { display: none !important; }
-#workflow-tabs [role="tabpanel"] { min-width: 0; }
+#workflow-tabs [role="tabpanel"] textarea,
+#workflow-tabs [role="tabpanel"] input {
+    color: var(--brm-ink) !important;
+}
+#workflow-tabs [role="tabpanel"] .audio-container {
+    min-height: 170px !important;
+    height: 170px !important;
+}
+#qwen-workspace { gap: 14px; align-items: stretch; }
+#qwen-chat-panel,
+#qwen-config-panel {
+    padding: 14px;
+    border: 1px solid var(--brm-line);
+    border-radius: 12px;
+    background: #fbfdfe;
+}
+#qwen-config-panel { align-self: stretch; }
+#q-table-md table,
+#q-table-md th,
+#q-table-md td { border-color: #dbe4eb !important; }
+#q-table-md table { font-size: 0.86rem; }
+button.primary {
+    border-color: var(--brm-teal) !important;
+    background: linear-gradient(135deg, var(--brm-teal), #087584) !important;
+    color: #fff !important;
+    box-shadow: 0 7px 16px rgba(11, 135, 147, 0.18) !important;
+}
+button.primary:hover {
+    border-color: var(--brm-teal-dark) !important;
+    background: linear-gradient(135deg, #0a7e8a, #075f6d) !important;
+}
 /* 任务实时进度：仅在有运行任务时显示，避免空 HTML 宿主占位。 */
 #q-live-progress {
     margin: 8px 0 10px;
@@ -841,15 +970,16 @@ footer {
 }
 /* 任务中心：摘要、运行态和历史列表采用同一张紧凑卡片。 */
 #task-center {
-    margin: 26px 0 0;
-    padding: 18px;
-    border: 1px solid #d8e2ee;
-    border-top: 3px solid #0f7186;
+    gap: 8px;
+    margin: 12px 0 0;
+    padding: 16px;
+    border: 1px solid var(--brm-line);
     border-radius: 14px;
-    background: #ffffff;
-    box-shadow: 0 10px 28px rgba(15, 42, 60, 0.08);
+    background: var(--brm-panel);
+    box-shadow: var(--brm-shadow);
 }
-#task-center-title { margin: 0 0 4px; }
+#task-center-title { margin: 0 !important; }
+#task-center-title h3 { margin: 0 0 2px !important; color: var(--brm-ink); }
 #q-summary { margin: 0; }
 #q-summary .brm-queue-summary {
     display: flex;
@@ -927,11 +1057,13 @@ footer {
 }
 #queue-actions { gap: 9px; }
 #queue-actions button {
-    min-height: 52px !important;
-    padding: 10px 12px !important;
+    min-height: 42px !important;
+    padding: 8px 12px !important;
     border-radius: 9px !important;
     font-size: 0.9rem !important;
 }
+#task-center-body { gap: 12px; align-items: stretch; }
+#task-operation-status { min-height: 0 !important; margin: 0 !important; }
 /* 完成音频是一张可直接点选的素材清单；选中后右侧播放器立刻试听并提供下载。 */
 #completed-audio-list {
     border: 1px solid #d8e2ee;
@@ -951,22 +1083,32 @@ footer {
     color: #0f5d70;
 }
 #completed-audio-list label:last-child { border-bottom: 0; }
-#completed-media { margin-top: 18px; }
+#asset-center {
+    gap: 10px;
+    margin: 12px 0 0;
+    padding: 16px;
+    border: 1px solid var(--brm-line);
+    border-radius: 14px;
+    background: var(--brm-panel);
+    box-shadow: var(--brm-shadow);
+}
+#completed-media { margin: 0 !important; }
+#completed-media h3 { margin: 0 !important; color: var(--brm-ink); }
 #completed-media-hint { margin: 8px 2px 0; color: #64748b; font-size: 0.86rem; }
 /* 素材库优先展示更多真实产物，完整素材仍在点击后通过原查看器展示。 */
 #q-gallery {
     border: 1px solid #d8e2ee;
     border-radius: 12px;
     overflow: hidden;
-    background: #f8fafc;
+    background: #f7fafb;
 }
 #q-gallery .grid-wrap {
-    padding: 8px !important;
-    gap: 8px !important;
+    padding: 7px !important;
+    gap: 7px !important;
 }
 #q-gallery button {
-    transform: scale(0.84);
-    transform-origin: center;
+    transform: scale(0.78);
+    transform-origin: top right;
 }
 #q-gallery img,
 #q-gallery video { border-radius: 7px !important; }
@@ -1081,10 +1223,6 @@ footer {
     background: #fdfdfb;
     box-shadow: 0 18px 44px rgba(20, 36, 58, 0.14);
 }
-#global-toolbar {
-    align-items: center;
-    margin-bottom: 6px;
-}
 #global-settings-panel {
     font-size: 1rem;
     color: #1f2937;
@@ -1121,6 +1259,16 @@ footer {
 }
 @media (max-width: 720px) {
     .fillable { padding: 12px 12px 26px !important; }
+    #global-toolbar {
+        min-height: 58px;
+        padding: 8px 10px 8px 14px;
+    }
+    #brand-lockup .brm-brand-subtitle { display: none; }
+    #primary-nav {
+        flex-wrap: nowrap !important;
+        overflow-x: auto;
+    }
+    #primary-nav > div { min-width: 126px !important; }
     #workflow-tabs {
         min-height: 0;
         padding: 0 !important;
@@ -1128,30 +1276,17 @@ footer {
         border-radius: 0;
         background: transparent;
     }
-    #workflow-tabs [role="tablist"] {
-        position: static !important;
-        width: auto;
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        overflow-x: auto !important;
-        align-items: center !important;
-        padding-bottom: 8px !important;
-        scrollbar-width: thin;
-        border-bottom: 1px solid #d9e2ec !important;
+    #workflow-tabs > .tab-wrapper { padding: 5px 7px !important; }
+    #workflow-tabs [role="tab"],
+    #workflow-tabs .overflow-dropdown button {
+        font-size: 0.82rem !important;
+        padding: 7px 9px !important;
     }
-    #workflow-tabs [role="tab"] {
-        width: auto !important;
-        flex: 0 0 auto;
-        font-size: 0.88rem;
-        padding: 8px 10px !important;
-    }
-    #workflow-tabs [role="tab"]::before { display: none !important; }
-    #workflow-tabs [role="tab"]:nth-child(3),
-    #workflow-tabs [role="tab"]:nth-child(9),
-    #workflow-tabs [role="tab"]:nth-child(11) { margin-top: 0 !important; }
+    #workflow-tabs [role="tabpanel"] { padding: 12px !important; }
     #q-summary .brm-queue-summary { gap: 7px; }
     #q-table-md { height: 242px; }
     #task-center { padding: 10px; }
+    #asset-center { padding: 10px; }
     #q-gallery { height: 420px !important; }
     #q-gallery .grid-wrap { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
     #global-settings-panel {
@@ -1173,6 +1308,7 @@ footer {
     }
 }
 @media (min-width: 721px) and (max-width: 1200px) {
+    #primary-nav button { font-size: 0.9rem !important; }
     #q-gallery .grid-wrap { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
 }
 """
@@ -2712,13 +2848,89 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
 def clear_qwen_chat():
     return "", ""
 
+
+# Gradio 6 会动态把次级 Tab 放入 overflow 菜单。这个初始化脚本只负责
+# 将原生按钮按四个产品分区整理并保持一级导航选中态，不改变任何 API、
+# 事件函数或任务语义。
+BRM_NAV_JS = r"""
+(() => {
+  const groups = {
+    "文生图Z-Image": "image",
+    "图片编辑FLUX.2-klein": "image",
+    "MiniMax H3 文生视频": "video",
+    "MiniMax H3 图生视频": "video",
+    "文生视频 LTX2.3": "video",
+    "图生视频 LTX2.3": "video",
+    "首尾帧视频LTX2.3": "video",
+    "数字人-语音驱动LTX2.3": "video",
+    "语音克隆 IndexTTS-2.5": "audio",
+    "语音克隆 IndexTTS-2（回退）": "audio",
+    "音乐生成ACE-Step 1.5": "audio",
+    "Qwen 大模型": "tools"
+  };
+  const firstTabs = {
+    image: "文生图Z-Image",
+    video: "MiniMax H3 文生视频",
+    audio: "语音克隆 IndexTTS-2.5",
+    tools: "Qwen 大模型"
+  };
+  const boot = () => {
+    const root = document.querySelector("#workflow-tabs");
+    const nav = document.querySelector("#primary-nav");
+    if (!root || !nav) {
+      window.setTimeout(boot, 80);
+      return;
+    }
+    if (window.__brmNavigationReady) return;
+
+    const labelOf = (button) => (button?.textContent || "").trim();
+    const workflowButtons = () => Array.from(root.querySelectorAll(
+      '.tab-container[role="tablist"] button, .overflow-dropdown button'
+    ));
+    const showGroup = (group) => {
+      nav.dataset.active = group;
+      workflowButtons().forEach((button) => {
+        const buttonGroup = groups[labelOf(button)];
+        button.style.display = buttonGroup === group ? "inline-flex" : "none";
+      });
+    };
+    const syncFromSelected = () => {
+      const selected = root.querySelector('[role="tab"][aria-selected="true"]');
+      showGroup(groups[labelOf(selected)] || nav.dataset.active || "image");
+    };
+
+    window.__brmSelectCategory = (group) => {
+      showGroup(group);
+      const targetLabel = firstTabs[group];
+      const target = workflowButtons().find((button) => labelOf(button) === targetLabel);
+      if (target && target.getAttribute("aria-selected") !== "true") target.click();
+      window.setTimeout(syncFromSelected, 60);
+    };
+    root.addEventListener("click", () => window.setTimeout(syncFromSelected, 60));
+    new MutationObserver(syncFromSelected).observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-selected", "class"]
+    });
+    window.__brmNavigationReady = true;
+    syncFromSelected();
+  };
+  boot();
+})();
+"""
+
 def build_ui():
     with gr.Blocks(title="ComfyUI × Gradio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
         with gr.Row(elem_id="global-toolbar", equal_height=True):
             with gr.Column(scale=8):
-                gr.Markdown("## BRM AI 工作台")
+                gr.HTML(
+                    '<div class="brm-brand-title">BRM AI 工作台</div>'
+                    '<div class="brm-brand-subtitle">本地 AI 媒体生成、任务编排与素材管理</div>',
+                    elem_id="brand-lockup",
+                )
             with gr.Column(scale=1, min_width=140):
-                settings_btn = gr.Button("⚙ 全局设置", variant="secondary")
+                settings_btn = gr.Button("全局设置", variant="secondary")
 
         with gr.Column(visible=False, elem_id="global-settings-panel") as settings_panel:
             with gr.Row(equal_height=True):
@@ -2734,7 +2946,7 @@ def build_ui():
                     )
                 with gr.Column(scale=1, min_width=116):
                     settings_close_top_btn = gr.Button(
-                        "✕ 关闭", variant="secondary", elem_id="global-settings-close",
+                        "关闭", variant="secondary", elem_id="global-settings-close",
                     )
             with gr.Row():
                 # Gradio 6 rejects a degenerate Slider range.  In H3 mode the
@@ -2777,8 +2989,19 @@ def build_ui():
             change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
             lan_password_status = gr.Markdown("")
 
-        # ---- 每个工作流一个 Tab。桌面端由 CSS 将原生 Tab 直接呈为左侧菜单；
-        # 所有名称都是可点击的真实入口，窄屏再退化为可横向滚动的原生导航。 ----
+        # 一级分区对应设计稿中的图像、视频、音频和智能工具。按钮只调用前端
+        # 原生 Tab 点击，不会新增服务端任务或公开 API。
+        with gr.Row(elem_id="primary-nav", equal_height=True):
+            with gr.Column(scale=1, min_width=140):
+                nav_image_btn = gr.Button("图像创作", elem_id="nav-image")
+            with gr.Column(scale=1, min_width=140):
+                nav_video_btn = gr.Button("视频创作", elem_id="nav-video")
+            with gr.Column(scale=1, min_width=140):
+                nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
+            with gr.Column(scale=1, min_width=140):
+                nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
+
+        # ---- 每个工作流仍是原生 Gradio Tab；CSS/初始化脚本只负责分区呈现。 ----
         with gr.Tabs(elem_id="workflow-tabs"):
             # ========== Tab 1 ==========
             with gr.Tab("文生图Z-Image"):
@@ -3148,100 +3371,103 @@ def build_ui():
 
             # ========== Tab 9 ==========
             with gr.Tab("Qwen 大模型"):
-                gr.Markdown(
-                    "使用本机 Qwen3.5-4B 的流式问答能力做快速验证。"
-                    "Qwen 固定在 A4000，媒体工作流固定在 A5000；两项服务应同时在线。"
-                )
-                qwen_system = gr.Textbox(
-                    label="系统提示词（可选）",
-                    value="你是一个专业、简洁的中文助手。",
-                    lines=2,
-                )
-                qwen_question = gr.Textbox(
-                    label="问题",
-                    placeholder="例如：用三句话解释什么是向量数据库？",
-                    lines=5,
-                    autofocus=True,
-                )
-                with gr.Row():
-                    qwen_temperature = gr.Slider(
-                        0, 1.5, value=0.7, step=0.1,
-                        label="温度",
-                    )
-                    qwen_max_tokens = gr.Slider(
-                        128, 3584, value=2048, step=128, precision=0,
-                        label="最大输出 Token（长文建议 3072+）",
-                    )
-                qwen_enable_thinking = gr.Checkbox(
-                    label="启用模型推理（会占用输出字数）",
-                    value=False,
-                    info="普通问答默认关闭；仅在需要观察推理流时开启。",
-                )
-                with gr.Row():
-                    qwen_send_btn = gr.Button("发送并流式回答", variant="primary")
-                    qwen_stop_btn = gr.Button("停止", variant="stop")
-                    qwen_clear_btn = gr.Button("清空", variant="secondary")
-                qwen_answer = gr.Textbox(
-                    label="Qwen 流式回答",
-                    lines=18,
-                    max_lines=30,
-                    interactive=False,
-                    autoscroll=True,
-                    buttons=["copy"],
-                    elem_id="qwen-answer",
-                )
-
-        gr.Markdown("---")
+                with gr.Row(elem_id="qwen-workspace"):
+                    with gr.Column(scale=3, elem_id="qwen-chat-panel"):
+                        gr.Markdown(
+                            "### Qwen 本地大模型\n"
+                            "流式验证问答能力；Qwen 固定在 A4000，媒体工作流固定在 A5000。"
+                        )
+                        qwen_system = gr.Textbox(
+                            label="系统提示词（可选）",
+                            value="你是一个专业、简洁的中文助手。",
+                            lines=2,
+                        )
+                        qwen_question = gr.Textbox(
+                            label="问题",
+                            placeholder="例如：用三句话解释什么是向量数据库？",
+                            lines=5,
+                            autofocus=True,
+                        )
+                        qwen_answer = gr.Textbox(
+                            label="Qwen 流式回答",
+                            lines=18,
+                            max_lines=30,
+                            interactive=False,
+                            autoscroll=True,
+                            buttons=["copy"],
+                            elem_id="qwen-answer",
+                        )
+                    with gr.Column(scale=1, min_width=300, elem_id="qwen-config-panel"):
+                        gr.Markdown("### 模型运行配置\nA4000 · Qwen3.5-4B-AWQ · 在线")
+                        qwen_temperature = gr.Slider(
+                            0, 1.5, value=0.7, step=0.1,
+                            label="温度",
+                        )
+                        qwen_max_tokens = gr.Slider(
+                            128, 3584, value=2048, step=128, precision=0,
+                            label="最大输出 Token（长文建议 3072+）",
+                        )
+                        qwen_enable_thinking = gr.Checkbox(
+                            label="启用模型推理（会占用输出字数）",
+                            value=False,
+                            info="普通问答默认关闭；仅在需要观察推理流时开启。",
+                        )
+                        qwen_send_btn = gr.Button("发送并流式回答", variant="primary")
+                        qwen_stop_btn = gr.Button("停止", variant="stop")
+                        qwen_clear_btn = gr.Button("清空", variant="secondary")
 
         # ---- 共享的任务队列面板(所有 Tab 共用一个队列与后台 worker) ----
-        gr.Markdown("### 任务中心", elem_id="task-center-title")
-        q_summary = gr.HTML(value="", elem_id="q-summary")
-        q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
-        with gr.Row(equal_height=True, elem_id="task-center"):
-            with gr.Column(scale=10):
-                q_table = gr.Markdown(elem_id="q-table-md")
-            with gr.Column(scale=1, min_width=168, elem_id="queue-actions"):
-                clear_btn = gr.Button("清空排队任务")
-                interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
-        op_status = gr.Markdown("")
-        with gr.Row():
-            completed_audio_list = gr.Radio(
-                label="已完成音频 · 点击名称即可试听",
-                choices=[],
-                value=None,
-                interactive=True,
-                scale=1,
-                elem_id="completed-audio-list",
+        with gr.Column(elem_id="task-center"):
+            gr.Markdown("### 任务中心", elem_id="task-center-title")
+            q_summary = gr.HTML(value="", elem_id="q-summary")
+            q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
+            with gr.Row(equal_height=True, elem_id="task-center-body"):
+                with gr.Column(scale=10):
+                    q_table = gr.Markdown(elem_id="q-table-md")
+                with gr.Column(scale=1, min_width=168, elem_id="queue-actions"):
+                    clear_btn = gr.Button("清空排队任务")
+                    interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
+            op_status = gr.Markdown("", elem_id="task-operation-status")
+
+        with gr.Column(elem_id="asset-center"):
+            gr.Markdown("### 素材库", elem_id="completed-media")
+            with gr.Row():
+                completed_audio_list = gr.Radio(
+                    label="已完成音频 · 点击名称即可试听",
+                    choices=[],
+                    value=None,
+                    interactive=True,
+                    scale=1,
+                    elem_id="completed-audio-list",
+                )
+                completed_audio_player = gr.Audio(
+                    label="音频试听（播放器右上角可下载）",
+                    type="filepath",
+                    interactive=False,
+                    buttons=["download"],
+                    scale=2,
+                )
+            clear_audio_preview_btn = gr.Button("停止并清除当前试听", variant="secondary")
+            q_gallery = gr.Gallery(
+                label="已完成图片/视频（累计，最多 30 项）",
+                columns=7,
+                rows=3,
+                height=420,
+                object_fit="cover",
+                allow_preview=False,
+                preview=False,
+                buttons=["download", "download_all"],
+                elem_id="q-gallery",
             )
-            completed_audio_player = gr.Audio(
-                label="音频试听（播放器右上角可下载）",
-                type="filepath",
-                interactive=False,
-                buttons=["download"],
-                scale=2,
+            completed_gallery_paths = gr.State([])
+            media_viewer = gr.HTML(value="", visible=False, elem_id="media-viewer")
+            media_viewer_close_btn = gr.Button(
+                "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
             )
-        clear_audio_preview_btn = gr.Button("停止并清除当前试听", variant="secondary")
-        gr.Markdown("#### 素材库", elem_id="completed-media")
-        q_gallery = gr.Gallery(
-            label="已完成图片/视频（累计，最多 30 项）",
-            columns=7,
-            rows=3,
-            height=420,
-            object_fit="cover",
-            allow_preview=False,
-            preview=False,
-            buttons=["download", "download_all"],
-            elem_id="q-gallery",
-        )
-        completed_gallery_paths = gr.State([])
-        media_viewer = gr.HTML(value="", visible=False, elem_id="media-viewer")
-        media_viewer_close_btn = gr.Button(
-            "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
-        )
-        gr.Markdown(
-            "点击缩略图打开浏览器主体大预览；可在预览内下载，画廊工具栏可下载全部。",
-            elem_id="completed-media-hint",
-        )
+            gr.Markdown(
+                "点击缩略图打开浏览器主体大预览；可在预览内下载，画廊工具栏可下载全部。",
+                elem_id="completed-media-hint",
+            )
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
@@ -3303,6 +3529,26 @@ def build_ui():
         gr.api(api_task_status, api_name="task_status")
 
         # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
+        nav_image_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectCategory?.("image"); return []; }',
+            api_visibility="private",
+        )
+        nav_video_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectCategory?.("video"); return []; }',
+            api_visibility="private",
+        )
+        nav_audio_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectCategory?.("audio"); return []; }',
+            api_visibility="private",
+        )
+        nav_tools_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectCategory?.("tools"); return []; }',
+            api_visibility="private",
+        )
         settings_btn.click(fn=show_global_settings, outputs=settings_panel, api_visibility="private")
         settings_close_top_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
         close_settings_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
@@ -3357,6 +3603,7 @@ def main():
         server_port=server_port,
         inbrowser=False,
         root_path=GRADIO_ROOT_PATH,
+        js=BRM_NAV_JS,
     )
 
 
