@@ -797,6 +797,26 @@ footer {
     color: var(--brm-teal-dark) !important;
     box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
 }
+/* 全局设置是同一层级的工具入口：沿用一级导航的尺寸与状态，而不是裸文本按钮。 */
+#global-settings-trigger { min-width: 132px !important; }
+#global-settings-trigger button {
+    min-height: 46px !important;
+    padding: 0 16px !important;
+    border: 1px solid transparent !important;
+    border-radius: 9px !important;
+    background: transparent !important;
+    color: #536477 !important;
+    font-size: 0.96rem !important;
+    font-weight: 720 !important;
+}
+#global-settings-trigger button:hover,
+#global-settings-trigger button:focus-visible {
+    border-color: #b9dfe2 !important;
+    background: var(--brm-teal-soft) !important;
+    color: var(--brm-teal-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
+}
+#global-settings-trigger button:focus { outline: none !important; }
 /* Gradio 会把超出宽度的 Tab 放进省略号菜单。这里保留原生按钮和
    原生切换逻辑，只将菜单铺开为设计稿中的二级工作流横向导航。 */
 #workflow-tabs {
@@ -810,13 +830,14 @@ footer {
 #workflow-tabs > .tab-wrapper {
     display: flex !important;
     align-items: center !important;
-    gap: 7px;
+    gap: 8px;
     margin: 0 0 10px;
-    padding: 6px 9px !important;
+    min-height: 58px;
+    padding: 6px 10px !important;
     overflow: hidden;
     border: 1px solid var(--brm-line);
-    border-radius: 12px;
-    background: #fff;
+    border-radius: 14px;
+    background: #fbfdfe;
     box-shadow: 0 5px 18px rgba(22, 45, 64, 0.04);
 }
 #workflow-tabs .tab-container.visually-hidden { display: none !important; }
@@ -836,7 +857,7 @@ footer {
     display: flex !important;
     flex: 1 1 auto;
     flex-wrap: nowrap !important;
-    gap: 5px;
+    gap: 7px;
     min-width: 0;
     max-width: none !important;
     padding: 0 !important;
@@ -854,13 +875,13 @@ footer {
 #workflow-tabs .overflow-dropdown button {
     position: relative !important;
     flex: 0 0 auto !important;
-    min-height: 38px !important;
+    min-height: 44px !important;
     width: auto !important;
     min-width: 0 !important;
     margin: 0 !important;
-    padding: 8px 12px !important;
-    border: 1px solid transparent !important;
-    border-radius: 8px !important;
+    padding: 9px 15px !important;
+    border: 1px solid #e1e8ee !important;
+    border-radius: 9px !important;
     background: transparent !important;
     color: #526477 !important;
     font-size: 0.86rem !important;
@@ -870,15 +891,15 @@ footer {
 }
 #workflow-tabs [role="tab"]:hover,
 #workflow-tabs .overflow-dropdown button:hover {
-    border-color: #c8e0e3 !important;
-    background: #f0f8f9 !important;
+    border-color: #b9dfe2 !important;
+    background: #f1f9fa !important;
     color: var(--brm-teal-dark) !important;
 }
 #workflow-tabs [role="tab"][aria-selected="true"] {
-    border-color: #b7dce0 !important;
+    border-color: #9ed5d9 !important;
     background: var(--brm-teal-soft) !important;
     color: var(--brm-teal-dark) !important;
-    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-teal), 0 2px 5px rgba(11, 135, 147, 0.08) !important;
 }
 #workflow-tabs [role="tab"]:focus-visible {
     outline: 3px solid rgba(11, 135, 147, 0.24) !important;
@@ -1266,18 +1287,17 @@ html[data-brm-section="tools"] #asset-center {
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
 }
 #global-settings-panel {
-    width: min(1120px, 100%) !important;
+    width: min(1240px, 100%) !important;
     height: auto !important;
     max-height: none !important;
     overflow: visible;
     box-sizing: border-box;
     margin: 10px auto 24px;
-    padding: 24px;
-    border: 1px solid #dbe3ee;
-    border-top: 4px solid #155e75;
-    border-radius: 16px;
-    background: #fdfdfb;
-    box-shadow: 0 18px 44px rgba(20, 36, 58, 0.14);
+    padding: 20px;
+    border: 1px solid var(--brm-line);
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: var(--brm-shadow);
 }
 #global-settings-panel {
     font-size: 1rem;
@@ -1289,8 +1309,8 @@ html[data-brm-section="tools"] #asset-center {
     background: transparent !important;
 }
 #global-settings-panel label span {
-    color: #155e75 !important;
-    background: #e8f4f2 !important;
+    color: var(--brm-teal-dark) !important;
+    background: var(--brm-teal-soft) !important;
     border-radius: 999px;
     padding: 3px 9px;
     font-size: 0.88rem;
@@ -1304,8 +1324,8 @@ html[data-brm-section="tools"] #asset-center {
     border-radius: 9px !important;
 }
 #global-settings-panel button.primary {
-    background: #155e75 !important;
-    border-color: #155e75 !important;
+    background: var(--brm-teal) !important;
+    border-color: var(--brm-teal) !important;
 }
 #global-settings-close {
     min-width: 116px !important;
@@ -3369,8 +3389,6 @@ BRM_NAV_JS = r"""
 def build_ui():
     with gr.Blocks(
         title="BRM AI 工作台",
-        css=CUSTOM_CSS,
-        theme=gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate"),
     ) as demo:
         with gr.Row(elem_id="global-toolbar", equal_height=True):
             with gr.Column(scale=2, min_width=260):
@@ -3391,7 +3409,7 @@ def build_ui():
                         nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
                     with gr.Column(scale=1, min_width=120):
                         nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
-            with gr.Column(scale=1, min_width=140):
+            with gr.Column(scale=1, min_width=140, elem_id="global-settings-trigger"):
                 settings_btn = gr.Button("全局设置", variant="secondary")
 
         with gr.Column(visible=False, elem_id="global-settings-panel") as settings_panel:
@@ -4053,6 +4071,8 @@ def main():
     demo.launch(
         server_name=GRADIO_HOST,
         server_port=server_port,
+        css=CUSTOM_CSS,
+        theme=gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate"),
         inbrowser=False,
         root_path=GRADIO_ROOT_PATH,
         js=BRM_NAV_JS,
