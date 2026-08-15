@@ -16,6 +16,7 @@ import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -144,7 +145,7 @@ class TaskQueueTests(unittest.TestCase):
         previous_queue = self.webui.task_queue
         self.webui.task_queue = queue
         try:
-            summary, live_update, table_md, *_ = self.webui.render_queue()
+            summary, live_update, task_cards, system_status, table_md, asset_html = self.webui.render_queue()
         finally:
             self.webui.task_queue = previous_queue
 
@@ -164,20 +165,23 @@ class TaskQueueTests(unittest.TestCase):
         )
         self.assertIn("正在采样生成", table_md)
         self.assertIn("3/8 步", table_md)
+        self.assertIn("正在采样生成", task_cards)
+        self.assertIn("系统状态", system_status)
+        self.assertIn("统一素材库", asset_html)
 
     def test_queue_hides_live_progress_without_running_task(self):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
         previous_queue = self.webui.task_queue
         self.webui.task_queue = queue
         try:
-            _, live_update, _, *_ = self.webui.render_queue()
+            _, live_update, _, _, _, _ = self.webui.render_queue()
         finally:
             self.webui.task_queue = previous_queue
 
         self.assertFalse(live_update["visible"])
         self.assertEqual(live_update["value"], "")
 
-    def test_completed_audio_choice_plays_directly_without_dropdown(self):
+    def test_completed_audio_is_present_in_unified_library_without_audio_section(self):
         audio_path = self.output_dir / "direct-listen.mp3"
         audio_path.write_bytes(b"audio-fixture")
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
@@ -190,16 +194,35 @@ class TaskQueueTests(unittest.TestCase):
         previous_queue = self.webui.task_queue
         self.webui.task_queue = queue
         try:
-            _, _, _, _, audio_update, _ = self.webui.render_queue()
+            _, _, _, _, _, asset_html = self.webui.render_queue()
         finally:
             self.webui.task_queue = previous_queue
 
-        resolved_audio_path = str(audio_path.resolve())
-        self.assertEqual(audio_update["choices"], [(audio_path.name, resolved_audio_path)])
-        self.assertEqual(
-            self.webui.play_completed_audio(resolved_audio_path),
-            resolved_audio_path,
-        )
+        self.assertIn('data-asset-type="audio"', asset_html)
+        self.assertIn('data-brm-action="audio-play"', asset_html)
+        self.assertIn(audio_path.name, asset_html)
+        self.assertNotIn('data-brm-section="audio"', asset_html)
+
+    def test_completed_asset_bundle_uses_only_valid_output_files(self):
+        image_path = self.output_dir / "bundle-image.png"
+        image_path.write_bytes(b"image-fixture")
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        task = self.webui.Task("bundle-1", "打包素材", "text-to-image", {})
+        task.status = self.webui.TaskStatus.DONE
+        task.result = [str(image_path), "/etc/passwd"]
+        with queue._lock:
+            queue._done = [task]
+        previous_queue = self.webui.task_queue
+        self.webui.task_queue = queue
+        try:
+            update = self.webui.build_completed_assets_bundle()
+        finally:
+            self.webui.task_queue = previous_queue
+        self.assertTrue(update["visible"])
+        archive_path = Path(update["value"])
+        self.assertTrue(archive_path.is_file())
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(archive.namelist(), [image_path.name])
 
     def test_dense_workspace_layout_keeps_three_gallery_rows(self):
         source = WEBUI_PATH.read_text(encoding="utf-8")
@@ -219,14 +242,17 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('elem_classes=["workflow-heading"]', source)
         self.assertIn('elem_id="task-center-body"', source)
         self.assertIn('elem_id="asset-center"', source)
-        self.assertIn('elem_id="audio-asset-workspace"', source)
-        self.assertIn('elem_id="audio-preview-clear"', source)
-        self.assertIn('html[data-brm-section="tools"] #asset-center', source)
-        self.assertIn('completed_audio_list.change(', source)
-        self.assertIn('play_completed_audio', source)
-        self.assertIn('columns=7,', source)
-        self.assertIn('rows=3,', source)
-        self.assertIn('height=420,', source)
+        self.assertIn('with gr.Tab("任务中心")', source)
+        self.assertIn('elem_id="dashboard-task-cards"', source)
+        self.assertIn('elem_id="dashboard-system-status"', source)
+        self.assertIn('id="brm-asset-grid"', source)
+        self.assertIn('grid-template-columns:repeat(7,minmax(0,1fr))', source)
+        self.assertIn('grid-auto-rows:128px', source)
+        self.assertIn('height:448px', source)
+        self.assertIn('id="brm-audio-dock"', source)
+        self.assertIn('data-brm-action="audio-clear"', source)
+        self.assertIn('html:not([data-brm-section="audio"]) #audio-asset-workspace', source)
+        self.assertIn('display: initial !important', source)
         self.assertIn('min_value=24, max_value=100', source)
         self.assertIn('visible=bool(running)', source)
 

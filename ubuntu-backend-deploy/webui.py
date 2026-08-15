@@ -29,6 +29,10 @@ import random
 import shutil
 import threading
 import subprocess
+import hashlib
+import queue as stdlib_queue
+import zipfile
+from datetime import datetime
 from collections import deque
 from dataclasses import dataclass, field
 from html import escape
@@ -107,6 +111,18 @@ def persisted_output_path(value) -> Path | None:
 
 DONE_GALLERY_MAX = 30       # 已完成画廊最多展示多少张
 DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时间运行后无限增长)
+
+# 首页素材卡片需要的派生预览均放在输出目录的私有缓存中。原始素材和
+# task-history 不会被修改；缓存路径也绝不参与任务产物扫描。
+MEDIA_CACHE_DIR = OUTPUT_DIR / ".brm-cache"
+THUMB_CACHE_DIR = MEDIA_CACHE_DIR / "thumbnails"
+DOWNLOAD_CACHE_DIR = MEDIA_CACHE_DIR / "downloads"
+_thumb_jobs: stdlib_queue.Queue[tuple[Path, Path, str]] = stdlib_queue.Queue()
+_thumb_pending: set[str] = set()
+_thumb_lock = threading.Lock()
+_thumb_worker_started = False
+_system_status_cache: tuple[float, dict[str, str]] = (0.0, {})
+_system_status_lock = threading.Lock()
 
 
 ################################ YZY启动器配置专用 开始 ##########################################
@@ -1365,6 +1381,88 @@ html[data-brm-section="tools"] #asset-center {
     #primary-nav button { font-size: 0.9rem !important; }
     #q-gallery .grid-wrap { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
 }
+/* -------------------------------------------------------------------------
+   任务中心首页。仅使用真实任务和真实产物；不依赖分区 CSS 隐藏音频。       */
+#brand-lockup .brm-brand-home {
+    display: flex; align-items: center; gap: 10px; width: 100%; padding: 0;
+    border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left;
+}
+#brand-lockup .brm-brand-home:hover { background: transparent !important; border-color: transparent !important; }
+#brand-lockup .brm-brand-home > span { display:block; }
+#brand-lockup .brm-brand-subtitle { display:block; }
+#brand-lockup .brm-brand-mark { color: var(--brm-teal); font-size: 1.6rem; font-weight: 900; }
+html[data-brm-section="home"] #workflow-tabs > .tab-wrapper,
+html[data-brm-section="home"] #workflow-tabs [role="tabpanel"] { display: none !important; }
+html[data-brm-section="home"] #workflow-tabs { display: none !important; }
+html[data-brm-section="home"] #task-center,
+html[data-brm-section="home"] #asset-center { margin-top: 0; }
+/* Never hide the unified audio asset library according to the selected form. */
+html:not([data-brm-section="audio"]) #audio-asset-workspace,
+html:not([data-brm-section="audio"]) #audio-preview-clear,
+html[data-brm-section="audio"] #q-gallery,
+html[data-brm-section="audio"] #completed-media-hint,
+html[data-brm-section="tools"] #asset-center { display: initial !important; }
+#task-center {
+    margin: 0; padding: 18px; border-radius: 16px; background: #fff;
+}
+#dashboard-command-bar { display:flex; justify-content:space-between; align-items:center; gap:14px; margin:0 0 12px; }
+#dashboard-command-bar .brm-dashboard-title h2 { margin:0; font-size:1.22rem; font-weight:800; letter-spacing:-.02em; }
+#dashboard-command-bar .brm-dashboard-title p { margin:3px 0 0; color:var(--brm-muted); font-size:.84rem; }
+#dashboard-command-bar .brm-dashboard-actions { display:flex; align-items:center; gap:8px; }
+#dashboard-command-bar button { min-height:38px !important; border-radius:9px !important; }
+#dashboard-new-task-menu { position:relative; }
+#dashboard-new-task-menu summary { list-style:none; cursor:pointer; padding:9px 13px; border-radius:9px; color:#fff; background:var(--brm-teal); font-weight:800; }
+#dashboard-new-task-menu summary::-webkit-details-marker { display:none; }
+#dashboard-new-task-menu .brm-new-task-list { position:absolute; top:calc(100% + 7px); right:0; z-index:60; display:grid; grid-template-columns:repeat(2,minmax(150px,1fr)); width:390px; padding:8px; gap:5px; border:1px solid var(--brm-line); border-radius:12px; background:#fff; box-shadow:0 18px 42px rgba(21,39,58,.18); }
+#dashboard-new-task-menu button { min-height:34px !important; text-align:left; font-weight:650 !important; }
+#q-summary { margin-bottom:10px; }
+#dashboard-task-cards { min-width:0; }
+.brm-task-card-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
+.brm-task-card { overflow:hidden; min-width:0; padding:12px; border:1px solid #dfe7ee; border-radius:12px; background:#fff; box-shadow:0 3px 12px rgba(23,43,65,.04); }
+.brm-task-card-top { display:flex; justify-content:space-between; gap:8px; color:#607084; font-size:.75rem; font-weight:700; }
+.brm-task-card-top b { flex:0 0 auto; color:#526477; font-weight:750; }
+.brm-task-card.is-done .brm-task-card-top b { color:#16854b; }
+.brm-task-card.is-error .brm-task-card-top b,.brm-task-card.is-timeout .brm-task-card-top b { color:#c03545; }
+.brm-task-card.is-running .brm-task-card-top b { color:#0a7481; }
+.brm-task-card h4 { height:2.5em; margin:7px 0; overflow:hidden; color:#1d3044; font-size:.9rem; line-height:1.25; }
+.brm-task-card-preview { height:106px; overflow:hidden; display:flex; align-items:center; justify-content:center; border-radius:8px; background:#f2f6f8; }
+.brm-task-card-preview img,.brm-task-card-preview video { display:block; width:100%; height:100%; object-fit:cover; }
+.brm-task-no-preview { color:#8290a1; font-size:.78rem; }
+.brm-task-progress { margin-top:8px; color:#607084; font-size:.74rem; }
+.brm-task-progress span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.brm-task-progress i { display:block; height:5px; margin-top:5px; overflow:hidden; border-radius:99px; background:#e5edf1; }
+.brm-task-progress em { display:block; height:100%; border-radius:inherit; background:var(--brm-teal); }
+.brm-task-card footer { display:flex; justify-content:space-between; gap:7px; margin-top:8px; color:#7a8796; font-size:.7rem; white-space:nowrap; }
+.brm-empty-tasks { grid-column:1/-1; padding:22px; border:1px dashed #ccd8e1; border-radius:11px; color:#65758b; text-align:center; }
+#dashboard-system-status { min-width:265px; }
+.brm-system-status { height:100%; box-sizing:border-box; padding:14px; border:1px solid #dfe7ee; border-radius:12px; background:#fbfdfe; }
+.brm-system-status h3 { margin:0 0 9px; color:#23364a; font-size:.95rem; }
+.brm-system-status div { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid #e9eef2; }
+.brm-system-status div:last-child { border-bottom:0; }
+.brm-system-status span { color:#69798b; font-size:.78rem; }.brm-system-status strong { max-width:64%; overflow:hidden; color:#253b50; font-size:.78rem; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+#task-history-accordion { margin-top:14px; border:1px solid #e1e8ef; border-radius:10px; overflow:hidden; }
+#task-history-accordion > button { background:#f8fafc !important; }
+#task-center-body { margin-top:7px; }
+#q-table-md { height:230px; }
+#queue-actions button { min-height:46px !important; }
+#asset-center { margin-top:14px; padding:18px; border-radius:16px; }
+#asset-center > .wrap > h3, #completed-media { display:none !important; }
+#asset-download-row { justify-content:flex-end; margin:0 0 6px; }
+#asset-download-row > .form { flex:0 0 auto !important; }
+#asset-download-row button { min-height:34px !important; border-radius:8px !important; }
+.brm-asset-library { min-width:0; }
+.brm-assets-header { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.brm-assets-header h3 { margin:0; font-size:1.18rem; }.brm-assets-header p { margin:3px 0 0; color:#718095; font-size:.82rem; }
+.brm-assets-tools { display:flex; align-items:center; gap:7px; }.brm-assets-tools input,.brm-assets-tools select { min-height:34px; width:150px; padding:0 9px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#3e5065; font:inherit; font-size:.78rem; }.brm-assets-tools button,.brm-asset-filters button { min-height:32px; padding:5px 9px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#54677a; font-size:.76rem; font-weight:700; cursor:pointer; }
+.brm-asset-filters { display:flex; align-items:center; gap:6px; margin:13px 0 10px; }.brm-asset-filters button.is-selected { border-color:#9dd7db; background:#e7f6f6; color:#08707b; }
+.brm-asset-grid { height:448px; display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); grid-auto-rows:128px; gap:9px; overflow:auto; padding:1px 2px 9px; }
+.brm-asset-card { position:relative; min-width:0; overflow:hidden; border:1px solid #e0e8ee; border-radius:10px; background:#fff; box-shadow:0 2px 7px rgba(22,43,64,.04); }.brm-asset-card[hidden] { display:none; }
+.brm-asset-preview { position:relative; display:block; width:100%; height:92px; padding:0; overflow:hidden; border:0; background:#eff4f6; cursor:pointer; }.brm-asset-preview img,.brm-asset-preview video { display:block; width:100%; height:100%; object-fit:cover; }.brm-play-mark { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:5px 7px; border-radius:99px; background:rgba(12,29,43,.66); color:#fff; font-size:.7rem; }.brm-audio-pending { display:flex; width:100%; height:100%; align-items:center; justify-content:center; color:#708095; font-size:.72rem; }.brm-asset-meta { display:flex; align-items:center; justify-content:space-between; gap:4px; padding:6px 7px; color:#334a60; font-size:.7rem; }.brm-asset-meta span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.brm-asset-meta time { flex:0 0 auto; color:#8491a1; font-size:.65rem; }.brm-asset-download { position:absolute; right:7px; top:7px; padding:3px 5px; border-radius:5px; background:rgba(255,255,255,.88); color:#105e6c; font-size:.68rem; font-weight:800; text-decoration:none; }.brm-assets-empty { grid-column:1/-1; display:flex; align-items:center; justify-content:center; min-height:180px; border:1px dashed #cbd8e2; border-radius:10px; color:#708095; }
+.brm-asset-grid.is-list { display:block; height:448px; }.brm-asset-grid.is-list .brm-asset-card { display:flex; align-items:center; height:64px; margin-bottom:6px; }.brm-asset-grid.is-list .brm-asset-preview { flex:0 0 106px; height:64px; }.brm-asset-grid.is-list .brm-asset-meta { flex:1; font-size:.8rem; }.brm-asset-grid.is-list .brm-asset-download { position:static; margin-right:10px; }
+.brm-audio-dock { position:fixed; z-index:1900; left:50%; bottom:20px; width:min(700px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:11px 14px; border:1px solid #a9d5d8; border-radius:12px; background:#f9ffff; box-shadow:0 12px 32px rgba(14,45,58,.22); }.brm-audio-dock[hidden]{display:none!important}.brm-audio-dock>div{min-width:120px}.brm-audio-dock strong{display:block;color:#17465b;font-size:.82rem}.brm-audio-dock span{color:#718095;font-size:.7rem}.brm-audio-dock audio{flex:1;min-width:180px;height:34px}.brm-audio-dock a,.brm-audio-dock button{flex:0 0 auto;padding:7px 9px;border:1px solid #c9dce0;border-radius:8px;background:#fff;color:#0c6b76;font-size:.75rem;font-weight:750;text-decoration:none;cursor:pointer}
+.brm-dashboard-viewer { position:fixed; inset:0; z-index:2000; display:flex; align-items:center; justify-content:center; padding:54px 5vw; background:rgba(12,25,47,.86); }.brm-dashboard-viewer[hidden] { display:none !important; }.brm-dashboard-viewer .brm-viewer-inner { width:min(1200px,100%); height:100%; display:flex; flex-direction:column; gap:10px; }.brm-dashboard-viewer .brm-viewer-bar { display:flex; align-items:center; justify-content:space-between; color:#fff; }.brm-dashboard-viewer .brm-viewer-bar a,.brm-dashboard-viewer .brm-viewer-bar button { padding:8px 12px; border:0; border-radius:8px; background:#fff; color:#172b43; font-weight:750; text-decoration:none; cursor:pointer; }.brm-dashboard-viewer .brm-viewer-stage { min-height:0; flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; }.brm-dashboard-viewer img,.brm-dashboard-viewer video { max-width:100%; max-height:100%; object-fit:contain; border-radius:10px; }
+@media (max-width:1200px) { .brm-task-card-grid{grid-template-columns:repeat(3,minmax(0,1fr));} .brm-asset-grid{grid-template-columns:repeat(5,minmax(0,1fr));} #dashboard-system-status{min-width:0;} }
+@media (max-width:720px) { #dashboard-command-bar,.brm-assets-header{align-items:flex-start;flex-direction:column}.brm-task-card-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.brm-asset-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:120px;height:432px}.brm-assets-tools{width:100%;overflow:auto}.brm-assets-tools input{min-width:150px}.brm-asset-filters{overflow:auto}.brm-audio-dock{flex-wrap:wrap}.brm-audio-dock audio{flex-basis:100%;}.brm-audio-dock>div{min-width:0}.brm-system-status{margin-top:10px} #dashboard-new-task-menu .brm-new-task-list{left:0;right:auto;width:min(390px,86vw);grid-template-columns:1fr;} }
 """
 
 
@@ -2675,8 +2773,315 @@ def clear_completed_audio_preview():
     return gr.update(value=None), None
 
 
+def _media_url(path: Path) -> str:
+    """Return a Gradio-served URL only for a validated production artifact."""
+    checked = _completed_output_path(path)
+    if checked is None:
+        return ""
+    return f"/gradio_api/file={quote(str(checked), safe='/')}"
+
+
+def _cache_key(path: Path) -> str:
+    stat = path.stat()
+    digest = hashlib.sha256(
+        f"{path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8")
+    ).hexdigest()
+    return digest
+
+
+def _thumbnail_path(path: Path, kind: str) -> Path:
+    ext = ".png"
+    return THUMB_CACHE_DIR / f"{_cache_key(path)}-{kind}{ext}"
+
+
+def _schedule_thumbnail(path: Path, kind: str) -> Path | None:
+    """Queue a non-blocking real video frame / audio waveform cache job."""
+    try:
+        target = _thumbnail_path(path, kind)
+    except OSError:
+        return None
+    if target.is_file():
+        return target
+    job_key = str(target)
+    with _thumb_lock:
+        if job_key not in _thumb_pending:
+            _thumb_pending.add(job_key)
+            _thumb_jobs.put((path, target, kind))
+    return None
+
+
+def _thumbnail_worker() -> None:
+    """Generate only one FFmpeg preview at a time so refreshes never block."""
+    ffmpeg = shutil.which("ffmpeg")
+    while True:
+        path, target, kind = _thumb_jobs.get()
+        try:
+            if not ffmpeg or not _completed_output_path(path):
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "video":
+                command = [
+                    ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-ss", "00:00:00.300",
+                    "-i", str(path), "-frames:v", "1", "-vf", "scale=640:-2", str(target),
+                ]
+            else:
+                command = [
+                    ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", str(path),
+                    "-filter_complex", "showwavespic=s=640x240:colors=0x0b8793",
+                    "-frames:v", "1", str(target),
+                ]
+            subprocess.run(command, check=False, timeout=75)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            with _thumb_lock:
+                _thumb_pending.discard(str(target))
+            _thumb_jobs.task_done()
+
+
+def start_media_cache_worker() -> None:
+    global _thumb_worker_started
+    with _thumb_lock:
+        if _thumb_worker_started:
+            return
+        _thumb_worker_started = True
+    threading.Thread(target=_thumbnail_worker, name="brm-media-preview", daemon=True).start()
+
+
+def _cached_preview_url(path: Path, kind: str) -> str:
+    """Return a real cached preview URL, scheduling its creation when absent."""
+    cached = _schedule_thumbnail(path, kind)
+    if cached and cached.is_file():
+        return f"/gradio_api/file={quote(str(cached), safe='/')}"
+    return ""
+
+
+def _media_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_EXTS:
+        return "image"
+    if suffix in VIDEO_EXTS:
+        return "video"
+    return "audio"
+
+
+def _compact_task_name(name: str, limit: int = 34) -> str:
+    value = (name or "未命名任务").strip()
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _task_status_class(status: TaskStatus) -> str:
+    return {
+        TaskStatus.DONE: "is-done",
+        TaskStatus.ERROR: "is-error",
+        TaskStatus.CANCELLED: "is-cancelled",
+        TaskStatus.TIMEOUT: "is-timeout",
+        TaskStatus.RUNNING: "is-running",
+    }.get(status, "is-queued")
+
+
+def _real_system_status(done: list[Task], running: list[Task]) -> dict[str, str]:
+    """Read actual host state with a short cache; degrade explicitly on errors."""
+    global _system_status_cache
+    now = time.monotonic()
+    with _system_status_lock:
+        cached_at, cached = _system_status_cache
+        if cached and now - cached_at < 5:
+            return cached
+    result: dict[str, str] = {
+        "gpu": "暂不可用",
+        "vram": "暂不可用",
+        "queue": f"{len(running)} 运行 / {len(running) + len(task_queue.snapshot()[0])} 并发占用",
+        "storage": "暂不可用",
+        "assets": "暂不可用",
+        "today": "暂不可用",
+    }
+    try:
+        nvidia_smi = shutil.which("nvidia-smi") or "/usr/lib/wsl/lib/nvidia-smi"
+        smi = subprocess.run(
+            [nvidia_smi, "--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        rows = [line.strip() for line in smi.stdout.splitlines() if line.strip()]
+        selected = next((row for row in rows if "A5000" in row.upper()), rows[0] if rows else "")
+        parts = [item.strip() for item in selected.split(",")]
+        if len(parts) >= 4:
+            # 标签已明确固定在 A5000；数值独立显示避免窄卡片截断型号。
+            result["gpu"] = f"{parts[1]}%"
+            result["vram"] = f"{parts[2]} / {parts[3]} MiB"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        disk = shutil.disk_usage(OUTPUT_DIR)
+        result["storage"] = f"可用 {disk.free // (1024 ** 3)} GB"
+    except OSError:
+        pass
+    try:
+        assets = [
+            p for p in OUTPUT_DIR.rglob("*")
+            if p.is_file() and p.suffix.lower() in PERSISTABLE_MEDIA_EXTS and MEDIA_CACHE_DIR not in p.parents
+        ]
+        result["assets"] = f"{len(assets):,} 项"
+    except OSError:
+        pass
+    today = datetime.now().date()
+    result["today"] = f"{sum(1 for task in done if task.status == TaskStatus.DONE and datetime.fromtimestamp(task.done_ts or task.submit_ts).date() == today)} 项"
+    with _system_status_lock:
+        _system_status_cache = (now, result)
+    return result
+
+
+def _asset_records(done: list[Task]) -> list[dict[str, object]]:
+    """Return deduplicated, validated real artifacts ordered by newest task first."""
+    records: list[dict[str, object]] = []
+    seen: set[Path] = set()
+    for task in sorted(done, key=lambda item: item.done_ts or item.submit_ts, reverse=True):
+        if not isinstance(task.result, list):
+            continue
+        for candidate in task.result:
+            path = _completed_output_path(candidate)
+            if path is None or path in seen:
+                continue
+            seen.add(path)
+            records.append({"path": path, "task": task, "kind": _media_kind(path)})
+    return records[:DONE_GALLERY_MAX]
+
+
+def _asset_card_html(record: dict[str, object]) -> str:
+    path = record["path"]
+    task = record["task"]
+    kind = record["kind"]
+    assert isinstance(path, Path) and isinstance(task, Task) and isinstance(kind, str)
+    url = _media_url(path)
+    title = escape(_compact_task_name(task.name, 42))
+    filename = escape(path.name)
+    task_ts = task.done_ts or task.submit_ts
+    date_text = _fmt_ts(task_ts)
+    preview = ""
+    if kind == "image":
+        preview = f'<img loading="lazy" src="{url}" alt="{filename}">'
+    elif kind == "video":
+        poster = _cached_preview_url(path, "video")
+        poster_attr = f' poster="{poster}"' if poster else ""
+        preview = f'<video muted preload="metadata" playsinline src="{url}"{poster_attr}></video><span class="brm-play-mark">播放</span>'
+    else:
+        waveform = _cached_preview_url(path, "audio")
+        preview = (
+            f'<img loading="lazy" src="{waveform}" alt="{filename} 波形">'
+            if waveform else '<div class="brm-audio-pending">正在生成真实波形预览…</div>'
+        )
+    kind_text = {"image": "图片", "video": "视频", "audio": "音频"}[kind]
+    action = "audio-play" if kind == "audio" else "media-open"
+    return (
+        f'<article class="brm-asset-card" data-asset-type="{kind}" '
+        f'data-asset-name="{escape((task.name + " " + path.name).lower(), quote=True)}" '
+        f'data-asset-time="{task_ts:.6f}">'
+        f'<button type="button" class="brm-asset-preview" data-brm-action="{action}" '
+        f'data-media-url="{url}" data-media-kind="{kind}" data-media-name="{filename}">{preview}</button>'
+        f'<div class="brm-asset-meta"><span>{kind_text} · {title}</span><time>{date_text}</time></div>'
+        f'<a class="brm-asset-download" href="{url}" download>下载</a></article>'
+    )
+
+
+def _render_dashboard_assets(records: list[dict[str, object]]) -> str:
+    cards = "".join(_asset_card_html(record) for record in records)
+    empty = '<div class="brm-assets-empty">暂时还没有可展示的真实媒体素材。</div>' if not cards else ""
+    return (
+        '<section class="brm-asset-library" aria-label="统一素材库">'
+        '<header class="brm-assets-header"><div><h3>素材库</h3><p>图片、视频、音频统一管理；点击即可预览或试听。</p></div>'
+        '<div class="brm-assets-tools"><input id="brm-asset-search" type="search" placeholder="搜索素材名称" aria-label="搜索素材名称">'
+        '<select id="brm-asset-sort" aria-label="素材排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>'
+        '<button type="button" data-brm-action="asset-view" data-asset-view="grid">网格</button>'
+        '<button type="button" data-brm-action="asset-view" data-asset-view="list">列表</button></div></header>'
+        '<nav class="brm-asset-filters" aria-label="素材类型筛选">'
+        '<button type="button" class="is-selected" data-brm-action="asset-filter" data-asset-filter="all">全部</button>'
+        '<button type="button" data-brm-action="asset-filter" data-asset-filter="image">图片</button>'
+        '<button type="button" data-brm-action="asset-filter" data-asset-filter="video">视频</button>'
+        '<button type="button" data-brm-action="asset-filter" data-asset-filter="audio">音频</button>'
+        '</nav><div id="brm-asset-grid" class="brm-asset-grid">'
+        f'{cards}{empty}</div></section>'
+        '<aside id="brm-audio-dock" class="brm-audio-dock" hidden>'
+        '<div><strong id="brm-audio-title">音频试听</strong><span>真实产物</span></div>'
+        '<audio id="brm-audio-player" controls preload="metadata"></audio>'
+        '<a id="brm-audio-download" href="#" download>下载</a>'
+        '<button type="button" data-brm-action="audio-clear">停止并移除当前试听</button></aside>'
+        '<aside id="brm-dashboard-viewer" class="brm-dashboard-viewer" hidden></aside>'
+    )
+
+
+def _render_task_cards(tasks: list[Task], pending_positions: dict[str, int]) -> str:
+    cards = []
+    for task in tasks[:5]:
+        artifact = None
+        if isinstance(task.result, list):
+            artifact = next((_completed_output_path(value) for value in task.result if _completed_output_path(value)), None)
+        preview = '<div class="brm-task-no-preview">暂无产物</div>'
+        if artifact is not None:
+            kind = _media_kind(artifact)
+            url = _media_url(artifact)
+            if kind == "image":
+                preview = f'<img loading="lazy" src="{url}" alt="{escape(artifact.name)}">'
+            elif kind == "video":
+                poster = _cached_preview_url(artifact, "video")
+                poster_attr = f' poster="{poster}"' if poster else ""
+                preview = f'<video muted preload="metadata" src="{url}"{poster_attr}></video>'
+            else:
+                waveform = _cached_preview_url(artifact, "audio")
+                preview = f'<img loading="lazy" src="{waveform}" alt="{escape(artifact.name)} 波形">' if waveform else '<div class="brm-task-no-preview">音频产物</div>'
+        progress = _task_progress_text(task, pending_positions.get(task.id))
+        progress_value = int(max(0, min(100, round((task.progress or 0) * 100))))
+        cards.append(
+            f'<article class="brm-task-card {_task_status_class(task.status)}">'
+            f'<div class="brm-task-card-top"><span>{escape(task.workflow_name)}</span><b>{escape(task.status.value)}</b></div>'
+            f'<h4 title="{escape(task.name)}">{escape(_compact_task_name(task.name, 32))}</h4>'
+            f'<div class="brm-task-card-preview">{preview}</div>'
+            f'<div class="brm-task-progress"><span>{escape(progress)}</span><i><em style="width:{progress_value}%"></em></i></div>'
+            f'<footer><time>{_fmt_ts(task.submit_ts)}</time><span>{_fmt_duration((task.done_ts or time.time()) - task.start_ts) if task.start_ts else "等待执行"}</span></footer>'
+            '</article>'
+        )
+    return '<div class="brm-task-card-grid">' + ("".join(cards) or '<div class="brm-empty-tasks">暂无任务，点击“新建任务”开始创作。</div>') + '</div>'
+
+
+def _render_system_status(stats: dict[str, str]) -> str:
+    entries = [
+        ("A5000 利用率", stats["gpu"]), ("显存占用", stats["vram"]),
+        ("媒体任务", stats["queue"]), ("输出空间", stats["storage"]),
+        ("素材总数", stats["assets"]), ("今日完成", stats["today"]),
+    ]
+    return '<section class="brm-system-status"><h3>系统状态</h3>' + "".join(
+        f'<div><span>{label}</span><strong>{escape(value)}</strong></div>' for label, value in entries
+    ) + '</section>'
+
+
+def build_completed_assets_bundle():
+    """Create a bounded download archive from validated current artifacts only."""
+    _, _, done = task_queue.snapshot()
+    records = _asset_records(done)
+    if not records:
+        return gr.update(value=None, visible=False)
+    try:
+        DOWNLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        bundle = DOWNLOAD_CACHE_DIR / f"BRM-AI-素材-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        used_names: set[str] = set()
+        with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+            for index, record in enumerate(records, start=1):
+                path = record["path"]
+                assert isinstance(path, Path)
+                safe_path = _completed_output_path(path)
+                if safe_path is None:
+                    continue
+                filename = safe_path.name
+                if filename in used_names:
+                    filename = f"{index:02d}-{filename}"
+                used_names.add(filename)
+                archive.write(safe_path, arcname=filename)
+        return gr.update(value=str(bundle), visible=True) if bundle.is_file() else gr.update(value=None, visible=False)
+    except (OSError, zipfile.BadZipFile):
+        return gr.update(value=None, visible=False)
+
+
 def render_queue():
-    """Render the summary, live execution cards, queue table, and artifacts."""
+    """Render the shared task state plus the homepage's real dashboard data."""
     pending, running, done = task_queue.snapshot()
 
     def note(t: Task) -> str:
@@ -2734,30 +3139,16 @@ def render_queue():
         failed=err,
     )
 
-    # 图片与视频保持紧凑缩略图，点击后交给独立大预览；音频则以可点击列表直接送入播放器。
-    imgs = []
-    audios = []
-    for t in done:
-        if isinstance(t.result, list):
-            for p in t.result:
-                path = _completed_output_path(p)
-                if path is None:
-                    continue
-                suffix = path.suffix.lower()
-                if suffix in GALLERY_EXTS:
-                    imgs.append(str(path))
-                elif suffix in AUDIO_EXTS:
-                    audios.append(str(path))
-    gallery_paths = imgs[:DONE_GALLERY_MAX]
-    audio_paths = audios[:DONE_TASKS_MAX]
-    audio_choices = [(Path(path).name, path) for path in audio_paths]
+    dashboard_tasks = all_tasks
+    asset_records = _asset_records(done)
+    system_stats = _real_system_status(done, running)
     return (
         summary,
         gr.update(value=_render_live_progress(running), visible=bool(running)),
+        _render_task_cards(dashboard_tasks, pending_positions),
+        _render_system_status(system_stats),
         table_md,
-        gallery_paths,
-        gr.update(choices=audio_choices),
-        gallery_paths,
+        _render_dashboard_assets(asset_records),
     )
 
 
@@ -2909,69 +3300,69 @@ def clear_qwen_chat():
 BRM_NAV_JS = r"""
 (() => {
   const groups = {
-    "文生图Z-Image": "image",
-    "图片编辑FLUX.2-klein": "image",
-    "MiniMax H3 文生视频": "video",
-    "MiniMax H3 图生视频": "video",
-    "文生视频 LTX2.3": "video",
-    "图生视频 LTX2.3": "video",
-    "首尾帧视频LTX2.3": "video",
-    "数字人-语音驱动LTX2.3": "video",
-    "语音克隆 IndexTTS-2.5": "audio",
-    "语音克隆 IndexTTS-2（回退）": "audio",
-    "音乐生成ACE-Step 1.5": "audio",
-    "Qwen 大模型": "tools"
+    "任务中心": "home", "文生图Z-Image": "image", "图片编辑FLUX.2-klein": "image",
+    "MiniMax H3 文生视频": "video", "MiniMax H3 图生视频": "video",
+    "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
+    "首尾帧视频LTX2.3": "video", "数字人-语音驱动LTX2.3": "video",
+    "语音克隆 IndexTTS-2.5": "audio", "语音克隆 IndexTTS-2（回退）": "audio",
+    "音乐生成ACE-Step 1.5": "audio", "Qwen 大模型": "tools"
   };
-  const firstTabs = {
-    image: "文生图Z-Image",
-    video: "MiniMax H3 文生视频",
-    audio: "语音克隆 IndexTTS-2.5",
-    tools: "Qwen 大模型"
-  };
+  const firstTabs = { image:"文生图Z-Image", video:"MiniMax H3 文生视频", audio:"语音克隆 IndexTTS-2.5", tools:"Qwen 大模型", home:"任务中心" };
   const boot = () => {
-    const root = document.querySelector("#workflow-tabs");
-    const nav = document.querySelector("#primary-nav");
-    if (!root || !nav) {
-      window.setTimeout(boot, 80);
-      return;
-    }
+    const root = document.querySelector("#workflow-tabs"); const nav = document.querySelector("#primary-nav");
+    if (!root || !nav) return window.setTimeout(boot, 80);
     if (window.__brmNavigationReady) return;
-
     const labelOf = (button) => (button?.textContent || "").trim();
-    const workflowButtons = () => Array.from(root.querySelectorAll(
-      '.tab-container[role="tablist"] button, .overflow-dropdown button'
-    ));
+    const workflowButtons = () => Array.from(root.querySelectorAll('.tab-container[role="tablist"] button, .overflow-dropdown button'));
     const showGroup = (group) => {
-      nav.dataset.active = group;
-      document.documentElement.dataset.brmSection = group;
+      nav.dataset.active = group; document.documentElement.dataset.brmSection = group;
       workflowButtons().forEach((button) => {
         const buttonGroup = groups[labelOf(button)];
-        button.style.display = buttonGroup === group ? "inline-flex" : "none";
+        button.style.display = group === "home" ? (buttonGroup === "home" ? "inline-flex" : "none") : (buttonGroup === group ? "inline-flex" : "none");
       });
+    };
+    const selectWorkflow = (label) => {
+      const target = workflowButtons().find((button) => labelOf(button) === label);
+      if (!target) return; const group = groups[label] || "image"; showGroup(group);
+      if (target.getAttribute("aria-selected") !== "true") target.click();
+      window.setTimeout(() => showGroup(group), 60);
     };
     const syncFromSelected = () => {
       const selected = root.querySelector('[role="tab"][aria-selected="true"]');
-      showGroup(groups[labelOf(selected)] || nav.dataset.active || "image");
+      showGroup(groups[labelOf(selected)] || "home");
     };
-
-    window.__brmSelectCategory = (group) => {
-      showGroup(group);
-      const targetLabel = firstTabs[group];
-      const target = workflowButtons().find((button) => labelOf(button) === targetLabel);
-      if (target && target.getAttribute("aria-selected") !== "true") target.click();
-      window.setTimeout(syncFromSelected, 60);
-    };
-    root.addEventListener("click", () => window.setTimeout(syncFromSelected, 60));
-    new MutationObserver(syncFromSelected).observe(root, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["aria-selected", "class"]
+    window.__brmSelectCategory = (group) => selectWorkflow(firstTabs[group] || firstTabs.image);
+    window.__brmSelectDashboard = () => selectWorkflow("任务中心");
+    const htmlEscape = (value) => String(value || "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
+    document.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-brm-action]"); if (!action) return;
+      const kind = action.dataset.brmAction;
+      if (kind === "home") { event.preventDefault(); window.__brmSelectDashboard(); }
+      if (kind === "workflow") { event.preventDefault(); selectWorkflow(action.dataset.workflow); action.closest("details")?.removeAttribute("open"); }
+      if (kind === "asset-filter") {
+        document.querySelectorAll("[data-brm-action='asset-filter']").forEach((item) => item.classList.toggle("is-selected", item === action));
+        document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = action.dataset.assetFilter !== "all" && card.dataset.assetType !== action.dataset.assetFilter; });
+      }
+      if (kind === "asset-view") { document.querySelector("#brm-asset-grid")?.classList.toggle("is-list", action.dataset.assetView === "list"); }
+      if (kind === "audio-play") {
+        const dock = document.querySelector("#brm-audio-dock"), player = document.querySelector("#brm-audio-player"), title = document.querySelector("#brm-audio-title"), download = document.querySelector("#brm-audio-download");
+        if (dock && player && download) { player.src = action.dataset.mediaUrl || ""; title.textContent = action.dataset.mediaName || "音频试听"; download.href = action.dataset.mediaUrl || "#"; dock.hidden = false; player.play().catch(() => {}); }
+      }
+      if (kind === "audio-clear") { const dock = document.querySelector("#brm-audio-dock"), player = document.querySelector("#brm-audio-player"); if (player) { player.pause(); player.removeAttribute("src"); player.load(); } if (dock) dock.hidden = true; }
+      if (kind === "media-open") {
+        const viewer = document.querySelector("#brm-dashboard-viewer"); if (!viewer) return;
+        const url = action.dataset.mediaUrl || "", mediaKind = action.dataset.mediaKind, name = htmlEscape(action.dataset.mediaName || "素材");
+        const media = mediaKind === "video" ? `<video controls autoplay playsinline src="${url}"></video>` : `<img src="${url}" alt="${name}">`;
+        viewer.innerHTML = `<div class="brm-viewer-inner"><div class="brm-viewer-bar"><strong>${name}</strong><span><a href="${url}" download>下载</a> <button type="button" data-brm-action="media-close">关闭预览</button></span></div><div class="brm-viewer-stage">${media}</div></div>`; viewer.hidden = false;
+      }
+      if (kind === "media-close") { const viewer = document.querySelector("#brm-dashboard-viewer"); if (viewer) { viewer.hidden = true; viewer.innerHTML = ""; } }
     });
-    window.__brmNavigationReady = true;
-    syncFromSelected();
-  };
-  boot();
+    document.addEventListener("input", (event) => { if (event.target.id !== "brm-asset-search") return; const query = event.target.value.trim().toLowerCase(); document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = Boolean(query) && !String(card.dataset.assetName || "").includes(query); }); });
+    document.addEventListener("change", (event) => { if (event.target.id !== "brm-asset-sort") return; const grid = document.querySelector("#brm-asset-grid"); if (!grid) return; const cards = Array.from(grid.querySelectorAll(".brm-asset-card")); cards.sort((a,b) => (Number(a.dataset.assetTime) - Number(b.dataset.assetTime)) * (event.target.value === "oldest" ? 1 : -1)).forEach((card) => grid.appendChild(card)); });
+    root.addEventListener("click", () => window.setTimeout(syncFromSelected, 60));
+    new MutationObserver(syncFromSelected).observe(root, { childList:true, subtree:true, attributes:true, attributeFilter:["aria-selected", "class"] });
+    window.__brmNavigationReady = true; window.__brmSelectDashboard();
+  }; boot();
 })();
 """
 
@@ -2984,8 +3375,9 @@ def build_ui():
         with gr.Row(elem_id="global-toolbar", equal_height=True):
             with gr.Column(scale=2, min_width=260):
                 gr.HTML(
-                    '<div class="brm-brand-title">BRM AI 工作台</div>'
-                    '<div class="brm-brand-subtitle">本地 AI 媒体生成、任务编排与素材管理</div>',
+                    '<button type="button" class="brm-brand-home" data-brm-action="home">'
+                    '<span><span class="brm-brand-title">BRM AI 工作台</span>'
+                    '<span class="brm-brand-subtitle">本地 AI 媒体生成、任务编排与素材管理</span></span></button>',
                     elem_id="brand-lockup",
                 )
             # 一级分区与品牌同处顶栏；按钮只触发原生 Tab，不改变 API。
@@ -3061,6 +3453,9 @@ def build_ui():
 
         # ---- 每个工作流仍是原生 Gradio Tab；CSS/初始化脚本只负责分区呈现。 ----
         with gr.Tabs(elem_id="workflow-tabs"):
+            # 首页没有伪造表单；真正的任务中心和素材库位于 Tabs 后方。
+            with gr.Tab("任务中心"):
+                gr.HTML("<div class='brm-home-tab-anchor'></div>", elem_id="home-tab-anchor")
             # ========== Tab 1 ==========
             with gr.Tab("文生图Z-Image"):
                 gr.Markdown("## 文生图 Z-Image", elem_classes=["workflow-heading"])
@@ -3490,84 +3885,64 @@ def build_ui():
                         qwen_stop_btn = gr.Button("停止", variant="stop")
                         qwen_clear_btn = gr.Button("清空", variant="secondary")
 
-        # ---- 共享的任务队列面板(所有 Tab 共用一个队列与后台 worker) ----
+        # ---- 共享任务中心：首页用真实任务卡，历史表格仍完整保留。 ----
         with gr.Column(elem_id="task-center"):
-            gr.Markdown("### 任务中心", elem_id="task-center-title")
+            with gr.Row(equal_height=True, elem_id="dashboard-command-bar"):
+                gr.HTML(
+                    '<div class="brm-dashboard-title"><h2>任务中心</h2>'
+                    '<p>实时查看正在生成的媒体任务与最近产物。</p></div>'
+                )
+                with gr.Row(elem_classes=["brm-dashboard-actions"]):
+                    dashboard_refresh_btn = gr.Button("刷新", variant="secondary")
+                    gr.HTML(
+                        '<details id="dashboard-new-task-menu"><summary>＋ 新建任务</summary>'
+                        '<div class="brm-new-task-list">'
+                        '<button type="button" data-brm-action="workflow" data-workflow="文生图Z-Image">图像 · 文生图</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="图片编辑FLUX.2-klein">图像 · 图片编辑</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 文生视频">视频 · H3 文生视频</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 图生视频">视频 · H3 图生视频</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="文生视频 LTX2.3">视频 · LTX 文生视频</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="图生视频 LTX2.3">视频 · LTX 图生视频</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 IndexTTS-2.5">音频 · 语音克隆</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="Qwen 大模型">智能工具 · Qwen</button>'
+                        '</div></details>'
+                    )
             q_summary = gr.HTML(value="", elem_id="q-summary")
-            q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
-            with gr.Row(equal_height=True, elem_id="task-center-body"):
-                with gr.Column(scale=10):
-                    q_table = gr.Markdown(elem_id="q-table-md")
-                with gr.Column(scale=1, min_width=168, elem_id="queue-actions"):
-                    clear_btn = gr.Button("清空排队任务")
-                    interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
+            with gr.Row(equal_height=True):
+                with gr.Column(scale=9):
+                    q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
+                    dashboard_task_cards = gr.HTML(value="", elem_id="dashboard-task-cards")
+                with gr.Column(scale=2, min_width=265, elem_id="dashboard-system-status"):
+                    dashboard_system_status = gr.HTML(value="")
+            with gr.Accordion("全部任务记录", open=False, elem_id="task-history-accordion"):
+                with gr.Row(equal_height=True, elem_id="task-center-body"):
+                    with gr.Column(scale=10):
+                        q_table = gr.Markdown(elem_id="q-table-md")
+                    with gr.Column(scale=1, min_width=158, elem_id="queue-actions"):
+                        clear_btn = gr.Button("清空排队任务")
+                        interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
             op_status = gr.Markdown("", elem_id="task-operation-status")
 
         with gr.Column(elem_id="asset-center"):
-            gr.Markdown("### 素材库", elem_id="completed-media")
-            with gr.Row(elem_id="audio-asset-workspace"):
-                completed_audio_list = gr.Radio(
-                    label="已完成音频 · 点击名称即可试听",
-                    choices=[],
-                    value=None,
-                    interactive=True,
-                    scale=1,
-                    elem_id="completed-audio-list",
+            with gr.Row(equal_height=True, elem_id="asset-download-row"):
+                download_all_btn = gr.Button("下载当前素材", variant="secondary")
+                download_all_file = gr.File(
+                    label="批量下载文件", visible=False, interactive=False, elem_id="asset-download-file",
                 )
-                completed_audio_player = gr.Audio(
-                    label="音频试听（播放器右上角可下载）",
-                    type="filepath",
-                    interactive=False,
-                    buttons=["download"],
-                    scale=2,
-                )
-            clear_audio_preview_btn = gr.Button(
-                "停止并清除当前试听", variant="secondary", elem_id="audio-preview-clear",
-            )
-            q_gallery = gr.Gallery(
-                label="已完成图片/视频（累计，最多 30 项）",
-                columns=7,
-                rows=3,
-                height=420,
-                object_fit="cover",
-                allow_preview=False,
-                preview=False,
-                buttons=["download", "download_all"],
-                elem_id="q-gallery",
-            )
-            completed_gallery_paths = gr.State([])
-            media_viewer = gr.HTML(value="", visible=False, elem_id="media-viewer")
-            media_viewer_close_btn = gr.Button(
-                "关闭预览", visible=False, variant="secondary", elem_id="media-viewer-close",
-            )
-            gr.Markdown(
-                "点击缩略图打开浏览器主体大预览；可在预览内下载，画廊工具栏可下载全部。",
-                elem_id="completed-media-hint",
-            )
+            dashboard_assets = gr.HTML(value="", elem_id="dashboard-assets")
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
         interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status, api_visibility="private")
-        completed_audio_list.change(
-            fn=play_completed_audio,
-            inputs=completed_audio_list,
-            outputs=completed_audio_player,
+        dashboard_refresh_btn.click(
+            fn=render_queue,
+            outputs=[q_summary, q_live_progress, dashboard_task_cards, dashboard_system_status, q_table, dashboard_assets],
             api_visibility="private",
         )
-        clear_audio_preview_btn.click(
-            fn=clear_completed_audio_preview,
-            outputs=[completed_audio_list, completed_audio_player],
-            api_visibility="private",
-        )
-        q_gallery.select(
-            fn=open_completed_media_viewer,
-            inputs=completed_gallery_paths,
-            outputs=[media_viewer, media_viewer_close_btn],
-            api_visibility="private",
-        )
-        media_viewer_close_btn.click(
-            fn=close_completed_media_viewer,
-            outputs=[media_viewer, media_viewer_close_btn],
+        download_all_btn.click(
+            fn=build_completed_assets_bundle,
+            outputs=download_all_file,
             api_visibility="private",
         )
 
@@ -3577,10 +3952,10 @@ def build_ui():
             outputs=[
                 q_summary,
                 q_live_progress,
+                dashboard_task_cards,
+                dashboard_system_status,
                 q_table,
-                q_gallery,
-                completed_audio_list,
-                completed_gallery_paths,
+                dashboard_assets,
             ],
             api_visibility="private",
         )
@@ -3671,6 +4046,7 @@ def build_ui():
 def main():
     start_comfyui(wait=True)
     task_queue.start_workers()      # 启动队列后台 worker
+    start_media_cache_worker()      # 单线程补齐视频首帧与音频波形，不阻塞任务刷新
 
     demo = build_ui()
     demo.queue()
