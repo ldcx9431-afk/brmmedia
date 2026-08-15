@@ -698,8 +698,9 @@ footer {
     display: none !important;
 }
 .gradio-container {
+    font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
     color: var(--brm-ink) !important;
-    background: #f5f8fa !important;
+    background: #f7f9fb !important;
 }
 .fillable {
     max-width: 1660px !important;
@@ -710,9 +711,9 @@ footer {
     position: relative;
     z-index: 10;
     align-items: center;
-    min-height: 68px;
-    margin: 0 0 12px;
-    padding: 10px 16px 10px 20px;
+    min-height: 70px;
+    margin: 0 0 10px;
+    padding: 8px 12px 8px 18px;
     border: 1px solid var(--brm-line);
     border-radius: 14px;
     background: rgba(255, 255, 255, 0.96);
@@ -725,6 +726,7 @@ footer {
     font-weight: 800;
     letter-spacing: -0.02em;
 }
+#primary-nav-wrap { min-width: 560px !important; }
 #brand-lockup .brm-brand-subtitle {
     margin-top: 2px;
     color: var(--brm-muted);
@@ -743,22 +745,26 @@ footer {
 #primary-nav {
     gap: 6px;
     align-items: center;
-    margin: 0 0 10px;
-    padding: 6px;
-    border: 1px solid var(--brm-line);
-    border-radius: 13px;
-    background: #fff;
-    box-shadow: 0 5px 18px rgba(22, 45, 64, 0.045);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
 }
 #primary-nav > div { min-width: 0 !important; }
 #primary-nav button {
-    min-height: 44px !important;
+    min-height: 46px !important;
     border: 1px solid transparent !important;
     border-radius: 9px !important;
     background: transparent !important;
     color: #536477 !important;
     font-size: 0.96rem !important;
     font-weight: 720 !important;
+    box-shadow: none !important;
+}
+#primary-nav button:focus {
+    outline: none !important;
     box-shadow: none !important;
 }
 #primary-nav button:hover {
@@ -876,6 +882,27 @@ footer {
     border-radius: 10px !important;
     box-shadow: none !important;
 }
+#workflow-tabs .workflow-heading {
+    margin: 0 0 13px !important;
+    padding: 0 0 11px !important;
+    border-bottom: 1px solid #e5ebf0;
+}
+#workflow-tabs .workflow-heading h2 {
+    margin: 0 !important;
+    color: var(--brm-ink);
+    font-size: 1.22rem !important;
+    font-weight: 780 !important;
+    letter-spacing: -0.015em;
+}
+#workflow-tabs span[data-testid="block-info"] {
+    margin: 0 0 8px !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    color: #26384a !important;
+    font-size: 0.88rem !important;
+    font-weight: 730 !important;
+}
 #workflow-tabs [role="tabpanel"] textarea,
 #workflow-tabs [role="tabpanel"] input {
     color: var(--brm-ink) !important;
@@ -899,13 +926,13 @@ footer {
 #q-table-md table { font-size: 0.86rem; }
 button.primary {
     border-color: var(--brm-teal) !important;
-    background: linear-gradient(135deg, var(--brm-teal), #087584) !important;
+    background: var(--brm-teal) !important;
     color: #fff !important;
     box-shadow: 0 7px 16px rgba(11, 135, 147, 0.18) !important;
 }
 button.primary:hover {
     border-color: var(--brm-teal-dark) !important;
-    background: linear-gradient(135deg, #0a7e8a, #075f6d) !important;
+    background: var(--brm-teal-dark) !important;
 }
 /* 任务实时进度：仅在有运行任务时显示，避免空 HTML 宿主占位。 */
 #q-live-progress {
@@ -1027,7 +1054,7 @@ button.primary:hover {
 #q-summary .brm-queue-metric.is-danger { background: #fff1f2; color: #b42318; }
 /* 任务表格:给历史任务更多高度，右侧操作保持紧凑。 */
 #q-table-md {
-    height: 258px;
+    height: 190px;
     width: 100%;
     overflow: auto;
     box-sizing: border-box;
@@ -1057,7 +1084,7 @@ button.primary:hover {
 }
 #queue-actions { gap: 9px; }
 #queue-actions button {
-    min-height: 42px !important;
+    min-height: 72px !important;
     padding: 8px 12px !important;
     border-radius: 9px !important;
     font-size: 0.9rem !important;
@@ -1091,6 +1118,19 @@ button.primary:hover {
     border-radius: 14px;
     background: var(--brm-panel);
     box-shadow: var(--brm-shadow);
+}
+#audio-asset-workspace { gap: 12px; align-items: stretch; }
+#audio-preview-clear button { min-height: 38px !important; }
+html:not([data-brm-section="audio"]) #audio-asset-workspace,
+html:not([data-brm-section="audio"]) #audio-preview-clear {
+    display: none !important;
+}
+html[data-brm-section="audio"] #q-gallery,
+html[data-brm-section="audio"] #completed-media-hint {
+    display: none !important;
+}
+html[data-brm-section="tools"] #asset-center {
+    display: none !important;
 }
 #completed-media { margin: 0 !important; }
 #completed-media h3 { margin: 0 !important; color: var(--brm-ink); }
@@ -1262,8 +1302,15 @@ button.primary:hover {
     #global-toolbar {
         min-height: 58px;
         padding: 8px 10px 8px 14px;
+        flex-wrap: wrap !important;
     }
     #brand-lockup .brm-brand-subtitle { display: none; }
+    #primary-nav-wrap {
+        order: 3;
+        flex-basis: 100% !important;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
     #primary-nav {
         flex-wrap: nowrap !important;
         overflow-x: auto;
@@ -1284,7 +1331,7 @@ button.primary:hover {
     }
     #workflow-tabs [role="tabpanel"] { padding: 12px !important; }
     #q-summary .brm-queue-summary { gap: 7px; }
-    #q-table-md { height: 242px; }
+    #q-table-md { height: 198px; }
     #task-center { padding: 10px; }
     #asset-center { padding: 10px; }
     #q-gallery { height: 420px !important; }
@@ -1308,6 +1355,13 @@ button.primary:hover {
     }
 }
 @media (min-width: 721px) and (max-width: 1200px) {
+    #global-toolbar { flex-wrap: wrap !important; }
+    #primary-nav-wrap {
+        order: 3;
+        flex-basis: 100% !important;
+        width: 100% !important;
+        min-width: 100% !important;
+    }
     #primary-nav button { font-size: 0.9rem !important; }
     #q-gallery .grid-wrap { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
 }
@@ -2889,6 +2943,7 @@ BRM_NAV_JS = r"""
     ));
     const showGroup = (group) => {
       nav.dataset.active = group;
+      document.documentElement.dataset.brmSection = group;
       workflowButtons().forEach((button) => {
         const buttonGroup = groups[labelOf(button)];
         button.style.display = buttonGroup === group ? "inline-flex" : "none";
@@ -2921,14 +2976,29 @@ BRM_NAV_JS = r"""
 """
 
 def build_ui():
-    with gr.Blocks(title="ComfyUI × Gradio", css=CUSTOM_CSS, theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(
+        title="BRM AI 工作台",
+        css=CUSTOM_CSS,
+        theme=gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate"),
+    ) as demo:
         with gr.Row(elem_id="global-toolbar", equal_height=True):
-            with gr.Column(scale=8):
+            with gr.Column(scale=2, min_width=260):
                 gr.HTML(
                     '<div class="brm-brand-title">BRM AI 工作台</div>'
                     '<div class="brm-brand-subtitle">本地 AI 媒体生成、任务编排与素材管理</div>',
                     elem_id="brand-lockup",
                 )
+            # 一级分区与品牌同处顶栏；按钮只触发原生 Tab，不改变 API。
+            with gr.Column(scale=5, min_width=560, elem_id="primary-nav-wrap"):
+                with gr.Row(elem_id="primary-nav", equal_height=True):
+                    with gr.Column(scale=1, min_width=120):
+                        nav_image_btn = gr.Button("图像创作", elem_id="nav-image")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_video_btn = gr.Button("视频创作", elem_id="nav-video")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
             with gr.Column(scale=1, min_width=140):
                 settings_btn = gr.Button("全局设置", variant="secondary")
 
@@ -2989,22 +3059,11 @@ def build_ui():
             change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
             lan_password_status = gr.Markdown("")
 
-        # 一级分区对应设计稿中的图像、视频、音频和智能工具。按钮只调用前端
-        # 原生 Tab 点击，不会新增服务端任务或公开 API。
-        with gr.Row(elem_id="primary-nav", equal_height=True):
-            with gr.Column(scale=1, min_width=140):
-                nav_image_btn = gr.Button("图像创作", elem_id="nav-image")
-            with gr.Column(scale=1, min_width=140):
-                nav_video_btn = gr.Button("视频创作", elem_id="nav-video")
-            with gr.Column(scale=1, min_width=140):
-                nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
-            with gr.Column(scale=1, min_width=140):
-                nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
-
         # ---- 每个工作流仍是原生 Gradio Tab；CSS/初始化脚本只负责分区呈现。 ----
         with gr.Tabs(elem_id="workflow-tabs"):
             # ========== Tab 1 ==========
             with gr.Tab("文生图Z-Image"):
+                gr.Markdown("## 文生图 Z-Image", elem_classes=["workflow-heading"])
                 with gr.Row():
                     with gr.Column(scale=1):
                         prompt1 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的女生在校园散步", lines=3)
@@ -3022,6 +3081,7 @@ def build_ui():
 
             # ========== Tab 2 ==========
             with gr.Tab("图片编辑FLUX.2-klein"):
+                gr.Markdown("## 图片编辑 FLUX.2-klein", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt2 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入图片提示词", lines=13, max_lines=13)
@@ -3042,6 +3102,7 @@ def build_ui():
 
             # ========== Tab 3 ==========
             with gr.Tab(PRIMARY_T2V_TAB_LABEL):
+                gr.Markdown(f"## {PRIMARY_T2V_TAB_LABEL}", elem_classes=["workflow-heading"])
                 with gr.Row():
                     with gr.Column(scale=1):
                         prompt3 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的亚洲女孩在在花丛中散步", lines=3)
@@ -3098,6 +3159,7 @@ def build_ui():
 
             # ========== Tab 4 ==========
             with gr.Tab(PRIMARY_I2V_TAB_LABEL):
+                gr.Markdown(f"## {PRIMARY_I2V_TAB_LABEL}", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt4 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=10, max_lines=10)
@@ -3159,6 +3221,7 @@ def build_ui():
             # default engine.  They share the global media queue, so this does
             # not add A5000 concurrency or change H3's resource policy.
             with gr.Tab("文生视频 LTX2.3"):
+                gr.Markdown("## 文生视频 LTX2.3", elem_classes=["workflow-heading"])
                 with gr.Row():
                     with gr.Column(scale=1):
                         ltx_prompt3 = gr.Textbox(
@@ -3184,6 +3247,7 @@ def build_ui():
 
             # ========== Tab 6 ==========
             with gr.Tab("图生视频 LTX2.3"):
+                gr.Markdown("## 图生视频 LTX2.3", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         ltx_prompt4 = gr.Textbox(
@@ -3214,6 +3278,7 @@ def build_ui():
 
             # ========== Tab 7 ==========
             with gr.Tab("首尾帧视频LTX2.3"):
+                gr.Markdown("## 首尾帧视频 LTX2.3", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt5 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=3, max_lines=3)
@@ -3247,6 +3312,7 @@ def build_ui():
 
             # ========== Tab 8 ==========
             with gr.Tab("数字人-语音驱动LTX2.3"):
+                gr.Markdown("## 数字人 · 语音驱动 LTX2.3", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt6 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入提示词", lines=3, max_lines=3)
@@ -3282,6 +3348,12 @@ def build_ui():
 
             # ========== Tab 7 ==========
             with gr.Tab("语音克隆 IndexTTS-2.5" if VOICE_ENGINE == "indextts25" else "语音克隆 IndexTTS-2（回退）"):
+                gr.Markdown(
+                    "## 语音克隆 IndexTTS-2.5"
+                    if VOICE_ENGINE == "indextts25"
+                    else "## 语音克隆 IndexTTS-2（回退）",
+                    elem_classes=["workflow-heading"],
+                )
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt7 = gr.Textbox(label="合成文本", autofocus=True, placeholder="输入要合成的文本",
@@ -3323,6 +3395,7 @@ def build_ui():
 
             # ========== Tab 8 ==========
             with gr.Tab("音乐生成ACE-Step 1.5"):
+                gr.Markdown("## 音乐生成 ACE-Step 1.5", elem_classes=["workflow-heading"])
                 ace_step_models = installed_acestep_models()
                 if not ace_step_models:
                     gr.Markdown(
@@ -3371,6 +3444,7 @@ def build_ui():
 
             # ========== Tab 9 ==========
             with gr.Tab("Qwen 大模型"):
+                gr.Markdown("## 智能工具 / Qwen 大模型", elem_classes=["workflow-heading"])
                 with gr.Row(elem_id="qwen-workspace"):
                     with gr.Column(scale=3, elem_id="qwen-chat-panel"):
                         gr.Markdown(
@@ -3431,7 +3505,7 @@ def build_ui():
 
         with gr.Column(elem_id="asset-center"):
             gr.Markdown("### 素材库", elem_id="completed-media")
-            with gr.Row():
+            with gr.Row(elem_id="audio-asset-workspace"):
                 completed_audio_list = gr.Radio(
                     label="已完成音频 · 点击名称即可试听",
                     choices=[],
@@ -3447,7 +3521,9 @@ def build_ui():
                     buttons=["download"],
                     scale=2,
                 )
-            clear_audio_preview_btn = gr.Button("停止并清除当前试听", variant="secondary")
+            clear_audio_preview_btn = gr.Button(
+                "停止并清除当前试听", variant="secondary", elem_id="audio-preview-clear",
+            )
             q_gallery = gr.Gallery(
                 label="已完成图片/视频（累计，最多 30 项）",
                 columns=7,
