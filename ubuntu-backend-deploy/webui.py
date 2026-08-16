@@ -142,6 +142,9 @@ GRADIO_HOST = os.environ.get("BRM_GRADIO_HOST", "127.0.0.1")
 GRADIO_ROOT_PATH = os.environ.get("BRM_GRADIO_ROOT_PATH", "").strip() or None
 QWEN_API_BASE = os.environ.get("BRM_QWEN_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 QWEN_MODEL = os.environ.get("BRM_QWEN_MODEL", "qwen35-4b-awq")
+QWEN_STARTUP_RETRY_SECONDS = max(
+    0, int(os.environ.get("BRM_QWEN_STARTUP_RETRY_SECONDS", "75"))
+)
 LAN_PASSWORD_HELPER = os.environ.get(
     "BRM_LAN_PASSWORD_HELPER", "/usr/local/sbin/brmmedia-set-lan-password"
 )
@@ -3245,13 +3248,42 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
     answer_parts = []
     last_emit = 0.0
     finish_reason = None
+    # After a Windows/WSL restart, Gradio is usually available before vLLM
+    # finishes its CUDA and multimodal warmup.  Treat only connection refusal
+    # as a short startup wait; request errors after vLLM has accepted a
+    # connection must remain visible immediately.
+    response = None
+    startup_deadline = time.monotonic() + QWEN_STARTUP_RETRY_SECONDS
+    attempts = 0
+    while response is None:
+        try:
+            candidate = requests.post(
+                f"{QWEN_API_BASE}/chat/completions",
+                json=payload,
+                stream=True,
+                timeout=(8, 30),
+            )
+            candidate.raise_for_status()
+            response = candidate
+        except requests.ConnectionError as exc:
+            if time.monotonic() >= startup_deadline:
+                yield (
+                    f"❌ Qwen 服务在 {QWEN_STARTUP_RETRY_SECONDS} 秒内未完成启动：{exc}\\n\\n"
+                    "请稍后重试；若持续出现，请检查 `qwen-vllm` 服务状态。"
+                )
+                return
+            attempts += 1
+            yield f"⌛ Qwen 正在启动模型，自动重试中（第 {attempts} 次）……"
+            time.sleep(3)
+        except requests.RequestException as exc:
+            yield (
+                f"❌ 无法连接 Qwen 服务：{exc}\\n\\n"
+                "请确认当前为常规模式，且 `qwen-vllm` 服务处于运行状态。"
+            )
+            return
+
     try:
-        with requests.post(
-            f"{QWEN_API_BASE}/chat/completions",
-            json=payload,
-            stream=True,
-            timeout=(8, 30),
-        ) as response:
+        with response:
             response.raise_for_status()
             for raw_line in response.iter_lines(decode_unicode=True):
                 if not raw_line or not raw_line.startswith("data:"):

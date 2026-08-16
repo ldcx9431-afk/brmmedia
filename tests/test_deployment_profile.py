@@ -29,6 +29,13 @@ class DeploymentProfileTests(unittest.TestCase):
         self.assertIn("QWEN_GPU_MEMORY_UTILIZATION=0.70", text)
         self.assertNotIn("QWEN_CUDA_VISIBLE_DEVICES=0", text)
 
+    def test_qwen_startup_keeps_gpu_order_and_recovers_clean_exits(self):
+        launcher = (REPO_ROOT / "llm-backend-deploy" / "start_qwen_vllm.sh").read_text(encoding="utf-8")
+        unit = (REPO_ROOT / "llm-backend-deploy" / "qwen-vllm.service.example").read_text(encoding="utf-8")
+        self.assertIn('CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"', launcher)
+        self.assertIn("Restart=always", unit)
+        self.assertIn("Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID", unit)
+
     def test_runtime_verifier_uses_installed_release_record(self):
         verifier = (REPO_ROOT / "brmmedia-verify-runtime.sh").read_text(encoding="utf-8")
         installer = (REPO_ROOT / "install_ubuntu_systemd_services.sh").read_text(encoding="utf-8")

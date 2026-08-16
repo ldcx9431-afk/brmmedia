@@ -19,6 +19,10 @@ fi
 source .venv/bin/activate
 
 export CUDA_VISIBLE_DEVICES="${QWEN_CUDA_VISIBLE_DEVICES:-1}"
+# The host intentionally has dissimilar GPUs (A5000 for media, A4000 for
+# Qwen).  Keep CUDA's enumeration stable across WSL/driver restarts so the
+# configured Qwen device cannot unexpectedly point at the media card.
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export HF_HOME="${HF_HOME:-$SCRIPT_DIR/.cache/huggingface}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}"
 mkdir -p "$HF_HOME" logs
