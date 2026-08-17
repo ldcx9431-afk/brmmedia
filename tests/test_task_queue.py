@@ -238,7 +238,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('window.__brmSelectCategory', source)
         self.assertIn('document.documentElement.dataset.brmSection = group', source)
         self.assertIn('#workflow-tabs .overflow-dropdown.hide', source)
-        self.assertIn('primary_hue="teal"', source)
+        self.assertIn('primary_hue="red"', source)
         self.assertIn('elem_classes=["workflow-heading"]', source)
         self.assertIn('elem_id="task-center-body"', source)
         self.assertIn('elem_id="asset-center"', source)

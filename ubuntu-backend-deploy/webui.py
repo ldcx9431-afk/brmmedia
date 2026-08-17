@@ -703,15 +703,17 @@ def check_health() -> None:
 
 CUSTOM_CSS = """
 :root {
-    --brm-ink: #14253a;
-    --brm-muted: #65758b;
-    --brm-line: #dbe4eb;
-    --brm-soft: #f4f7f9;
-    --brm-panel: #ffffff;
-    --brm-teal: #0b8793;
-    --brm-teal-dark: #086775;
-    --brm-teal-soft: #e8f6f6;
-    --brm-shadow: 0 10px 30px rgba(22, 45, 64, 0.075);
+    /* 暖白底 + 珊瑚红主色 + 杏橙强调色：与媒体创作场景保持清爽而有辨识度。 */
+    --brm-ink: #392c2d;
+    --brm-muted: #866f6b;
+    --brm-line: #f0ddd5;
+    --brm-soft: #fff7f2;
+    --brm-panel: #fffdfb;
+    --brm-coral: #e94b4b;
+    --brm-coral-dark: #c9383a;
+    --brm-coral-soft: #fff0eb;
+    --brm-orange: #ff9863;
+    --brm-shadow: 0 10px 30px rgba(108, 53, 40, 0.09);
 }
 footer {
     display: none !important;
@@ -719,7 +721,7 @@ footer {
 .gradio-container {
     font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif !important;
     color: var(--brm-ink) !important;
-    background: #f7f9fb !important;
+    background: #fff9f5 !important;
 }
 .fillable {
     max-width: 1660px !important;
@@ -753,10 +755,10 @@ footer {
 }
 #global-toolbar button {
     min-height: 40px !important;
-    border-color: #cfd9e2 !important;
+    border-color: #efd9d0 !important;
     border-radius: 9px !important;
     background: #fff !important;
-    color: #31465b !important;
+    color: #604744 !important;
     font-weight: 700 !important;
     box-shadow: none !important;
 }
@@ -777,7 +779,7 @@ footer {
     border: 1px solid transparent !important;
     border-radius: 9px !important;
     background: transparent !important;
-    color: #536477 !important;
+    color: #6e5551 !important;
     font-size: 0.96rem !important;
     font-weight: 720 !important;
     box-shadow: none !important;
@@ -787,18 +789,18 @@ footer {
     box-shadow: none !important;
 }
 #primary-nav button:hover {
-    border-color: #cde2e5 !important;
-    background: #f2f9fa !important;
-    color: var(--brm-teal-dark) !important;
+    border-color: #f6c9b9 !important;
+    background: #fff3ed !important;
+    color: var(--brm-coral-dark) !important;
 }
 #primary-nav[data-active="image"] #nav-image,
 #primary-nav[data-active="video"] #nav-video,
 #primary-nav[data-active="audio"] #nav-audio,
 #primary-nav[data-active="tools"] #nav-tools {
-    border-color: #b9dfe2 !important;
-    background: var(--brm-teal-soft) !important;
-    color: var(--brm-teal-dark) !important;
-    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
+    border-color: #f3bcaa !important;
+    background: var(--brm-coral-soft) !important;
+    color: var(--brm-coral-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-coral) !important;
 }
 /* 全局设置是同一层级的工具入口：沿用一级导航的尺寸与状态，而不是裸文本按钮。 */
 #global-settings-trigger { min-width: 132px !important; }
@@ -814,10 +816,10 @@ footer {
 }
 #global-settings-trigger button:hover,
 #global-settings-trigger button:focus-visible {
-    border-color: #b9dfe2 !important;
-    background: var(--brm-teal-soft) !important;
-    color: var(--brm-teal-dark) !important;
-    box-shadow: inset 0 -3px 0 var(--brm-teal) !important;
+    border-color: #f3bcaa !important;
+    background: var(--brm-coral-soft) !important;
+    color: var(--brm-coral-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-coral) !important;
 }
 #global-settings-trigger button:focus { outline: none !important; }
 /* Gradio 会把超出宽度的 Tab 放进省略号菜单。这里保留原生按钮和
@@ -840,8 +842,8 @@ footer {
     overflow: hidden;
     border: 1px solid var(--brm-line);
     border-radius: 14px;
-    background: #fbfdfe;
-    box-shadow: 0 5px 18px rgba(22, 45, 64, 0.04);
+    background: #fffaf7;
+    box-shadow: 0 5px 18px rgba(108, 53, 40, 0.05);
 }
 #workflow-tabs .tab-container.visually-hidden { display: none !important; }
 #workflow-tabs [role="tablist"] {
@@ -883,10 +885,10 @@ footer {
     min-width: 0 !important;
     margin: 0 !important;
     padding: 9px 15px !important;
-    border: 1px solid #e1e8ee !important;
+    border: 1px solid #f0ddd5 !important;
     border-radius: 9px !important;
     background: transparent !important;
-    color: #526477 !important;
+    color: #6e5551 !important;
     font-size: 0.86rem !important;
     font-weight: 680 !important;
     white-space: nowrap;
@@ -894,18 +896,18 @@ footer {
 }
 #workflow-tabs [role="tab"]:hover,
 #workflow-tabs .overflow-dropdown button:hover {
-    border-color: #b9dfe2 !important;
-    background: #f1f9fa !important;
-    color: var(--brm-teal-dark) !important;
+    border-color: #f3bcaa !important;
+    background: #fff3ed !important;
+    color: var(--brm-coral-dark) !important;
 }
 #workflow-tabs [role="tab"][aria-selected="true"] {
-    border-color: #9ed5d9 !important;
-    background: var(--brm-teal-soft) !important;
-    color: var(--brm-teal-dark) !important;
-    box-shadow: inset 0 -3px 0 var(--brm-teal), 0 2px 5px rgba(11, 135, 147, 0.08) !important;
+    border-color: #f3b19e !important;
+    background: var(--brm-coral-soft) !important;
+    color: var(--brm-coral-dark) !important;
+    box-shadow: inset 0 -3px 0 var(--brm-coral), 0 2px 5px rgba(233, 75, 75, 0.10) !important;
 }
 #workflow-tabs [role="tab"]:focus-visible {
-    outline: 3px solid rgba(11, 135, 147, 0.24) !important;
+    outline: 3px solid rgba(233, 75, 75, 0.24) !important;
     outline-offset: 1px;
 }
 #workflow-tabs [role="tabpanel"] {
@@ -918,14 +920,14 @@ footer {
 }
 #workflow-tabs [role="tabpanel"] .row { gap: 14px; }
 #workflow-tabs [role="tabpanel"] .block {
-    border-color: #dce5ec !important;
+    border-color: #eedbd2 !important;
     border-radius: 10px !important;
     box-shadow: none !important;
 }
 #workflow-tabs .workflow-heading {
     margin: 0 0 13px !important;
     padding: 0 0 11px !important;
-    border-bottom: 1px solid #e5ebf0;
+    border-bottom: 1px solid #f0ddd5;
 }
 #workflow-tabs .workflow-heading h2 {
     margin: 0 !important;
@@ -939,7 +941,7 @@ footer {
     padding: 0 !important;
     border-radius: 0 !important;
     background: transparent !important;
-    color: #26384a !important;
+    color: #523b37 !important;
     font-size: 0.88rem !important;
     font-weight: 730 !important;
 }
@@ -965,14 +967,14 @@ footer {
 #q-table-md td { border-color: #dbe4eb !important; }
 #q-table-md table { font-size: 0.86rem; }
 button.primary {
-    border-color: var(--brm-teal) !important;
-    background: var(--brm-teal) !important;
+    border-color: var(--brm-coral) !important;
+    background: linear-gradient(135deg, var(--brm-coral), var(--brm-orange)) !important;
     color: #fff !important;
     box-shadow: 0 7px 16px rgba(11, 135, 147, 0.18) !important;
 }
 button.primary:hover {
-    border-color: var(--brm-teal-dark) !important;
-    background: var(--brm-teal-dark) !important;
+    border-color: var(--brm-coral-dark) !important;
+    background: var(--brm-coral-dark) !important;
 }
 /* 任务实时进度：仅在有运行任务时显示，避免空 HTML 宿主占位。 */
 #q-live-progress {
@@ -985,10 +987,10 @@ button.primary:hover {
 }
 #q-live-progress .brm-live-progress-card {
     padding: 10px 13px;
-    border: 1px solid #b9d7df;
-    border-left: 4px solid #0f7186;
+    border: 1px solid #f2c5b6;
+    border-left: 4px solid var(--brm-coral);
     border-radius: 9px;
-    background: #f4fbfc;
+    background: #fff6f1;
     box-shadow: none;
 }
 #q-live-progress .brm-live-progress-heading {
@@ -996,7 +998,7 @@ button.primary:hover {
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    color: #173b46;
+    color: #6b3530;
     font-weight: 700;
 }
 #q-live-progress .brm-live-progress-name {
@@ -1006,12 +1008,12 @@ button.primary:hover {
 }
 #q-live-progress .brm-live-progress-percent {
     flex: 0 0 auto;
-    color: #0f7186;
+    color: var(--brm-coral-dark);
     font-variant-numeric: tabular-nums;
 }
 #q-live-progress .brm-live-progress-detail {
     margin-top: 5px;
-    color: #526675;
+    color: #765c57;
     font-size: 0.86rem;
 }
 #q-live-progress .brm-live-progress-track {
@@ -1019,12 +1021,12 @@ button.primary:hover {
     margin-top: 7px;
     overflow: hidden;
     border-radius: 999px;
-    background: #cce9ed;
+    background: #ffd8c9;
 }
 #q-live-progress .brm-live-progress-fill {
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, #0f7186, #32a0ae);
+    background: linear-gradient(90deg, var(--brm-coral), var(--brm-orange));
     transition: width 0.35s ease;
 }
 #q-live-progress .brm-live-progress-fill.is-indeterminate {
@@ -1088,7 +1090,7 @@ button.primary:hover {
     font-size: 0.82rem;
 }
 #q-summary .brm-queue-metric strong { color: #23364a; font-variant-numeric: tabular-nums; }
-#q-summary .brm-queue-metric.is-active { background: #e7f5f7; color: #0f5d70; }
+#q-summary .brm-queue-metric.is-active { background: #fff0e9; color: #b84739; }
 #q-summary .brm-queue-metric.is-success { background: #edf9f1; color: #207044; }
 #q-summary .brm-queue-metric.is-warning { background: #fff8e7; color: #9a6700; }
 #q-summary .brm-queue-metric.is-danger { background: #fff1f2; color: #b42318; }
@@ -1133,7 +1135,7 @@ button.primary:hover {
 #task-operation-status { min-height: 0 !important; margin: 0 !important; }
 /* 完成音频是一张可直接点选的素材清单；选中后右侧播放器立刻试听并提供下载。 */
 #completed-audio-list {
-    border: 1px solid #d8e2ee;
+    border: 1px solid #eedbd2;
     border-radius: 10px;
     overflow: hidden;
     background: #ffffff;
@@ -1146,8 +1148,8 @@ button.primary:hover {
     cursor: pointer;
 }
 #completed-audio-list label:hover {
-    background: #e8f5f6 !important;
-    color: #0f5d70;
+    background: #fff0e9 !important;
+    color: #b84739;
 }
 #completed-audio-list label:last-child { border-bottom: 0; }
 #asset-center {
@@ -1177,10 +1179,10 @@ html[data-brm-section="tools"] #asset-center {
 #completed-media-hint { margin: 8px 2px 0; color: #64748b; font-size: 0.86rem; }
 /* 素材库优先展示更多真实产物，完整素材仍在点击后通过原查看器展示。 */
 #q-gallery {
-    border: 1px solid #d8e2ee;
+    border: 1px solid #eedbd2;
     border-radius: 12px;
     overflow: hidden;
-    background: #f7fafb;
+    background: #fff8f4;
 }
 #q-gallery .grid-wrap {
     padding: 7px !important;
@@ -1312,8 +1314,8 @@ html[data-brm-section="tools"] #asset-center {
     background: transparent !important;
 }
 #global-settings-panel label span {
-    color: var(--brm-teal-dark) !important;
-    background: var(--brm-teal-soft) !important;
+    color: var(--brm-coral-dark) !important;
+    background: var(--brm-coral-soft) !important;
     border-radius: 999px;
     padding: 3px 9px;
     font-size: 0.88rem;
@@ -1327,8 +1329,8 @@ html[data-brm-section="tools"] #asset-center {
     border-radius: 9px !important;
 }
 #global-settings-panel button.primary {
-    background: var(--brm-teal) !important;
-    border-color: var(--brm-teal) !important;
+    background: linear-gradient(135deg, var(--brm-coral), var(--brm-orange)) !important;
+    border-color: var(--brm-coral) !important;
 }
 #global-settings-close {
     min-width: 116px !important;
@@ -1413,7 +1415,7 @@ html[data-brm-section="tools"] #asset-center {
 #brand-lockup .brm-brand-home:hover { background: transparent !important; border-color: transparent !important; }
 #brand-lockup .brm-brand-home > span { display:block; }
 #brand-lockup .brm-brand-subtitle { display:block; }
-#brand-lockup .brm-brand-mark { color: var(--brm-teal); font-size: 1.6rem; font-weight: 900; }
+#brand-lockup .brm-brand-mark { color: var(--brm-coral); font-size: 1.6rem; font-weight: 900; }
 html[data-brm-section="home"] #workflow-tabs > .tab-wrapper,
 html[data-brm-section="home"] #workflow-tabs [role="tabpanel"] { display: none !important; }
 html[data-brm-section="home"] #workflow-tabs { display: none !important; }
@@ -1434,7 +1436,7 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 #dashboard-command-bar .brm-dashboard-actions { display:flex; align-items:center; gap:8px; }
 #dashboard-command-bar button { min-height:38px !important; border-radius:9px !important; }
 #dashboard-new-task-menu { position:relative; }
-#dashboard-new-task-menu summary { list-style:none; cursor:pointer; padding:9px 13px; border-radius:9px; color:#fff; background:var(--brm-teal); font-weight:800; }
+#dashboard-new-task-menu summary { list-style:none; cursor:pointer; padding:9px 13px; border-radius:9px; color:#fff; background:linear-gradient(135deg,var(--brm-coral),var(--brm-orange)); font-weight:800; }
 #dashboard-new-task-menu summary::-webkit-details-marker { display:none; }
 #dashboard-new-task-menu .brm-new-task-list { position:absolute; top:calc(100% + 7px); right:0; z-index:60; display:grid; grid-template-columns:repeat(2,minmax(150px,1fr)); width:390px; padding:8px; gap:5px; border:1px solid var(--brm-line); border-radius:12px; background:#fff; box-shadow:0 18px 42px rgba(21,39,58,.18); }
 #dashboard-new-task-menu button { min-height:34px !important; text-align:left; font-weight:650 !important; }
@@ -1454,7 +1456,7 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 .brm-task-progress { margin-top:8px; color:#607084; font-size:.74rem; }
 .brm-task-progress span { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .brm-task-progress i { display:block; height:5px; margin-top:5px; overflow:hidden; border-radius:99px; background:#e5edf1; }
-.brm-task-progress em { display:block; height:100%; border-radius:inherit; background:var(--brm-teal); }
+.brm-task-progress em { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--brm-coral),var(--brm-orange)); }
 .brm-task-card footer { display:flex; justify-content:space-between; gap:7px; margin-top:8px; color:#7a8796; font-size:.7rem; white-space:nowrap; }
 .brm-empty-tasks { grid-column:1/-1; padding:22px; border:1px dashed #ccd8e1; border-radius:11px; color:#65758b; text-align:center; }
 #dashboard-system-status { min-width:265px; }
@@ -2850,7 +2852,7 @@ def _thumbnail_worker() -> None:
             else:
                 command = [
                     ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", str(path),
-                    "-filter_complex", "showwavespic=s=640x240:colors=0x0b8793",
+                    "-filter_complex", "showwavespic=s=640x240:colors=0xE94B4B",
                     "-frames:v", "1", str(target),
                 ]
             subprocess.run(command, check=False, timeout=75)
@@ -4104,7 +4106,7 @@ def main():
         server_name=GRADIO_HOST,
         server_port=server_port,
         css=CUSTOM_CSS,
-        theme=gr.themes.Soft(primary_hue="teal", secondary_hue="slate", neutral_hue="slate"),
+        theme=gr.themes.Soft(primary_hue="red", secondary_hue="orange", neutral_hue="stone"),
         inbrowser=False,
         root_path=GRADIO_ROOT_PATH,
         js=BRM_NAV_JS,
