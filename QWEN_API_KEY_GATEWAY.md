@@ -60,6 +60,8 @@ location /qwen-api/admin/ {
 
 管理接口继承站点的 Nginx Basic Auth；不要将 Basic Auth 密码或 Bearer Key 写入 shell 历史、Git、日志或工单。
 
+登录 BRM AI 工作台后，左侧导航的“密钥管理”页面提供同样的生命周期操作：查看已有密钥的名称、前缀、状态、有效期和调用次数，添加密钥，禁用/启用，删除（永久撤销）以及轮换。历史密钥不会显示明文；新建或轮换成功后明文只在页面提示区展示一次，请立即复制到目标软件的密钥存储中。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/qwen-api/admin/api-keys` | 列出密钥元数据，不返回明文或哈希 |
@@ -93,6 +95,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 ## 业务系统调用
 
 先查询模型 ID，随后将返回的 `data[0].id` 填入对话请求。接口透明转发 Qwen 的 `/models` 和 `/chat/completions`，包括 UTF-8 SSE 流。
+为兼容未提供 Qwen 思考开关的第三方“测试连接”表单，网关对未明确指定的聊天请求默认加入 `chat_template_kwargs.enable_thinking=false`，确保有限的 `max_tokens` 优先用于 `message.content`；需要推理内容时可显式传入 `chat_template_kwargs: {"enable_thinking": true}`。
 
 ```bash
 curl --fail \

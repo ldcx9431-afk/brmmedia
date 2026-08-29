@@ -152,6 +152,47 @@ Ubuntu 目标路径：
 /opt/baorongwanxiang/brmmedia/llm-backend-deploy/models/Qwen3.6-35B-A3B-AWQ-4bit
 ```
 
+## Qwen3.8-27B 双 A4000（Windows 原生 llama.cpp）
+
+Qwen3.8 的 `UD-Q4_K_XL` 需要两张 A4000 分担模型层。由于官方 CUDA
+预编译 `llama-server` 面向 Windows，本项目将该服务放在 Windows 主机上，
+WSL 只通过 NAT 网关访问其回环受限端口；局域网用户仍只访问既有的
+`/qwen/v1` Nginx Basic Auth 入口。
+
+固定来源：
+
+```text
+repo: unsloth/Qwen3.8-27B-GGUF
+revision: f1bfb127c64f7072bdd2cad55f258b9c8b2910fe
+file: Qwen3.8-27B-UD-Q4_K_XL.gguf
+size: 17923394624 bytes
+sha256: bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372
+```
+
+路径边界：模型源副本 `D:\model`，NVMe 运行副本
+`E:\BRMMedia\qwen38-llama\models`。运行服务固定
+`CUDA_VISIBLE_DEVICES=1,2`、`--split-mode layer`、`--tensor-split 1,1`、
+`--ctx-size 4096`、单并发；不会占用 A5000。
+
+管理员安装与切换：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+& C:\Users\deploy\qwen38-stage\llm-backend-deploy\install_qwen38_windows_admin.ps1
+& C:\Users\deploy\qwen38-stage\llm-backend-deploy\switch_qwen_active_windows_admin.ps1 qwen38
+```
+
+安装脚本会创建仅允许 WSL NAT 网段访问的 Windows 防火墙规则与
+`BRMMedia-Qwen38-Llama` 开机任务。切换脚本先停止 vLLM 4B、启动 27B、
+通过模型健康检查后才让 Nginx 上游切换；失败会恢复 4B。回退：
+
+```powershell
+& C:\Users\deploy\qwen38-stage\llm-backend-deploy\switch_qwen_active_windows_admin.ps1 qwen35
+```
+
+不要同时常驻两个模型；Qwen3.5-4B vLLM 是冷备。双卡 `tensor` 模式只在
+与 `layer` 的固定提示词基准比较更快且稳定后才允许替换默认模式。
+
 ## 参考
 
 - cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit: `https://huggingface.co/cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit`

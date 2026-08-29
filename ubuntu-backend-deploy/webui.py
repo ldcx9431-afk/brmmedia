@@ -145,6 +145,19 @@ QWEN_MODEL = os.environ.get("BRM_QWEN_MODEL", "qwen35-4b-awq")
 QWEN_STARTUP_RETRY_SECONDS = max(
     0, int(os.environ.get("BRM_QWEN_STARTUP_RETRY_SECONDS", "75"))
 )
+
+
+def qwen_runtime_label() -> str:
+    """Return a truthful, concise label for the locally selected Qwen service."""
+    model = QWEN_MODEL.lower()
+    if "qwen38" in model or "qwen3.8" in model:
+        return "Qwen3.8-27B · 双 A4000"
+    if "qwen35" in model or "qwen3.5" in model:
+        return "Qwen3.5-4B · A4000 冷备"
+    return QWEN_MODEL
+
+
+QWEN_RUNTIME_LABEL = qwen_runtime_label()
 LAN_PASSWORD_HELPER = os.environ.get(
     "BRM_LAN_PASSWORD_HELPER", "/usr/local/sbin/brmmedia-set-lan-password"
 )
@@ -1078,6 +1091,19 @@ button.primary:hover {
 #q-summary .brm-queue-health.is-online i { background: #16a34a; }
 #q-summary .brm-queue-health.is-offline { background: #fff1f2; color: #b91c1c; }
 #q-summary .brm-queue-health.is-offline i { background: #dc2626; }
+#q-summary a.brm-queue-health {
+    text-decoration: none;
+    transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+#q-summary a.brm-queue-health.is-online:hover {
+    background: #dff6e9;
+    box-shadow: 0 4px 12px rgba(22, 101, 52, 0.14);
+    transform: translateY(-1px);
+}
+#q-summary a.brm-queue-health:focus-visible {
+    outline: 3px solid rgba(233, 75, 75, 0.28);
+    outline-offset: 2px;
+}
 #q-summary .brm-queue-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
 #q-summary .brm-queue-metric {
     display: inline-flex;
@@ -1332,12 +1358,6 @@ html[data-brm-section="tools"] #asset-center {
     background: linear-gradient(135deg, var(--brm-coral), var(--brm-orange)) !important;
     border-color: var(--brm-coral) !important;
 }
-#global-settings-close {
-    min-width: 116px !important;
-}
-#global-settings-close button {
-    min-width: 116px !important;
-}
 @media (max-width: 720px) {
     .fillable { padding: 12px 12px 26px !important; }
     #global-toolbar {
@@ -1470,16 +1490,43 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 #task-center-body { margin-top:7px; }
 #q-table-md { height:230px; }
 #queue-actions button { min-height:46px !important; }
-#asset-center { margin-top:14px; padding:18px; border-radius:16px; }
+#asset-center { position:relative; margin-top:14px; padding:18px; border-radius:16px; }
 #asset-center > .wrap > h3, #completed-media { display:none !important; }
-#asset-download-row { justify-content:flex-end; margin:0 0 6px; }
-#asset-download-row > .form { flex:0 0 auto !important; }
-#asset-download-row button { min-height:34px !important; border-radius:8px !important; }
+#asset-download-row {
+    position:absolute !important;
+    top:15px !important;
+    right:16px !important;
+    z-index:3 !important;
+    display:flex !important;
+    justify-content:flex-end !important;
+    width:auto !important;
+    min-width:0 !important;
+    margin:0 !important;
+}
+#asset-download-row > .form { flex:0 0 auto !important; width:auto !important; min-width:0 !important; }
+#asset-download-row button {
+    flex:0 0 auto !important;
+    width:auto !important;
+    min-width:142px !important;
+    min-height:36px !important;
+    padding:0 13px !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:8px !important;
+    background:#fff !important;
+    color:#654d49 !important;
+    box-shadow:none !important;
+}
+#asset-download-row button:hover {
+    border-color:#f3b9a6 !important;
+    background:#fff4ee !important;
+    color:var(--brm-primary-deep) !important;
+}
 .brm-asset-library { min-width:0; }
 .brm-assets-header { display:flex; align-items:center; justify-content:space-between; gap:16px; }
 .brm-assets-header h3 { margin:0; font-size:1.18rem; }.brm-assets-header p { margin:3px 0 0; color:#718095; font-size:.82rem; }
-.brm-assets-tools { display:flex; align-items:center; gap:7px; }.brm-assets-tools input,.brm-assets-tools select { min-height:34px; width:150px; padding:0 9px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#3e5065; font:inherit; font-size:.78rem; }.brm-assets-tools button,.brm-asset-filters button { min-height:32px; padding:5px 9px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#54677a; font-size:.76rem; font-weight:700; cursor:pointer; }
-.brm-asset-filters { display:flex; align-items:center; gap:6px; margin:13px 0 10px; }.brm-asset-filters button.is-selected { border-color:#9dd7db; background:#e7f6f6; color:#08707b; }
+.brm-assets-tools { display:flex; align-items:center; gap:7px; }.brm-assets-tools input,.brm-assets-tools select { height:34px; min-height:34px; width:150px; margin:0; padding:0 9px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#3e5065; font:inherit; font-size:.78rem; }.brm-assets-tools button,.brm-asset-filters button { display:inline-flex; align-items:center; justify-content:center; height:34px; min-height:34px; margin:0 !important; padding:0 10px; border:1px solid #d8e2ea; border-radius:8px; background:#fff; color:#54677a; font-size:.76rem; font-weight:700; line-height:1; box-shadow:none !important; cursor:pointer; }
+.brm-assets-control-row { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:13px 0 10px; }
+.brm-asset-filters { display:flex; align-items:center; gap:6px; margin:0; }.brm-asset-filters button.is-selected { border-color:#9dd7db; background:#e7f6f6; color:#08707b; }
 .brm-asset-grid { height:448px; display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); grid-auto-rows:128px; gap:9px; overflow:auto; padding:1px 2px 9px; }
 .brm-asset-card { position:relative; min-width:0; overflow:hidden; border:1px solid #e0e8ee; border-radius:10px; background:#fff; box-shadow:0 2px 7px rgba(22,43,64,.04); }.brm-asset-card[hidden] { display:none; }
 .brm-asset-preview { position:relative; display:block; width:100%; height:92px; padding:0; overflow:hidden; border:0; background:#eff4f6; cursor:pointer; }.brm-asset-preview img,.brm-asset-preview video { display:block; width:100%; height:100%; object-fit:cover; }.brm-play-mark { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:5px 7px; border-radius:99px; background:rgba(12,29,43,.66); color:#fff; font-size:.7rem; }.brm-audio-pending { display:flex; width:100%; height:100%; align-items:center; justify-content:center; color:#708095; font-size:.72rem; }.brm-asset-meta { display:flex; align-items:center; justify-content:space-between; gap:4px; padding:6px 7px; color:#334a60; font-size:.7rem; }.brm-asset-meta span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.brm-asset-meta time { flex:0 0 auto; color:#8491a1; font-size:.65rem; }.brm-asset-download { position:absolute; right:7px; top:7px; padding:3px 5px; border-radius:5px; background:rgba(255,255,255,.88); color:#105e6c; font-size:.68rem; font-weight:800; text-decoration:none; }.brm-assets-empty { grid-column:1/-1; display:flex; align-items:center; justify-content:center; min-height:180px; border:1px dashed #cbd8e2; border-radius:10px; color:#708095; }
@@ -1487,7 +1534,620 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 .brm-audio-dock { position:fixed; z-index:1900; left:50%; bottom:20px; width:min(700px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:11px 14px; border:1px solid #a9d5d8; border-radius:12px; background:#f9ffff; box-shadow:0 12px 32px rgba(14,45,58,.22); }.brm-audio-dock[hidden]{display:none!important}.brm-audio-dock>div{min-width:120px}.brm-audio-dock strong{display:block;color:#17465b;font-size:.82rem}.brm-audio-dock span{color:#718095;font-size:.7rem}.brm-audio-dock audio{flex:1;min-width:180px;height:34px}.brm-audio-dock a,.brm-audio-dock button{flex:0 0 auto;padding:7px 9px;border:1px solid #c9dce0;border-radius:8px;background:#fff;color:#0c6b76;font-size:.75rem;font-weight:750;text-decoration:none;cursor:pointer}
 .brm-dashboard-viewer { position:fixed; inset:0; z-index:2000; display:flex; align-items:center; justify-content:center; padding:54px 5vw; background:rgba(12,25,47,.86); }.brm-dashboard-viewer[hidden] { display:none !important; }.brm-dashboard-viewer .brm-viewer-inner { width:min(1200px,100%); height:100%; display:flex; flex-direction:column; gap:10px; }.brm-dashboard-viewer .brm-viewer-bar { display:flex; align-items:center; justify-content:space-between; color:#fff; }.brm-dashboard-viewer .brm-viewer-bar a,.brm-dashboard-viewer .brm-viewer-bar button { padding:8px 12px; border:0; border-radius:8px; background:#fff; color:#172b43; font-weight:750; text-decoration:none; cursor:pointer; }.brm-dashboard-viewer .brm-viewer-stage { min-height:0; flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; }.brm-dashboard-viewer img,.brm-dashboard-viewer video { max-width:100%; max-height:100%; object-fit:contain; border-radius:10px; }
 @media (max-width:1200px) { .brm-task-card-grid{grid-template-columns:repeat(3,minmax(0,1fr));} .brm-asset-grid{grid-template-columns:repeat(5,minmax(0,1fr));} #dashboard-system-status{min-width:0;} }
-@media (max-width:720px) { #dashboard-command-bar,.brm-assets-header{align-items:flex-start;flex-direction:column}.brm-task-card-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.brm-asset-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:120px;height:432px}.brm-assets-tools{width:100%;overflow:auto}.brm-assets-tools input{min-width:150px}.brm-asset-filters{overflow:auto}.brm-audio-dock{flex-wrap:wrap}.brm-audio-dock audio{flex-basis:100%;}.brm-audio-dock>div{min-width:0}.brm-system-status{margin-top:10px} #dashboard-new-task-menu .brm-new-task-list{left:0;right:auto;width:min(390px,86vw);grid-template-columns:1fr;} }
+@media (max-width:720px) { #dashboard-command-bar,.brm-assets-header{align-items:flex-start;flex-direction:column}#asset-download-row{position:static!important;width:auto!important;align-self:flex-end!important;margin:0 0 8px auto!important}.brm-assets-control-row{align-items:stretch;flex-direction:column}.brm-task-card-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.brm-asset-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:120px;height:432px}.brm-assets-tools{width:100%;overflow:auto}.brm-assets-tools input{min-width:150px}.brm-asset-filters{overflow:auto}.brm-audio-dock{flex-wrap:wrap}.brm-audio-dock audio{flex-basis:100%;}.brm-audio-dock>div{min-width:0}.brm-system-status{margin-top:10px} #dashboard-new-task-menu .brm-new-task-list{left:0;right:auto;width:min(390px,86vw);grid-template-columns:1fr;} }
+
+/* -------------------------------------------------------------------------
+   2026-08 orange-red console shell
+   The Gradio components and their event bindings remain unchanged.  This
+   final layer only reorganizes the existing controls into the approved
+   fixed header / left navigation / right workspace composition.
+   ------------------------------------------------------------------------- */
+:root {
+    --brm-shell-header: 64px;
+    --brm-shell-sidebar: 220px;
+    --brm-bg: #fff9f5;
+    --brm-sidebar: #fff0e9;
+    --brm-card: #fffdfb;
+    --brm-card-strong: #ffffff;
+    --brm-border: #f1d8cf;
+    --brm-border-soft: #f7e8e1;
+    --brm-text: #3a2d2d;
+    --brm-text-soft: #866f6b;
+    --brm-primary: #ef5a45;
+    --brm-primary-deep: #d94737;
+    --brm-primary-soft: #fff0e9;
+    --brm-accent: #ff8a56;
+    --brm-focus: rgba(239, 90, 69, .24);
+    --brm-elevation: 0 8px 24px rgba(117, 62, 46, .07);
+}
+html, body { min-height:100%; background:var(--brm-bg) !important; }
+.gradio-container { min-height:100vh; background:var(--brm-bg) !important; color:var(--brm-text) !important; }
+.fillable {
+    max-width:none !important;
+    margin:0 !important;
+    padding:calc(var(--brm-shell-header) + 20px) 24px 42px calc(var(--brm-shell-sidebar) + 24px) !important;
+}
+
+/* Fixed product header. */
+#global-toolbar {
+    position:fixed !important;
+    inset:0 0 auto 0 !important;
+    z-index:1200 !important;
+    min-height:var(--brm-shell-header) !important;
+    height:var(--brm-shell-header) !important;
+    margin:0 !important;
+    padding:0 24px !important;
+    border:0 !important;
+    border-bottom:1px solid var(--brm-border) !important;
+    border-radius:0 !important;
+    background:rgba(255,253,251,.97) !important;
+    box-shadow:0 3px 14px rgba(91,53,43,.05) !important;
+    backdrop-filter:blur(12px);
+}
+#global-toolbar { overflow:visible !important; }
+#brand-column {
+    width:260px !important;
+    min-width:260px !important;
+    max-width:260px !important;
+    height:var(--brm-shell-header) !important;
+    min-height:var(--brm-shell-header) !important;
+    max-height:var(--brm-shell-header) !important;
+    margin:0 !important;
+    padding:0 !important;
+    overflow:hidden !important;
+    border:0 !important;
+    border-radius:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+}
+#brand-column > .wrap,
+#brand-column > .form {
+    height:100% !important;
+    min-height:0 !important;
+    max-height:100% !important;
+    margin:0 !important;
+    padding:0 !important;
+    overflow:hidden !important;
+    border:0 !important;
+    border-radius:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+}
+#brand-lockup {
+    display:flex !important;
+    align-items:center !important;
+    width:196px;
+    min-width:196px !important;
+    height:var(--brm-shell-header) !important;
+    min-height:var(--brm-shell-header) !important;
+    overflow:hidden !important;
+}
+#brand-lockup > .wrap,
+#brand-lockup > .form { width:100% !important; height:100% !important; padding:0 !important; }
+#brand-lockup > .html-container,
+#brand-lockup .prose {
+    display:flex !important;
+    align-items:center !important;
+    width:100% !important;
+    height:var(--brm-shell-header) !important;
+    margin:0 !important;
+    padding:0 !important;
+}
+#brand-lockup .brm-brand-home { min-height:var(--brm-shell-header); height:var(--brm-shell-header); gap:0; overflow:hidden; }
+#brand-lockup .brm-brand-title {
+    display:block !important;
+    color:var(--brm-text);
+    font-size:1.27rem;
+    font-weight:700;
+    font-variation-settings:"wght" 700;
+    letter-spacing:0;
+    -webkit-font-smoothing:antialiased;
+}
+#brand-lockup .brm-brand-subtitle { margin-top:1px; color:var(--brm-text-soft); font-size:.69rem; }
+#brm-top-runtime {
+    position:fixed !important;
+    top:0 !important;
+    right:24px !important;
+    left:auto !important;
+    z-index:1250 !important;
+    display:flex !important;
+    align-items:center !important;
+    justify-content:flex-end !important;
+    width:auto !important;
+    min-width:0 !important;
+    max-width:240px !important;
+    height:auto !important;
+    min-height:38px !important;
+    margin:13px 0 !important;
+    padding:7px 13px !important;
+    border:0 !important;
+    border-radius:999px !important;
+    background:#eaf8f0 !important;
+    color:#166534 !important;
+    font-size:.84rem !important;
+    font-weight:780 !important;
+    white-space:nowrap;
+}
+#brm-top-runtime > .wrap,
+#brm-top-runtime > .form,
+#brm-top-runtime .html-container,
+#brm-top-runtime .prose {
+    margin:0 !important;
+    padding:0 !important;
+    border:0 !important;
+    background:transparent !important;
+}
+#brm-top-runtime .brm-runtime-pill { display:flex; align-items:center; gap:8px; }
+#brm-top-runtime .brm-runtime-dot { width:8px; height:8px; flex:0 0 8px; border-radius:50%; background:#16a34a; box-shadow:0 0 0 3px rgba(22,163,74,.10); }
+#brm-top-runtime.is-error { background:#fff1f2 !important; color:#b42318 !important; }
+#brm-top-runtime.is-error .brm-runtime-dot { background:#dc2626; box-shadow:0 0 0 3px rgba(220,38,38,.10); }
+
+/* First-level navigation belongs to the persistent left rail. */
+#primary-nav-wrap {
+    position:fixed !important;
+    inset:var(--brm-shell-header) auto 0 0 !important;
+    z-index:1100 !important;
+    width:var(--brm-shell-sidebar) !important;
+    min-width:var(--brm-shell-sidebar) !important;
+    max-width:var(--brm-shell-sidebar) !important;
+    height:calc(100vh - var(--brm-shell-header)) !important;
+    min-height:calc(100vh - var(--brm-shell-header)) !important;
+    max-height:calc(100vh - var(--brm-shell-header)) !important;
+    padding:20px 14px 82px !important;
+    overflow-y:auto !important;
+    border-right:1px solid var(--brm-border) !important;
+    background:var(--brm-sidebar) !important;
+}
+#primary-nav-wrap > .form,
+#primary-nav-wrap > .wrap { height:auto !important; min-height:0 !important; max-height:none !important; overflow:visible !important; }
+#primary-nav {
+    display:flex !important;
+    flex-direction:column !important;
+    align-items:stretch !important;
+    gap:7px !important;
+    width:100% !important;
+    height:auto !important;
+    min-height:368px !important;
+    max-height:none !important;
+    overflow:visible !important;
+}
+#primary-nav > div, #primary-nav > .form { width:100% !important; min-width:0 !important; flex:0 0 auto !important; }
+#primary-nav button {
+    justify-content:flex-start !important;
+    width:100% !important;
+    min-height:44px !important;
+    padding:0 16px !important;
+    border:1px solid transparent !important;
+    border-radius:10px !important;
+    background:transparent !important;
+    color:#654d49 !important;
+    font-size:.92rem !important;
+    font-weight:720 !important;
+    text-align:left !important;
+}
+#primary-nav button:hover { border-color:#f4cfc1 !important; background:#fff8f4 !important; color:var(--brm-primary-deep) !important; }
+#primary-nav[data-active="home"] #nav-home,
+#primary-nav[data-active="image"] #nav-image,
+#primary-nav[data-active="video"] #nav-video,
+#primary-nav[data-active="audio"] #nav-audio,
+#primary-nav[data-active="tools"] #nav-tools,
+#primary-nav[data-active="assets"] #nav-assets,
+#primary-nav[data-active="history"] #nav-history,
+#primary-nav[data-active="keys"] #nav-keys {
+    border-color:#f7bfae !important;
+    background:linear-gradient(135deg, #ff805f, var(--brm-primary)) !important;
+    color:#fff !important;
+    box-shadow:0 7px 16px rgba(220,70,48,.18) !important;
+}
+#nav-assets { margin-top:18px !important; }
+#global-settings-trigger {
+    position:fixed !important;
+    top:459px !important;
+    right:auto !important;
+    left:14px !important;
+    bottom:auto !important;
+    z-index:1300 !important;
+    width:192px !important;
+    min-width:192px !important;
+    margin:0 !important;
+    padding:0 !important;
+    border:0 !important;
+    border-radius:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+}
+#global-settings-trigger > .wrap,
+#global-settings-trigger > .form {
+    width:100% !important;
+    min-width:0 !important;
+    margin:0 !important;
+    padding:0 !important;
+    border:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+}
+#global-settings-trigger button {
+    justify-content:flex-start !important;
+    width:100% !important;
+    min-height:44px !important;
+    padding:0 16px !important;
+    border:1px solid transparent !important;
+    border-radius:10px !important;
+    background:transparent !important;
+    color:#654d49 !important;
+    font-size:.92rem !important;
+    font-weight:720 !important;
+    box-shadow:none !important;
+}
+#global-settings-trigger button:hover,
+#global-settings-trigger.is-active button,
+html[data-brm-section="settings"] #global-settings-trigger button {
+    border-color:#f7bfae !important;
+    background:linear-gradient(135deg, #ff805f, var(--brm-primary)) !important;
+    color:#fff !important;
+    box-shadow:0 7px 16px rgba(220,70,48,.18) !important;
+}
+
+/* Child model navigation: one category only, never a duplicate main menu. */
+#workflow-tabs { width:100%; margin:0 !important; }
+#workflow-tabs > .tab-wrapper {
+    min-height:56px !important;
+    margin:0 0 14px !important;
+    padding:7px 8px !important;
+    gap:8px !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:14px !important;
+    background:#fffaf7 !important;
+    box-shadow:0 5px 18px rgba(117,62,46,.055) !important;
+}
+#workflow-tabs .overflow-dropdown,
+#workflow-tabs .overflow-dropdown.hide {
+    gap:8px !important;
+    scrollbar-width:none !important;
+}
+#workflow-tabs .overflow-dropdown::-webkit-scrollbar { height:0 !important; }
+#workflow-tabs [role="tab"],
+#workflow-tabs .overflow-dropdown button {
+    min-height:42px !important;
+    padding:9px 16px !important;
+    border:1px solid transparent !important;
+    border-radius:10px !important;
+    background:transparent !important;
+    color:#725a55 !important;
+    font-size:.85rem !important;
+    font-weight:720 !important;
+    line-height:1.15 !important;
+    box-shadow:none !important;
+    transition:background-color .16s ease,border-color .16s ease,color .16s ease,box-shadow .16s ease,transform .16s ease !important;
+}
+#workflow-tabs [role="tab"]:hover,
+#workflow-tabs .overflow-dropdown button:hover {
+    border-color:#f3c8ba !important;
+    background:#fff2ec !important;
+    color:var(--brm-primary-deep) !important;
+    transform:translateY(-1px) !important;
+}
+#workflow-tabs [role="tab"][aria-selected="true"] {
+    border-color:var(--brm-primary) !important;
+    background:var(--brm-primary) !important;
+    color:#fff !important;
+    font-weight:780 !important;
+    box-shadow:0 6px 14px rgba(217,71,55,.22) !important;
+    transform:translateY(-1px) !important;
+}
+#workflow-tabs [role="tab"][aria-selected="true"]:hover {
+    border-color:var(--brm-primary-deep) !important;
+    background:var(--brm-primary-deep) !important;
+    color:#fff !important;
+}
+#workflow-tabs [role="tab"]:focus-visible,
+#workflow-tabs .overflow-dropdown button:focus-visible {
+    outline:3px solid var(--brm-focus) !important;
+    outline-offset:2px !important;
+}
+@media (prefers-reduced-motion: reduce) {
+    #workflow-tabs [role="tab"],
+    #workflow-tabs .overflow-dropdown button { transition:none !important; }
+}
+#workflow-tabs [role="tabpanel"] {
+    padding:20px !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:14px !important;
+    background:var(--brm-card) !important;
+    box-shadow:var(--brm-elevation) !important;
+}
+#workflow-tabs .workflow-heading { display:none !important; }
+#workflow-tabs .workflow-heading h2 { color:var(--brm-text) !important; font-size:1.12rem !important; }
+#workflow-tabs [role="tabpanel"] .block { border-color:var(--brm-border) !important; border-radius:10px !important; background:#fff !important; }
+#workflow-tabs [role="tabpanel"] textarea:focus,
+#workflow-tabs [role="tabpanel"] input:focus { border-color:#f28d75 !important; box-shadow:0 0 0 3px var(--brm-focus) !important; }
+button.primary { border-color:var(--brm-primary) !important; background:linear-gradient(135deg,var(--brm-primary),var(--brm-accent)) !important; box-shadow:0 8px 17px rgba(222,73,50,.18) !important; }
+button.primary:hover { border-color:var(--brm-primary-deep) !important; background:var(--brm-primary-deep) !important; }
+
+/* Page visibility follows the left-rail destination. */
+html[data-brm-section="home"] #workflow-tabs,
+html[data-brm-section="assets"] #workflow-tabs,
+html[data-brm-section="history"] #workflow-tabs,
+html[data-brm-section="settings"] #workflow-tabs,
+html[data-brm-section="keys"] #workflow-tabs { display:none !important; }
+html[data-brm-section="assets"] #task-center,
+html[data-brm-section="settings"] #task-center,
+html[data-brm-section="tools"] #task-center,
+html[data-brm-section="keys"] #task-center { display:none !important; }
+html[data-brm-section="history"] #asset-center,
+html[data-brm-section="settings"] #asset-center,
+html[data-brm-section="tools"] #asset-center,
+html[data-brm-section="keys"] #asset-center { display:none !important; }
+html:not([data-brm-section="settings"]) #global-settings-panel { display:none !important; }
+html:not([data-brm-section="keys"]) #key-management-panel { display:none !important; }
+html[data-brm-section="settings"] #global-settings-panel {
+    position:relative !important;
+    inset:auto !important;
+    z-index:auto !important;
+    width:100% !important;
+    max-width:none !important;
+    max-height:none !important;
+    margin:0 !important;
+    padding:22px !important;
+    overflow:visible !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:14px !important;
+    background:var(--brm-card) !important;
+    box-shadow:var(--brm-elevation) !important;
+}
+/* Settings is a normal right-workspace page, not a narrower dialog. */
+#workflow-tabs,
+#task-center,
+#asset-center,
+#global-settings-panel {
+    width:100% !important;
+    max-width:none !important;
+    min-width:0 !important;
+    box-sizing:border-box !important;
+}
+html[data-brm-section="settings"] #global-settings-panel::before { display:none !important; content:none !important; }
+#global-settings-panel .block, #global-settings-panel .form, #global-settings-panel .wrap { border-color:var(--brm-border) !important; background:#fff !important; }
+#global-settings-panel label span { color:#654c48 !important; }
+
+/* API key management is a normal workspace page. Plaintext is revealed only
+   in the one-time result area after create/rotate and is never rendered in
+   the list. */
+#key-management-panel {
+    position:relative !important;
+    width:100% !important;
+    max-width:none !important;
+    min-width:0 !important;
+    box-sizing:border-box !important;
+    margin:0 !important;
+    padding:22px !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:14px !important;
+    background:var(--brm-card) !important;
+    box-shadow:var(--brm-elevation) !important;
+}
+#key-management-panel h2 { margin:0 0 18px !important; color:var(--brm-text) !important; font-size:1.24rem !important; }
+.brm-key-toolbar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; margin-bottom:16px; }
+.brm-key-field { display:flex; flex:1 1 220px; min-width:180px; flex-direction:column; gap:6px; }
+.brm-key-field label { color:#654c48; font-size:.82rem; font-weight:720; }
+.brm-key-field input, .brm-key-field select, #brm-key-selected { min-height:40px; padding:8px 10px; border:1px solid #e8cbc1; border-radius:8px; background:#fff; color:#3f302d; font:inherit; }
+.brm-key-toolbar button, .brm-key-actions button { min-height:40px; padding:0 14px; border:1px solid #efb9a8; border-radius:8px; background:#fff7f3; color:var(--brm-primary-deep); font:inherit; font-weight:720; cursor:pointer; }
+.brm-key-toolbar button:hover, .brm-key-actions button:hover { background:#ffe9e0; border-color:#e88970; }
+.brm-key-toolbar button.primary, .brm-key-actions button.primary { border-color:var(--brm-primary); background:linear-gradient(135deg,var(--brm-primary),var(--brm-accent)); color:#fff; }
+.brm-key-toolbar button:disabled, .brm-key-actions button:disabled { cursor:not-allowed; opacity:.48; }
+#brm-key-status { min-height:22px; margin:2px 0 12px; color:#705652; font-size:.88rem; }
+#brm-key-status.is-error { color:#b42318; }
+.brm-key-table-wrap { overflow:auto; border:1px solid var(--brm-border); border-radius:10px; background:#fff; }
+#brm-key-table { width:100%; border-collapse:collapse; min-width:720px; font-size:.86rem; }
+#brm-key-table th, #brm-key-table td { padding:11px 12px; border-bottom:1px solid #f1e2dc; text-align:left; vertical-align:middle; white-space:nowrap; }
+#brm-key-table th { background:#fff8f4; color:#725a55; font-size:.76rem; font-weight:780; }
+#brm-key-table tbody tr:last-child td { border-bottom:0; }
+.brm-key-state { display:inline-flex; align-items:center; min-height:24px; padding:0 8px; border-radius:999px; background:#edf8ef; color:#237a3b; font-size:.76rem; font-weight:760; }
+.brm-key-state.disabled, .brm-key-state.expired { background:#fff4dc; color:#986212; }
+.brm-key-state.revoked { background:#fbe8e8; color:#a33232; }
+.brm-key-actions { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin-top:14px; }
+#brm-key-selected { flex:1 1 280px; min-width:220px; }
+#brm-key-secret-wrap { margin-top:16px; padding:14px; border:1px solid #f1bdab; border-radius:10px; background:#fff7f2; }
+#brm-key-secret-wrap[hidden] { display:none; }
+#brm-key-secret-wrap strong { display:block; margin-bottom:6px; color:#8d3527; }
+#brm-key-secret { width:100%; box-sizing:border-box; min-height:74px; padding:10px; border:1px solid #edb19e; border-radius:8px; background:#fff; color:#3f302d; font: .86rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; resize:vertical; }
+#brm-key-empty { padding:28px 14px; color:#806964; text-align:center; }
+
+/* Home/task pages. Creation pages retain the live task strip below forms. */
+#task-center, #asset-center {
+    border:1px solid var(--brm-border) !important;
+    border-radius:14px !important;
+    background:var(--brm-card) !important;
+    box-shadow:var(--brm-elevation) !important;
+}
+#task-center { margin-top:14px !important; padding:16px !important; }
+#asset-center { margin-top:14px !important; padding:16px !important; }
+#dashboard-command-bar { margin-bottom:8px !important; }
+#dashboard-command-bar .brm-dashboard-title h2 { color:var(--brm-text) !important; font-size:1.14rem !important; }
+#q-summary .brm-summary-badge, #q-summary span { border-color:#f2d8ce !important; }
+#home-task-overview { align-items:stretch !important; gap:16px !important; }
+#home-task-main { min-width:0 !important; }
+#home-task-main > .form,
+#home-task-main > .wrap { min-width:0 !important; }
+#task-history-accordion { width:100% !important; }
+.brm-task-card { border-color:var(--brm-border) !important; border-radius:10px !important; box-shadow:none !important; }
+.brm-task-card-preview { background:#fff4ee !important; }
+.brm-task-progress i { background:#f6e2da !important; }
+.brm-task-progress em { background:linear-gradient(90deg,var(--brm-primary),var(--brm-accent)) !important; }
+.brm-system-status { border-color:var(--brm-border) !important; background:#fff8f4 !important; }
+#q-live-progress .brm-live-progress-card { border-color:#f3c2b2 !important; border-left-color:var(--brm-primary) !important; background:#fff4ee !important; }
+#q-live-progress .brm-live-progress-fill { background:linear-gradient(90deg,var(--brm-primary),var(--brm-accent)) !important; }
+html[data-brm-section="image"] #task-center .brm-task-card:not(:first-child),
+html[data-brm-section="video"] #task-center .brm-task-card:not(:first-child),
+html[data-brm-section="audio"] #task-center .brm-task-card:not(:first-child) { display:none !important; }
+html[data-brm-section="image"] #task-center .brm-task-card-grid,
+html[data-brm-section="video"] #task-center .brm-task-card-grid,
+html[data-brm-section="audio"] #task-center .brm-task-card-grid { grid-template-columns:1fr !important; }
+html[data-brm-section="image"] #dashboard-command-bar .brm-dashboard-actions,
+html[data-brm-section="video"] #dashboard-command-bar .brm-dashboard-actions,
+html[data-brm-section="audio"] #dashboard-command-bar .brm-dashboard-actions { display:none !important; }
+html[data-brm-section="image"] #dashboard-command-bar .brm-dashboard-title p,
+html[data-brm-section="video"] #dashboard-command-bar .brm-dashboard-title p,
+html[data-brm-section="audio"] #dashboard-command-bar .brm-dashboard-title p { display:none !important; }
+html[data-brm-section="image"] #task-center,
+html[data-brm-section="video"] #task-center,
+html[data-brm-section="audio"] #task-center { padding:12px 16px !important; }
+html[data-brm-section="image"] #dashboard-task-cards .brm-task-card-preview,
+html[data-brm-section="video"] #dashboard-task-cards .brm-task-card-preview,
+html[data-brm-section="audio"] #dashboard-task-cards .brm-task-card-preview { display:none !important; }
+html[data-brm-section="image"] #dashboard-task-cards,
+html[data-brm-section="video"] #dashboard-task-cards,
+html[data-brm-section="audio"] #dashboard-task-cards { display:none !important; }
+html[data-brm-section="image"] #dashboard-task-cards .brm-task-card,
+html[data-brm-section="video"] #dashboard-task-cards .brm-task-card,
+html[data-brm-section="audio"] #dashboard-task-cards .brm-task-card { padding:10px 12px !important; }
+html[data-brm-section="image"] #dashboard-system-status,
+html[data-brm-section="video"] #dashboard-system-status,
+html[data-brm-section="audio"] #dashboard-system-status,
+html[data-brm-section="image"] #task-history-accordion,
+html[data-brm-section="video"] #task-history-accordion,
+html[data-brm-section="audio"] #task-history-accordion { display:none !important; }
+html[data-brm-section="history"] #dashboard-task-cards,
+html[data-brm-section="history"] #dashboard-system-status,
+html[data-brm-section="history"] #dashboard-new-task-menu { display:none !important; }
+html[data-brm-section="history"] #task-history-accordion { margin-top:4px !important; }
+html[data-brm-section="history"] #q-table-md { height:620px !important; }
+html[data-brm-section="history"] #home-task-overview { display:block !important; }
+html[data-brm-section="history"] #home-task-main { width:100% !important; max-width:none !important; }
+html[data-brm-section="home"] #dashboard-task-cards { display:none !important; }
+html[data-brm-section="home"] #task-history-accordion { margin-top:4px !important; }
+html[data-brm-section="home"] #task-history-accordion > button { display:none !important; }
+html[data-brm-section="home"] #q-table-md { height:276px !important; }
+
+/* Unified real asset library, including audio on every relevant page. */
+.brm-assets-header h3 { color:var(--brm-text) !important; }
+.brm-asset-filters button.is-selected { border-color:#f3ae99 !important; background:var(--brm-primary-soft) !important; color:var(--brm-primary-deep) !important; }
+.brm-asset-card { border-color:var(--brm-border) !important; border-radius:9px !important; box-shadow:none !important; }
+.brm-asset-preview { background:#fff1eb !important; }
+.brm-asset-download { color:var(--brm-primary-deep) !important; }
+.brm-audio-dock {
+    left:calc(50% + var(--brm-shell-sidebar)/2) !important;
+    border-color:#f1b8a6 !important;
+    background:#fff8f4 !important;
+    box-shadow:0 14px 34px rgba(101,49,38,.19) !important;
+}
+.brm-audio-dock strong { color:#673c35 !important; }
+.brm-audio-dock a, .brm-audio-dock button { border-color:#f0cfc3 !important; color:var(--brm-primary-deep) !important; }
+.brm-dashboard-viewer { background:rgba(52,31,30,.88) !important; }
+
+@media (max-width: 980px) {
+    :root { --brm-shell-sidebar:0px; }
+    .fillable { padding:132px 14px 34px !important; }
+    #global-toolbar { padding:0 14px !important; }
+    #brand-lockup { width:auto; min-width:220px !important; }
+    #primary-nav-wrap {
+        inset:var(--brm-shell-header) 0 auto 0 !important;
+        width:100% !important; min-width:100% !important; max-width:100% !important;
+        height:56px !important; min-height:56px !important; max-height:56px !important;
+        padding:6px 10px !important; overflow-x:auto !important; overflow-y:hidden !important;
+        border-right:0 !important; border-bottom:1px solid var(--brm-border) !important;
+    }
+    #primary-nav-wrap > .form,
+    #primary-nav-wrap > .wrap { height:44px !important; min-height:44px !important; max-height:44px !important; }
+    #primary-nav {
+        flex-direction:row !important;
+        align-items:center !important;
+        width:max-content !important;
+        height:44px !important;
+        min-height:44px !important;
+        max-height:44px !important;
+    }
+    #primary-nav > div, #primary-nav > .form { width:auto !important; height:44px !important; min-height:44px !important; max-height:44px !important; }
+    #primary-nav button { width:auto !important; min-width:108px !important; min-height:42px !important; justify-content:center !important; padding:0 13px !important; }
+    #nav-assets { margin-top:0 !important; }
+    #global-settings-trigger { position:fixed !important; top:10px !important; right:14px !important; bottom:auto !important; left:auto !important; width:112px !important; min-width:112px !important; }
+    #global-settings-trigger button { justify-content:center !important; min-height:42px !important; padding:0 10px !important; }
+    #brm-top-runtime { display:none !important; }
+    .brm-audio-dock { left:50% !important; }
+}
+@media (max-width: 720px) {
+    #brand-lockup .brm-brand-subtitle { display:none !important; }
+    #brand-lockup .brm-brand-title { font-size:1.05rem !important; }
+    #workflow-tabs [role="tabpanel"] { padding:13px !important; }
+    #task-center, #asset-center, #global-settings-panel { padding:12px !important; }
+    .brm-task-card-grid { grid-template-columns:1fr !important; }
+    .brm-assets-header, #dashboard-command-bar { gap:9px !important; }
+    .brm-audio-dock { bottom:8px !important; width:calc(100vw - 16px) !important; }
+}
+
+/*
+   The workbench is intentionally a light warm-white product surface. Gradio
+   switches its theme tokens when the operating system requests dark mode;
+   without a product-level guard that turns only its native table and
+   secondary controls charcoal while the custom shell remains light. Keep
+   the same approved orange-red visual system in both browser preferences.
+*/
+:root,
+html,
+body,
+.gradio-container {
+    color-scheme: only light !important;
+    --body-background-fill:#fff9f5 !important;
+    --background-fill-primary:#fffdfb !important;
+    --background-fill-secondary:#fff7f2 !important;
+    --panel-background-fill:#fffdfb !important;
+    --block-background-fill:#ffffff !important;
+    --block-border-color:#f1d8cf !important;
+    --border-color-primary:#f1d8cf !important;
+    --body-text-color:#3a2d2d !important;
+    --body-text-color-subdued:#866f6b !important;
+    --button-secondary-background-fill:#ffffff !important;
+    --button-secondary-background-fill-hover:#fff4ee !important;
+    --button-secondary-text-color:#654d49 !important;
+    --button-secondary-text-color-hover:#d94737 !important;
+    --button-cancel-background-fill:#ffffff !important;
+    --button-cancel-background-fill-hover:#fff4ee !important;
+    --button-cancel-text-color:#654d49 !important;
+    --input-background-fill:#ffffff !important;
+    --input-background-fill-focus:#ffffff !important;
+    --input-border-color:#f1d8cf !important;
+    --input-border-color-hover:#f3b9a6 !important;
+    --table-even-background-fill:#ffffff !important;
+    --table-odd-background-fill:#fffaf7 !important;
+    --table-row-focus:#fff0e9 !important;
+    --table-text-color:#3a2d2d !important;
+}
+#q-table-md,
+#q-table-md table,
+#q-table-md tbody,
+#q-table-md tr,
+#q-table-md td {
+    background:#ffffff !important;
+    color:var(--brm-text) !important;
+}
+#q-table-md tr:nth-child(even) td { background:#fffaf7 !important; }
+#q-table-md th {
+    background:#fff5ef !important;
+    color:var(--brm-text) !important;
+}
+#dashboard-command-bar button:not(.primary),
+#queue-actions button,
+#asset-download-row button,
+#global-settings-panel button.secondary {
+    border-color:var(--brm-border) !important;
+    background:#ffffff !important;
+    color:#654d49 !important;
+}
+#dashboard-command-bar button:not(.primary):hover,
+#queue-actions button:hover,
+#asset-download-row button:hover,
+#global-settings-panel button.secondary:hover {
+    border-color:#f3b9a6 !important;
+    background:#fff4ee !important;
+    color:var(--brm-primary-deep) !important;
+}
+@media (prefers-color-scheme: dark) {
+    html, body, .gradio-container { background:var(--brm-bg) !important; color:var(--brm-text) !important; }
+    #task-center, #asset-center, #global-settings-panel,
+    #workflow-tabs > .tab-wrapper, #workflow-tabs [role="tabpanel"] {
+        background:var(--brm-card) !important;
+        color:var(--brm-text) !important;
+    }
+}
 """
 
 
@@ -1512,6 +2172,34 @@ ACE_STEP_MODEL_FILENAMES = {
     "base": "acestep/acestep_v1.5_xl_base_bf16.safetensors",
     "sft": "acestep/acestep_v1.5_xl_sft_bf16.safetensors",
 }
+# Base is the normal high-quality ACE-Step path.  SFT remains a high-quality
+# fallback when Base is deliberately not installed; Turbo is the speed-only
+# fallback retained for recovery and short previews.
+ACE_STEP_MODEL_PREFERENCE = ("base", "sft", "turbo")
+
+# 中文名称面向工作台用户，值保持为 ACE-Step 更稳定识别的英文标签。
+# “自定义”不会覆盖现有输入，用户选中预设后仍可继续手工增删标签。
+MUSIC_STYLE_PRESETS = {
+    "自定义（保留当前标签）": "",
+    "中文流行": "mandopop, pop, melodic, polished production, emotional vocal",
+    "国风古韵": "chinese traditional, guofeng, cinematic, guzheng, pipa, erhu, xiao flute",
+    "抒情民谣": "acoustic folk, warm, intimate, storytelling, acoustic guitar, soft vocal",
+    "摇滚热血": "rock, energetic, powerful drums, electric guitar, anthemic chorus",
+    "电子舞曲": "electronic dance, upbeat, synth, club, energetic, driving beat",
+    "轻音乐·治愈": "ambient, healing, soft piano, warm strings, peaceful, relaxing",
+    "影视配乐": "cinematic, orchestral, dramatic, emotional, epic, film score",
+    "爵士夜色": "jazz, sophisticated, swing, piano, upright bass, saxophone",
+    "R&B 律动": "r&b, soulful, smooth, groovy, modern drums, emotional vocal",
+    "嘻哈说唱": "hip hop, rap, punchy beat, deep bass, rhythmic",
+    "儿童欢快": "children's music, cheerful, playful, bright, catchy melody",
+    "纯音乐·钢琴": "instrumental, solo piano, lyrical, emotional, spacious",
+}
+
+
+def apply_music_style_preset(preset: str):
+    """Fill the existing ACE-Step tags field without changing its API shape."""
+    tags = MUSIC_STYLE_PRESETS.get(str(preset or "").strip(), "")
+    return tags if tags else gr.skip()
 
 
 def installed_acestep_models() -> list[str]:
@@ -1519,9 +2207,17 @@ def installed_acestep_models() -> list[str]:
     comfy_root = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expanduser()
     model_root = comfy_root / "models" / "diffusion_models"
     return [
-        model for model, relative_path in ACE_STEP_MODEL_FILENAMES.items()
-        if (model_root / relative_path).is_file()
+        model for model in ACE_STEP_MODEL_PREFERENCE
+        if (model_root / ACE_STEP_MODEL_FILENAMES[model]).is_file()
     ]
+
+
+def default_acestep_model(installed: list[str] | None = None) -> str:
+    """Choose quality first without ever submitting a model that is absent."""
+    installed = installed if installed is not None else installed_acestep_models()
+    if not installed:
+        raise gr.Error("未检测到 ACE-Step DiT 权重，请先部署模型。")
+    return installed[0]
 
 
 def require_installed_acestep_model(model: str) -> str:
@@ -2003,11 +2699,11 @@ def submit_workflow_7(prompt, ref_audio, temperature=0.8, language="zh", speed=1
     })
 
 
-def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model="turbo"):
+def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model=None):
     # 音乐生成(ACE-Step 1.5)。
     if not tags or not tags.strip():
         raise gr.Error("请输入音乐风格标签(tags)")
-    model = require_installed_acestep_model(str(model or "turbo"))
+    model = require_installed_acestep_model(str(model or default_acestep_model()))
     return submit("音乐生成", {
         "tags": tags,
         "lyrics": lyrics,
@@ -2329,7 +3025,7 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
       duration: 时长秒(默认30)
       bpm:      节拍(默认120)
       language: 语言(默认zh)
-      model:    模型版本 turbo/base/sft(默认turbo)
+      model:    模型版本 turbo/base/sft（默认优先 base 高品质）
     """
     import json
     path = WORKFLOW_DIR / (workflow_name + ".json")
@@ -2338,7 +3034,7 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
     wf = json.loads(path.read_text(encoding="utf-8"))
 
     # 选择模型版本(turbo/base/sft),对应不同的采样参数
-    model = require_installed_acestep_model(str(args.get("model", "turbo")))
+    model = require_installed_acestep_model(str(args.get("model") or default_acestep_model()))
     wf["104"]["inputs"]["unet_name"] = ACE_STEP_MODEL_FILENAMES[model]
     if model == "turbo":
         wf["3"]["inputs"]["steps"] = 8        # turbo: 8步极速
@@ -2736,9 +3432,16 @@ def _render_queue_summary(*, backend: str, pending: int, running: int, completed
         f'<span class="brm-queue-metric {css_class}"><b>{label}</b><strong>{value}</strong></span>'
         for label, value, css_class in metrics
     )
+    management_entry = (
+        '<a class="brm-queue-health is-online" href="/comfyui/" target="_blank" '
+        'rel="noopener" title="打开 ComfyUI 可视化工作流管理（新标签页）">'
+        '<i></i>ComfyUI 在线 · 管理</a>'
+        if backend == "在线"
+        else f'<span class="brm-queue-health {state_class}"><i></i>ComfyUI {escape(backend)}</span>'
+    )
     return (
         '<section class="brm-queue-summary" aria-label="任务队列状态">'
-        f'<span class="brm-queue-health {state_class}"><i></i>ComfyUI {backend}</span>'
+        f'{management_entry}'
         f'<div class="brm-queue-metrics">{pills}</div>'
         '</section>'
     )
@@ -3013,17 +3716,17 @@ def _render_dashboard_assets(records: list[dict[str, object]]) -> str:
     empty = '<div class="brm-assets-empty">暂时还没有可展示的真实媒体素材。</div>' if not cards else ""
     return (
         '<section class="brm-asset-library" aria-label="统一素材库">'
-        '<header class="brm-assets-header"><div><h3>素材库</h3><p>图片、视频、音频统一管理；点击即可预览或试听。</p></div>'
-        '<div class="brm-assets-tools"><input id="brm-asset-search" type="search" placeholder="搜索素材名称" aria-label="搜索素材名称">'
-        '<select id="brm-asset-sort" aria-label="素材排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>'
-        '<button type="button" data-brm-action="asset-view" data-asset-view="grid">网格</button>'
-        '<button type="button" data-brm-action="asset-view" data-asset-view="list">列表</button></div></header>'
-        '<nav class="brm-asset-filters" aria-label="素材类型筛选">'
+        '<header class="brm-assets-header"><div><h3>素材库</h3><p>图片、视频、音频统一管理；点击即可预览或试听。</p></div></header>'
+        '<div class="brm-assets-control-row"><nav class="brm-asset-filters" aria-label="素材类型筛选">'
         '<button type="button" class="is-selected" data-brm-action="asset-filter" data-asset-filter="all">全部</button>'
         '<button type="button" data-brm-action="asset-filter" data-asset-filter="image">图片</button>'
         '<button type="button" data-brm-action="asset-filter" data-asset-filter="video">视频</button>'
         '<button type="button" data-brm-action="asset-filter" data-asset-filter="audio">音频</button>'
-        '</nav><div id="brm-asset-grid" class="brm-asset-grid">'
+        '</nav><div class="brm-assets-tools"><input id="brm-asset-search" type="search" placeholder="搜索素材名称" aria-label="搜索素材名称">'
+        '<select id="brm-asset-sort" aria-label="素材排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>'
+        '<button type="button" data-brm-action="asset-view" data-asset-view="grid">网格</button>'
+        '<button type="button" data-brm-action="asset-view" data-asset-view="list">列表</button></div></div>'
+        '<div id="brm-asset-grid" class="brm-asset-grid">'
         f'{cards}{empty}</div></section>'
         '<aside id="brm-audio-dock" class="brm-audio-dock" hidden>'
         '<div><strong id="brm-audio-title">音频试听</strong><span>真实产物</span></div>'
@@ -3225,7 +3928,7 @@ def _qwen_display_text(reasoning: str, answer: str) -> str:
 
 
 def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_thinking):
-    """通过 WSL 内部 vLLM OpenAI 兼容接口流式返回 Qwen 回答。"""
+    """通过本机 OpenAI 兼容接口流式返回当前启用的 Qwen 回答。"""
     question = (question or "").strip()
     if not question:
         yield "请输入问题后再发送。"
@@ -3271,7 +3974,7 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
             if time.monotonic() >= startup_deadline:
                 yield (
                     f"❌ Qwen 服务在 {QWEN_STARTUP_RETRY_SECONDS} 秒内未完成启动：{exc}\\n\\n"
-                    "请稍后重试；若持续出现，请检查 `qwen-vllm` 服务状态。"
+                    "请稍后重试；若持续出现，请检查当前 Qwen 服务状态。"
                 )
                 return
             attempts += 1
@@ -3280,13 +3983,19 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
         except requests.RequestException as exc:
             yield (
                 f"❌ 无法连接 Qwen 服务：{exc}\\n\\n"
-                "请确认当前为常规模式，且 `qwen-vllm` 服务处于运行状态。"
+                "请确认当前 Qwen 服务已启动，并检查工作台的本地服务状态。"
             )
             return
 
     try:
         with response:
             response.raise_for_status()
+            # llama.cpp's OpenAI-compatible SSE endpoint does not always send
+            # a charset in Content-Type.  `requests` then falls back to
+            # ISO-8859-1, which turns UTF-8 Chinese response bytes into
+            # mojibake in the Gradio stream.  The JSON/SSE protocol here is
+            # UTF-8 by definition, so pin it before decoding lines.
+            response.encoding = "utf-8"
             for raw_line in response.iter_lines(decode_unicode=True):
                 if not raw_line or not raw_line.startswith("data:"):
                     continue
@@ -3324,7 +4033,7 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
     except requests.RequestException as exc:
         yield (
             f"❌ 无法连接 Qwen 服务：{exc}\n\n"
-            "请确认当前为常规模式，且 `qwen-vllm` 服务处于运行状态。"
+            "请确认当前 Qwen 服务已启动，并检查工作台的本地服务状态。"
         )
         return
 
@@ -3362,18 +4071,46 @@ BRM_NAV_JS = r"""
     "音乐生成ACE-Step 1.5": "audio", "Qwen 大模型": "tools"
   };
   const firstTabs = { image:"文生图Z-Image", video:"MiniMax H3 文生视频", audio:"语音克隆 IndexTTS-2.5", tools:"Qwen 大模型", home:"任务中心" };
+  const auxiliarySections = new Set(["home", "assets", "history", "settings", "keys"]);
   const boot = () => {
     const root = document.querySelector("#workflow-tabs"); const nav = document.querySelector("#primary-nav");
     if (!root || !nav) return window.setTimeout(boot, 80);
     if (window.__brmNavigationReady) return;
     const labelOf = (button) => (button?.textContent || "").trim();
     const workflowButtons = () => Array.from(root.querySelectorAll('.tab-container[role="tablist"] button, .overflow-dropdown button'));
+    let currentAssetFilter = "all";
+    const applyAssetFilter = (filter) => {
+      currentAssetFilter = filter || "all";
+      document.querySelectorAll("[data-brm-action='asset-filter']").forEach((item) => item.classList.toggle("is-selected", item.dataset.assetFilter === currentAssetFilter));
+      document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = currentAssetFilter !== "all" && card.dataset.assetType !== currentAssetFilter; });
+    };
     const showGroup = (group) => {
       nav.dataset.active = group; document.documentElement.dataset.brmSection = group;
+      const settingsTrigger = document.querySelector("#global-settings-trigger");
+      if (settingsTrigger) {
+        const settingsButton = settingsTrigger.querySelector("button");
+        settingsTrigger.classList.toggle("is-active", group === "settings");
+        if (settingsButton) {
+          if (group === "settings") settingsButton.setAttribute("aria-current", "page");
+          else settingsButton.removeAttribute("aria-current");
+        }
+      }
       workflowButtons().forEach((button) => {
         const buttonGroup = groups[labelOf(button)];
-        button.style.display = group === "home" ? (buttonGroup === "home" ? "inline-flex" : "none") : (buttonGroup === group ? "inline-flex" : "none");
+        button.style.display = auxiliarySections.has(group)
+          ? "none"
+          : (buttonGroup === group ? "inline-flex" : "none");
       });
+      applyAssetFilter(({image:"image", video:"video", audio:"audio"})[group] || "all");
+      if (group === "keys") window.__brmLoadApiKeys?.();
+      if (group === "history") {
+        window.setTimeout(() => {
+          const accordion = document.querySelector("#task-history-accordion");
+          const trigger = accordion?.querySelector(":scope > button");
+          const content = accordion?.querySelector('[data-testid="accordion-content"]');
+          if (trigger && content && getComputedStyle(content).display === "none") trigger.click();
+        }, 80);
+      }
     };
     const selectWorkflow = (label) => {
       const target = workflowButtons().find((button) => labelOf(button) === label);
@@ -3382,20 +4119,117 @@ BRM_NAV_JS = r"""
       window.setTimeout(() => showGroup(group), 60);
     };
     const syncFromSelected = () => {
+      if (auxiliarySections.has(document.documentElement.dataset.brmSection || "")) return;
       const selected = root.querySelector('[role="tab"][aria-selected="true"]');
       showGroup(groups[labelOf(selected)] || "home");
     };
     window.__brmSelectCategory = (group) => selectWorkflow(firstTabs[group] || firstTabs.image);
-    window.__brmSelectDashboard = () => selectWorkflow("任务中心");
+    window.__brmSelectSection = (section) => showGroup(section || "home");
+    window.__brmSelectDashboard = () => showGroup("home");
     const htmlEscape = (value) => String(value || "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
+    const keyApiUrl = "/qwen-api/admin/api-keys";
+    const keyState = { records: [], loaded: false, busy: false };
+    const keyStatus = (record) => {
+      if (record.status === "revoked") return ["已撤销", "revoked"];
+      if (record.status === "disabled") return ["已禁用", "disabled"];
+      if (record.expires_at && Number(record.expires_at) <= Date.now() / 1000) return ["已过期", "expired"];
+      return ["正常", "active"];
+    };
+    const formatTime = (timestamp) => timestamp ? new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", {hour12:false}) : "永不过期";
+    const formatLastUsed = (timestamp) => timestamp ? new Date(Number(timestamp) * 1000).toLocaleString("zh-CN", {hour12:false}) : "从未使用";
+    const setKeyStatus = (message, error = false) => {
+      const host = document.querySelector("#brm-key-status");
+      if (!host) return;
+      host.textContent = message || "";
+      host.classList.toggle("is-error", Boolean(error));
+    };
+    const renderApiKeys = () => {
+      const body = document.querySelector("#brm-key-table tbody");
+      const select = document.querySelector("#brm-key-selected");
+      if (!body || !select) return;
+      if (!keyState.records.length) {
+        body.innerHTML = '<tr><td colspan="6" id="brm-key-empty">暂无密钥</td></tr>';
+      } else {
+        body.innerHTML = keyState.records.map((record) => {
+          const [label, css] = keyStatus(record);
+          return `<tr><td>${htmlEscape(record.name)}</td><td><code>${htmlEscape(record.prefix)}</code></td><td><span class="brm-key-state ${css}">${label}</span></td><td>${formatTime(record.expires_at)}</td><td>${Number(record.use_count || 0)}</td><td>${formatLastUsed(record.last_used_at)}</td></tr>`;
+        }).join("");
+      }
+      const selected = select.value;
+      select.innerHTML = '<option value="">选择要操作的密钥</option>' + keyState.records.map((record) => `<option value="${htmlEscape(record.id)}">${htmlEscape(record.name)} · ${htmlEscape(record.prefix)}</option>`).join("");
+      if (keyState.records.some((record) => record.id === selected)) select.value = selected;
+      const hasSelection = Boolean(select.value);
+      document.querySelectorAll("[data-key-action='disable'],[data-key-action='enable'],[data-key-action='revoke'],[data-key-action='rotate']").forEach((button) => { button.disabled = !hasSelection || keyState.busy; });
+    };
+    const loadApiKeys = async (quiet = false) => {
+      setKeyStatus("正在读取密钥列表…");
+      try {
+        const response = await fetch(keyApiUrl, {credentials:"same-origin", headers:{Accept:"application/json"}});
+        if (!response.ok) throw new Error(response.status === 401 ? "管理员认证已失效，请刷新页面重新登录" : `读取失败（HTTP ${response.status}）`);
+        const records = await response.json();
+        keyState.records = Array.isArray(records) ? records : [];
+        keyState.loaded = true;
+        renderApiKeys();
+        if (!quiet) setKeyStatus(`共 ${keyState.records.length} 个密钥`);
+      } catch (error) {
+        setKeyStatus(error.message || "无法连接密钥管理接口", true);
+      }
+    };
+    window.__brmLoadApiKeys = loadApiKeys;
+    const mutateApiKey = async (url, options = {}, successMessage = "操作成功") => {
+      if (keyState.busy) return;
+      keyState.busy = true; renderApiKeys(); setKeyStatus("正在提交…");
+      try {
+        const response = await fetch(url, {credentials:"same-origin", ...options, headers:{Accept:"application/json", ...(options.headers || {})}});
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || payload.error?.message || `操作失败（HTTP ${response.status}）`);
+        if (payload.api_key) {
+          const secretWrap = document.querySelector("#brm-key-secret-wrap");
+          const secret = document.querySelector("#brm-key-secret");
+          if (secret) secret.value = payload.api_key;
+          if (secretWrap) secretWrap.hidden = false;
+          setKeyStatus("密钥已生成，请立即复制明文；离开此页面后无法再次查看");
+        } else setKeyStatus(successMessage);
+        await loadApiKeys(Boolean(payload.api_key));
+        if (payload.api_key) setKeyStatus("密钥已生成，请立即复制明文；离开此页面后无法再次查看");
+      } catch (error) {
+        setKeyStatus(error.message || "密钥操作失败", true);
+      } finally {
+        keyState.busy = false; renderApiKeys();
+      }
+    };
+    document.addEventListener("change", (event) => {
+      if (event.target.id === "brm-key-selected") renderApiKeys();
+    });
     document.addEventListener("click", (event) => {
+      const keyAction = event.target.closest("[data-key-action]");
+      if (!keyAction) return;
+      const action = keyAction.dataset.keyAction;
+      if (!["create", "disable", "enable", "revoke", "rotate"].includes(action)) return;
+      event.preventDefault();
+      const selected = document.querySelector("#brm-key-selected")?.value || "";
+      if (action === "create") {
+        const name = document.querySelector("#brm-key-name")?.value.trim() || "";
+        const expires = document.querySelector("#brm-key-expires")?.value || "";
+        if (!name) { setKeyStatus("请输入密钥名称", true); return; }
+        const secretWrap = document.querySelector("#brm-key-secret-wrap"); if (secretWrap) secretWrap.hidden = true;
+        mutateApiKey(keyApiUrl, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, expires_in_days: expires ? Number(expires) : null})}, "密钥已创建");
+        return;
+      }
+      if (!selected) { setKeyStatus("请先选择密钥", true); return; }
+      if (action === "revoke" && !window.confirm("撤销后该密钥将永久失效，是否继续？")) return;
+      const secretWrap = document.querySelector("#brm-key-secret-wrap"); if (secretWrap && action === "rotate") secretWrap.hidden = true;
+      mutateApiKey(`${keyApiUrl}/${encodeURIComponent(selected)}/${action}`, {method:"POST"}, action === "revoke" ? "密钥已永久撤销" : "密钥状态已更新");
+    });
+    document.addEventListener("click", (event) => {
+      if (event.target.closest("#global-settings-trigger")) { event.preventDefault(); showGroup("settings"); return; }
       const action = event.target.closest("[data-brm-action]"); if (!action) return;
       const kind = action.dataset.brmAction;
       if (kind === "home") { event.preventDefault(); window.__brmSelectDashboard(); }
+      if (kind === "section") { event.preventDefault(); showGroup(action.dataset.section || "home"); }
       if (kind === "workflow") { event.preventDefault(); selectWorkflow(action.dataset.workflow); action.closest("details")?.removeAttribute("open"); }
       if (kind === "asset-filter") {
-        document.querySelectorAll("[data-brm-action='asset-filter']").forEach((item) => item.classList.toggle("is-selected", item === action));
-        document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = action.dataset.assetFilter !== "all" && card.dataset.assetType !== action.dataset.assetFilter; });
+        applyAssetFilter(action.dataset.assetFilter);
       }
       if (kind === "asset-view") { document.querySelector("#brm-asset-grid")?.classList.toggle("is-list", action.dataset.assetView === "list"); }
       if (kind === "audio-play") {
@@ -3413,6 +4247,24 @@ BRM_NAV_JS = r"""
     });
     document.addEventListener("input", (event) => { if (event.target.id !== "brm-asset-search") return; const query = event.target.value.trim().toLowerCase(); document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = Boolean(query) && !String(card.dataset.assetName || "").includes(query); }); });
     document.addEventListener("change", (event) => { if (event.target.id !== "brm-asset-sort") return; const grid = document.querySelector("#brm-asset-grid"); if (!grid) return; const cards = Array.from(grid.querySelectorAll(".brm-asset-card")); cards.sort((a,b) => (Number(a.dataset.assetTime) - Number(b.dataset.assetTime)) * (event.target.value === "oldest" ? 1 : -1)).forEach((card) => grid.appendChild(card)); });
+    const syncRuntimeStatus = () => {
+      const status = document.querySelector("#brm-runtime-text");
+      const summary = (document.querySelector("#q-summary")?.textContent || "").trim();
+      if (!status || !summary) return;
+      const abnormal = /离线|不可用|异常/.test(summary);
+      status.textContent = abnormal ? "服务异常" : "本地服务运行中";
+      document.querySelector("#brm-top-runtime")?.classList.toggle("is-error", abnormal);
+    };
+    const syncShellViewport = () => {
+      const shell = document.querySelector(".main.fillable"); if (!shell) return;
+      const padding = window.innerWidth <= 980 ? "132px 14px 34px" : "84px 24px 42px 244px";
+      shell.style.setProperty("padding", padding, "important");
+    };
+    const summaryHost = document.querySelector("#q-summary");
+    if (summaryHost) new MutationObserver(syncRuntimeStatus).observe(summaryHost, { childList:true, subtree:true, characterData:true });
+    const assetHost = document.querySelector("#dashboard-assets");
+    if (assetHost) new MutationObserver(() => applyAssetFilter(currentAssetFilter)).observe(assetHost, { childList:true, subtree:true });
+    syncShellViewport(); window.addEventListener("resize", syncShellViewport, { passive:true });
     root.addEventListener("click", () => window.setTimeout(syncFromSelected, 60));
     new MutationObserver(syncFromSelected).observe(root, { childList:true, subtree:true, attributes:true, attributeFilter:["aria-selected", "class"] });
     window.__brmNavigationReady = true; window.__brmSelectDashboard();
@@ -3425,16 +4277,23 @@ def build_ui():
         title="BRM AI 工作台",
     ) as demo:
         with gr.Row(elem_id="global-toolbar", equal_height=True):
-            with gr.Column(scale=2, min_width=260):
+            with gr.Column(scale=2, min_width=260, elem_id="brand-column"):
                 gr.HTML(
                     '<button type="button" class="brm-brand-home" data-brm-action="home">'
                     '<span><span class="brm-brand-title">BRM AI 工作台</span>'
                     '<span class="brm-brand-subtitle">本地 AI 媒体生成、任务编排与素材管理</span></span></button>',
                     elem_id="brand-lockup",
                 )
-            # 一级分区与品牌同处顶栏；按钮只触发原生 Tab，不改变 API。
+            gr.HTML(
+                '<div class="brm-runtime-pill"><span class="brm-runtime-dot"></span>'
+                '<strong id="brm-runtime-text">正在读取状态</strong></div>',
+                elem_id="brm-top-runtime",
+            )
+            # 一级分区在桌面端固定到左侧栏；按钮只触发原生 Tab，不改变 API。
             with gr.Column(scale=5, min_width=560, elem_id="primary-nav-wrap"):
                 with gr.Row(elem_id="primary-nav", equal_height=True):
+                    with gr.Column(scale=1, min_width=120):
+                        nav_home_btn = gr.Button("首页", elem_id="nav-home")
                     with gr.Column(scale=1, min_width=120):
                         nav_image_btn = gr.Button("图像创作", elem_id="nav-image")
                     with gr.Column(scale=1, min_width=120):
@@ -3443,25 +4302,31 @@ def build_ui():
                         nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
                     with gr.Column(scale=1, min_width=120):
                         nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
-            with gr.Column(scale=1, min_width=140, elem_id="global-settings-trigger"):
-                settings_btn = gr.Button("全局设置", variant="secondary")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_assets_btn = gr.Button("素材库", elem_id="nav-assets")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_history_btn = gr.Button("任务记录", elem_id="nav-history")
+                    with gr.Column(scale=1, min_width=120):
+                        nav_keys_btn = gr.Button("密钥管理", elem_id="nav-keys")
+        # Settings must not live inside the fixed header.  A fixed descendant
+        # of a backdrop-filter header uses that header as its containing block,
+        # which pins the control to y=0 instead of the bottom of the sidebar.
+        with gr.Column(elem_id="global-settings-trigger"):
+            settings_btn = gr.Button("全局设置", variant="secondary")
 
-        with gr.Column(visible=False, elem_id="global-settings-panel") as settings_panel:
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=10):
-                    gr.Markdown(
-                        "### 全局设置\n"
-                        "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
-                        + (
-                            "MiniMax H3 当前启用：为避免 A5000 显存争用，媒体队列固定为 **1**。"
-                            if VIDEO_ENGINE == "h3"
-                            else "视频、数字人等高显存任务通常建议保持并发 **1**。"
-                        )
-                    )
-                with gr.Column(scale=1, min_width=116):
-                    settings_close_top_btn = gr.Button(
-                        "关闭", variant="secondary", elem_id="global-settings-close",
-                    )
+        # Keep the settings page mounted and switch it with the same client-side
+        # section router as the other pages.  This avoids a blank first click
+        # while retaining every existing settings control and callback.
+        with gr.Column(visible=True, elem_id="global-settings-panel") as settings_panel:
+            gr.Markdown(
+                "### 全局设置\n"
+                "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
+                + (
+                    "MiniMax H3 当前启用：为避免 A5000 显存争用，媒体队列固定为 **1**。"
+                    if VIDEO_ENGINE == "h3"
+                    else "视频、数字人等高显存任务通常建议保持并发 **1**。"
+                )
+            )
             with gr.Row():
                 # Gradio 6 rejects a degenerate Slider range.  In H3 mode the
                 # policy deliberately caps media concurrency at one, so keep
@@ -3481,9 +4346,7 @@ def build_ui():
                     24, 100, value=DONE_GALLERY_MAX, step=5, precision=0,
                     label="画廊最多显示产物数",
                 )
-            with gr.Row():
-                save_settings_btn = gr.Button("保存并应用", variant="primary")
-                close_settings_btn = gr.Button("关闭", variant="secondary")
+            save_settings_btn = gr.Button("保存并应用", variant="primary")
             settings_status = gr.Markdown("")
             gr.Markdown("---\n#### 局域网访问密码")
             gr.Markdown(
@@ -3502,6 +4365,48 @@ def build_ui():
                 )
             change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
             lan_password_status = gr.Markdown("")
+
+        gr.HTML(
+            """
+            <h2>密钥管理</h2>
+            <div class="brm-key-toolbar">
+              <div class="brm-key-field">
+                <label for="brm-key-name">密钥名称</label>
+                <input id="brm-key-name" type="text" maxlength="100" placeholder="例如：业务系统生产环境">
+              </div>
+              <div class="brm-key-field" style="flex:0 1 190px">
+                <label for="brm-key-expires">有效期</label>
+                <select id="brm-key-expires">
+                  <option value="7">7 天</option>
+                  <option value="30" selected>30 天</option>
+                  <option value="90">90 天</option>
+                  <option value="365">365 天</option>
+                  <option value="">永不过期</option>
+                </select>
+              </div>
+              <button type="button" class="primary" data-key-action="create">添加密钥</button>
+            </div>
+            <div id="brm-key-status" role="status" aria-live="polite">打开页面后读取密钥列表</div>
+            <div class="brm-key-table-wrap">
+              <table id="brm-key-table">
+                <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>有效期至</th><th>调用次数</th><th>最近使用</th></tr></thead>
+                <tbody><tr><td colspan="6" id="brm-key-empty">正在读取…</td></tr></tbody>
+              </table>
+            </div>
+            <div class="brm-key-actions">
+              <select id="brm-key-selected" aria-label="选择要操作的密钥"><option value="">选择要操作的密钥</option></select>
+              <button type="button" data-key-action="disable" disabled>禁用</button>
+              <button type="button" data-key-action="enable" disabled>启用</button>
+              <button type="button" data-key-action="revoke" disabled>删除密钥</button>
+              <button type="button" class="primary" data-key-action="rotate" disabled>轮换密钥</button>
+            </div>
+            <div id="brm-key-secret-wrap" hidden>
+              <strong>仅显示这一次：请立即复制并保存新密钥</strong>
+              <textarea id="brm-key-secret" readonly spellcheck="false" aria-label="新生成的明文密钥"></textarea>
+            </div>
+            """,
+            elem_id="key-management-panel",
+        )
 
         # ---- 每个工作流仍是原生 Gradio Tab；CSS/初始化脚本只负责分区呈现。 ----
         with gr.Tabs(elem_id="workflow-tabs"):
@@ -3851,6 +4756,14 @@ def build_ui():
                     )
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
+                        music_style_preset8 = gr.Dropdown(
+                            label="常用风格预设",
+                            choices=list(MUSIC_STYLE_PRESETS),
+                            value="自定义（保留当前标签）",
+                            info="选择后自动填充下方风格标签，仍可继续手工修改。",
+                            filterable=True,
+                            elem_id="music-style-preset",
+                        )
                         tags8 = gr.Textbox(
                             label="音乐风格标签",
                             autofocus=True,
@@ -3878,10 +4791,18 @@ def build_ui():
                             model8 = gr.Dropdown(
                                 label="模型",
                                 choices=ace_step_models,
-                                value=ace_step_models[0] if ace_step_models else None,
-                                info="仅显示服务器已安装的 ACE-Step 权重；安装新模型并重启后端后才会出现。",
+                                value=default_acestep_model(ace_step_models) if ace_step_models else None,
+                                info="默认优先 Base 高品质；仅显示服务器已安装的 ACE-Step 权重。",
                             )
                         submit_btn8 = gr.Button("提交", variant="primary")
+                music_style_preset8.change(
+                    fn=apply_music_style_preset,
+                    inputs=music_style_preset8,
+                    outputs=tags8,
+                    show_progress="hidden",
+                    queue=False,
+                    api_visibility="private",
+                )
                 submit_btn8.click(
                     fn=submit_workflow_8,
                     inputs=[tags8, lyrics8, duration8, bpm8, language8, model8],
@@ -3891,12 +4812,13 @@ def build_ui():
 
             # ========== Tab 9 ==========
             with gr.Tab("Qwen 大模型"):
-                gr.Markdown("## 智能工具 / Qwen 大模型", elem_classes=["workflow-heading"])
+                gr.Markdown("## 智能工具 / Qwen3.8 流式对话测试", elem_classes=["workflow-heading"])
                 with gr.Row(elem_id="qwen-workspace"):
                     with gr.Column(scale=3, elem_id="qwen-chat-panel"):
                         gr.Markdown(
-                            "### Qwen 本地大模型\n"
-                            "流式验证问答能力；Qwen 固定在 A4000，媒体工作流固定在 A5000。"
+                            f"### {QWEN_RUNTIME_LABEL} 本地对话\n"
+                            f"当前模型：`{QWEN_MODEL}`。流式验证问答能力；Qwen 固定在 A4000，"
+                            "媒体工作流固定在 A5000。"
                         )
                         qwen_system = gr.Textbox(
                             label="系统提示词（可选）",
@@ -3919,7 +4841,11 @@ def build_ui():
                             elem_id="qwen-answer",
                         )
                     with gr.Column(scale=1, min_width=300, elem_id="qwen-config-panel"):
-                        gr.Markdown("### 模型运行配置\nA4000 · Qwen3.5-4B-AWQ · 在线")
+                        gr.Markdown(
+                            "### 模型运行配置\n"
+                            f"{QWEN_RUNTIME_LABEL} · 在线\n\n"
+                            "流式输出将直接显示模型返回的内容；可按需开启推理内容。"
+                        )
                         qwen_temperature = gr.Slider(
                             0, 1.5, value=0.7, step=0.1,
                             label="温度",
@@ -3961,19 +4887,19 @@ def build_ui():
                         '</div></details>'
                     )
             q_summary = gr.HTML(value="", elem_id="q-summary")
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=9):
+            with gr.Row(equal_height=True, elem_id="home-task-overview"):
+                with gr.Column(scale=9, elem_id="home-task-main"):
                     q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
                     dashboard_task_cards = gr.HTML(value="", elem_id="dashboard-task-cards")
+                    with gr.Accordion("全部任务记录", open=True, elem_id="task-history-accordion"):
+                        with gr.Row(equal_height=True, elem_id="task-center-body"):
+                            with gr.Column(scale=10):
+                                q_table = gr.Markdown(elem_id="q-table-md")
+                            with gr.Column(scale=1, min_width=158, elem_id="queue-actions"):
+                                clear_btn = gr.Button("清空排队任务")
+                                interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
                 with gr.Column(scale=2, min_width=265, elem_id="dashboard-system-status"):
                     dashboard_system_status = gr.HTML(value="")
-            with gr.Accordion("全部任务记录", open=False, elem_id="task-history-accordion"):
-                with gr.Row(equal_height=True, elem_id="task-center-body"):
-                    with gr.Column(scale=10):
-                        q_table = gr.Markdown(elem_id="q-table-md")
-                    with gr.Column(scale=1, min_width=158, elem_id="queue-actions"):
-                        clear_btn = gr.Button("清空排队任务")
-                        interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
             op_status = gr.Markdown("", elem_id="task-operation-status")
 
         with gr.Column(elem_id="asset-center"):
@@ -4032,6 +4958,11 @@ def build_ui():
         gr.api(api_task_status, api_name="task_status")
 
         # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
+        nav_home_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectSection?.("home"); return []; }',
+            api_visibility="private",
+        )
         nav_image_btn.click(
             fn=None,
             js='() => { window.__brmSelectCategory?.("image"); return []; }',
@@ -4052,9 +4983,26 @@ def build_ui():
             js='() => { window.__brmSelectCategory?.("tools"); return []; }',
             api_visibility="private",
         )
-        settings_btn.click(fn=show_global_settings, outputs=settings_panel, api_visibility="private")
-        settings_close_top_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
-        close_settings_btn.click(fn=hide_global_settings, outputs=settings_panel, api_visibility="private")
+        nav_assets_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectSection?.("assets"); return []; }',
+            api_visibility="private",
+        )
+        nav_history_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectSection?.("history"); return []; }',
+            api_visibility="private",
+        )
+        nav_keys_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectSection?.("keys"); return []; }',
+            api_visibility="private",
+        )
+        settings_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectSection?.("settings"); return []; }',
+            api_visibility="private",
+        )
         save_settings_btn.click(
             fn=save_global_settings,
             inputs=[setting_concurrency, setting_done_tasks, setting_done_gallery],

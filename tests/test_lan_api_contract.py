@@ -146,6 +146,9 @@ class LanApiContractTests(unittest.TestCase):
         service = SERVICE.read_text(encoding="utf-8")
         self.assertIn("location /api/", nginx)
         self.assertIn("proxy_pass http://127.0.0.1:9100", nginx)
+        self.assertIn("location /comfyui/", nginx)
+        self.assertIn("proxy_pass http://127.0.0.1:8188/", nginx)
+        self.assertIn('proxy_set_header Upgrade $http_upgrade', nginx)
         self.assertIn("--host 127.0.0.1 --port 9100", service)
 
     def test_h3_profile_defaults_and_gradio_argument_order(self) -> None:

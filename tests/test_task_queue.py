@@ -41,6 +41,7 @@ def _install_import_stubs() -> None:
     gradio.SelectData = SelectData
     gradio.Info = lambda *args, **kwargs: None
     gradio.update = lambda **kwargs: kwargs
+    gradio.skip = lambda: {"__type__": "skip"}
     gradio.set_static_paths = lambda **kwargs: None
     sys.modules["gradio"] = gradio
 
@@ -151,6 +152,8 @@ class TaskQueueTests(unittest.TestCase):
 
         self.assertIn("处理中", summary)
         self.assertIn("<strong>1</strong>", summary)
+        self.assertIn('href="/comfyui/"', summary)
+        self.assertIn("ComfyUI 在线 · 管理", summary)
         self.assertNotIn("｜", summary)
         self.assertTrue(live_update["visible"])
         live_html = live_update["value"]
@@ -230,14 +233,31 @@ class TaskQueueTests(unittest.TestCase):
         self.assertNotIn('elem_id="workflow-categories"', source)
         self.assertIn('elem_id="primary-nav"', source)
         self.assertIn('elem_id="primary-nav-wrap"', source)
+        self.assertIn('elem_id="nav-home"', source)
         self.assertIn('elem_id="nav-image"', source)
         self.assertIn('elem_id="nav-video"', source)
         self.assertIn('elem_id="nav-audio"', source)
         self.assertIn('elem_id="nav-tools"', source)
+        self.assertIn('elem_id="nav-assets"', source)
+        self.assertIn('elem_id="nav-history"', source)
+        self.assertIn('elem_id="nav-keys"', source)
+        self.assertIn('elem_id="key-management-panel"', source)
+        self.assertIn('html[data-brm-section="keys"] #workflow-tabs', source)
+        self.assertIn('html[data-brm-section="keys"] #task-center', source)
         self.assertIn('BRM_NAV_JS', source)
         self.assertIn('window.__brmSelectCategory', source)
+        self.assertIn('window.__brmSelectSection', source)
+        self.assertIn('new Set(["home", "assets", "history", "settings", "keys"])', source)
         self.assertIn('document.documentElement.dataset.brmSection = group', source)
         self.assertIn('#workflow-tabs .overflow-dropdown.hide', source)
+        self.assertIn('background:var(--brm-primary) !important;\n    color:#fff !important;', source)
+        self.assertIn('box-shadow:0 6px 14px rgba(217,71,55,.22) !important;', source)
+        self.assertIn('transition:background-color .16s ease', source)
+        self.assertIn('@media (prefers-reduced-motion: reduce)', source)
+        self.assertIn('elem_id="brand-column"', source)
+        self.assertIn('#global-toolbar { overflow:visible !important; }', source)
+        self.assertIn('#brand-column {', source)
+        self.assertIn('max-height:var(--brm-shell-header) !important;', source)
         self.assertIn('primary_hue="red"', source)
         self.assertIn('elem_classes=["workflow-heading"]', source)
         self.assertIn('elem_id="task-center-body"', source)
@@ -255,6 +275,50 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('display: initial !important', source)
         self.assertIn('min_value=24, max_value=100', source)
         self.assertIn('visible=bool(running)', source)
+        self.assertIn('--brm-shell-sidebar: 220px', source)
+        self.assertIn('position:fixed !important;', source)
+        self.assertIn('html[data-brm-section="assets"] #workflow-tabs', source)
+        self.assertIn('html[data-brm-section="history"] #asset-center', source)
+        self.assertIn('html[data-brm-section="settings"] #global-settings-panel', source)
+        self.assertIn('open=True, elem_id="task-history-accordion"', source)
+        self.assertIn('elem_id="home-task-overview"', source)
+        self.assertIn('visible=True, elem_id="global-settings-panel"', source)
+        self.assertNotIn('elem_id="global-settings-close"', source)
+        self.assertNotIn('elem_id="global-settings-close-bottom"', source)
+        self.assertNotIn('settings_close_top_btn', source)
+        self.assertNotIn('close_settings_btn', source)
+        self.assertIn('#global-settings-panel {\n    width:100% !important;', source)
+        self.assertIn('height:44px !important;', source)
+        self.assertIn('let currentAssetFilter = "all"', source)
+        self.assertIn('applyAssetFilter(currentAssetFilter)', source)
+        self.assertIn('const syncShellViewport = () =>', source)
+        self.assertIn('window.innerWidth <= 980 ? "132px 14px 34px"', source)
+        self.assertIn('class="brm-assets-control-row"', source)
+        self.assertIn('.brm-assets-control-row { display:flex; align-items:center; justify-content:space-between;', source)
+        self.assertIn('top:459px !important;', source)
+        self.assertIn('#global-settings-trigger > .wrap,', source)
+        self.assertIn('#global-settings-trigger button {\n    justify-content:flex-start', source)
+        self.assertIn('box-shadow:none !important;', source)
+        self.assertIn('#asset-download-row {\n    position:absolute !important;', source)
+        self.assertIn('min-width:142px !important;', source)
+        self.assertIn('height:34px; min-height:34px;', source)
+        self.assertIn('margin:0 !important; padding:0 10px;', source)
+        self.assertIn('#asset-download-row{position:static!important;width:auto!important;', source)
+        self.assertIn('color-scheme: only light !important;', source)
+        self.assertIn('--button-secondary-background-fill:#ffffff !important;', source)
+        self.assertIn('--table-even-background-fill:#ffffff !important;', source)
+        self.assertIn('@media (prefers-color-scheme: dark)', source)
+        self.assertIn('#q-table-md tr:nth-child(even) td { background:#fffaf7 !important; }', source)
+        self.assertIn('class="brm-runtime-pill"', source)
+        self.assertNotIn('class="brm-runtime-label"', source)
+        self.assertIn('border-radius:999px !important;', source)
+        self.assertIn('status.textContent = abnormal ? "服务异常" : "本地服务运行中";', source)
+        self.assertIn('settingsTrigger.classList.toggle("is-active", group === "settings")', source)
+        self.assertIn('settingsButton.setAttribute("aria-current", "page")', source)
+        self.assertIn('#global-settings-trigger.is-active button,', source)
+        self.assertIn('label="常用风格预设"', source)
+        self.assertIn('music_style_preset8.change(', source)
+        self.assertIn('outputs=tags8', source)
 
     def test_restart_reattaches_running_prompt_without_resubmitting(self):
         history = {
@@ -653,6 +717,18 @@ class TaskQueueTests(unittest.TestCase):
         os.environ["COMFYUI_ROOT"] = str(model_root)
 
         self.assertEqual(self.webui.installed_acestep_models(), ["turbo"])
+
+    def test_music_style_presets_fill_tags_without_changing_submit_shape(self):
+        self.assertEqual(
+            self.webui.apply_music_style_preset("国风古韵"),
+            "chinese traditional, guofeng, cinematic, guzheng, pipa, erhu, xiao flute",
+        )
+        self.assertEqual(
+            self.webui.apply_music_style_preset("自定义（保留当前标签）"),
+            {"__type__": "skip"},
+        )
+        self.assertIn("中文流行", self.webui.MUSIC_STYLE_PRESETS)
+        self.assertIn("纯音乐·钢琴", self.webui.MUSIC_STYLE_PRESETS)
 
 
 if __name__ == "__main__":

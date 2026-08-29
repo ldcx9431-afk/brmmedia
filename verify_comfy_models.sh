@@ -3,6 +3,7 @@ set -euo pipefail
 
 SOURCE_ROOT="${BRMMEDIA_MODEL_SOURCE_ROOT:-/mnt/d/model}"
 TARGET_ROOT="${BRMMEDIA_COMFYUI_MODEL_ROOT:-/srv/brmmedia/ComfyUI/models}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A full byte comparison is useful for an import audit, but it rereads more
 # than 50 GB from D: on every activation.  The H3 cutover already has fixed
 # source-size checks and functional T2V/I2V acceptance; permit that activation
@@ -66,6 +67,25 @@ verify_file LTX23_audio_vae_bf16.safetensors vae/LTX23_audio_vae_bf16.safetensor
 verify_file LTX23_video_vae_bf16.safetensors vae/LTX23_video_vae_bf16.safetensors
 verify_tree LTX-2.3 loras/LTX-2.3
 verify_tree IndexTTS-2 IndexTTS-2
+
+# Keep Turbo-only recovery usable, while verifying both quality weights as a
+# pair whenever staged.  Production releases set the requirement flag.
+ACE_STEP_QUALITY_SOURCE="$SOURCE_ROOT/ACE-Step-1.5/split_files/diffusion_models"
+ace_step_quality_source_ready() {
+  [ -f "$ACE_STEP_QUALITY_SOURCE/acestep_v1.5_xl_base_bf16.safetensors" ] && \
+    [ -f "$ACE_STEP_QUALITY_SOURCE/acestep_v1.5_xl_sft_bf16.safetensors" ]
+}
+
+if ace_step_quality_source_ready; then
+  "$SCRIPT_DIR/download_acestep_quality_models.sh" --verify
+  verify_file ACE-Step-1.5/split_files/diffusion_models/acestep_v1.5_xl_base_bf16.safetensors diffusion_models/acestep/acestep_v1.5_xl_base_bf16.safetensors
+  verify_file ACE-Step-1.5/split_files/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors diffusion_models/acestep/acestep_v1.5_xl_sft_bf16.safetensors
+elif [ "${BRMMEDIA_REQUIRE_ACE_STEP_QUALITY:-0}" = "1" ]; then
+  echo "[FAIL] ACE-Step XL base/SFT source weights are missing or incomplete."
+  failed=1
+else
+  echo "[INFO] ACE-Step XL base/SFT source is absent; quality verification skipped."
+fi
 
 H3_SOURCE="$SOURCE_ROOT/MiniMax-H3"
 h3_source_ready() {

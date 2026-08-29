@@ -8,6 +8,7 @@
 > **重要：本页后续大量内容是 2026-06 的通用/旧 GPU 参考，不可直接用于当前服务器。**
 > 当前 Windows 11 + WSL2 的生产与恢复步骤只执行 `WSL_TEST_DEPLOY.md`；局域网访问只走
 > Nginx Basic Auth 的 TCP 80，不能直连或开放 Gradio 9000、ComfyUI 8188、Qwen 8000。
+> 管理员如需编辑原生 ComfyUI 节点工作流，只能经受认证保护的 `/comfyui/` 入口访问，不能开放 8188 原始端口。
 > 下文出现的 Qwen3.6、GPU0 ComfyUI/GPU1 Qwen、`/opt/baorongwanxiang`、`H:` 路径和
 > `http://服务器IP:9000` 均为历史参考，不能覆盖现网 `/srv/brmmedia` Profile。
 

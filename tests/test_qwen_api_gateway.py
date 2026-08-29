@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -70,12 +71,45 @@ class QwenApiGatewayTests(unittest.TestCase):
             self.gateway._validate_and_record_usage(api_key)
         self.assertEqual(expired.exception.status_code, 401)
 
+    def test_key_lifecycle_actions_preserve_audit_records(self):
+        record, api_key = self.gateway._create_key("lifecycle", 30)
+        disabled = self.gateway.disable_api_key(record["id"])
+        self.assertEqual(disabled["status"], "disabled")
+        enabled = self.gateway.enable_api_key(record["id"])
+        self.assertEqual(enabled["status"], "active")
+
+        rotated = self.gateway.rotate_api_key(record["id"])
+        self.assertNotEqual(rotated["id"], record["id"])
+        self.assertTrue(rotated["api_key"].startswith("brm_"))
+        with self.assertRaises(self.gateway.HTTPException) as old_key:
+            self.gateway._validate_and_record_usage(api_key)
+        self.assertEqual(old_key.exception.status_code, 401)
+
+        revoked = self.gateway.revoke_api_key(rotated["id"])
+        self.assertEqual(revoked["status"], "revoked")
+        with self.gateway._database() as connection:
+            rows = connection.execute("SELECT id, status FROM api_keys ORDER BY created_at").fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["status"] for row in rows}, {"revoked"})
+
     def test_upstream_is_derived_from_active_nginx_proxy(self):
         snippet = Path(self.tempdir.name) / "upstream.conf"
         snippet.write_text("location /qwen/ {\n proxy_pass http://172.20.0.1:8001/;\n}\n", encoding="utf-8")
         self.gateway.QWEN_NGINX_SNIPPET = snippet
         self.gateway.ACTIVE_QWEN_ENV = Path(self.tempdir.name) / "missing.env"
         self.assertEqual(self.gateway._active_qwen_base(), "http://172.20.0.1:8001/v1")
+
+    def test_chat_payload_defaults_to_answer_only_for_compatibility(self):
+        body = json.dumps({"model": "qwen", "messages": []}).encode()
+        prepared = json.loads(self.gateway._prepare_chat_payload(body))
+        self.assertEqual(prepared["chat_template_kwargs"], {"enable_thinking": False})
+
+        explicit = json.dumps({
+            "model": "qwen",
+            "enable_thinking": True,
+            "chat_template_kwargs": {"enable_thinking": True},
+        }).encode()
+        self.assertTrue(json.loads(self.gateway._prepare_chat_payload(explicit))["chat_template_kwargs"]["enable_thinking"])
 
 
 if __name__ == "__main__":

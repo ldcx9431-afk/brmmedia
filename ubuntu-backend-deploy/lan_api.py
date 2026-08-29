@@ -50,7 +50,9 @@ SIZE_VALUES = [
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
 VOICE_CLONE_LANGUAGE_VALUES = ["zh", "en", "ja", "es", "ar"]
-MUSIC_MODEL_CANDIDATES = ["turbo", "base", "sft"]
+# Keep REST callers aligned with the UI: Base quality first, SFT quality
+# fallback, and Turbo only when no quality DiT is available.
+MUSIC_MODEL_CANDIDATES = ["base", "sft", "turbo"]
 H3_PROFILE_VALUES = ["draft", "preview", "quality"]
 H3_ACCELERATION_VALUES = ["standard", "turbo_balanced", "turbo_fast"]
 H3_ACCELERATION_DETAILS = {
@@ -232,6 +234,12 @@ def _available_music_models() -> list[str]:
     return available
 
 
+def _default_music_model(available: list[str]) -> str:
+    if not available:
+        _fail(503, "no ACE-Step music model is installed")
+    return available[0]
+
+
 def _load_assets() -> dict[str, AssetRecord]:
     try:
         payload = json.loads(ASSET_INDEX_PATH.read_text(encoding="utf-8"))
@@ -391,13 +399,14 @@ def _normal_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> lis
     lyrics = params.get("lyrics", "")
     if lyrics is None:
         lyrics = ""
+    available_models = _available_music_models()
     return [
         _trim_text(params.get("tags"), "tags", maximum=2000),
         _trim_text(lyrics, "lyrics", maximum=12000, required=False),
         _number(params.get("duration", 30), "duration", minimum=1, maximum=600),
         _number(params.get("bpm", 120), "bpm", minimum=30, maximum=300, integer=True),
         _choice(params.get("language"), "language", LANGUAGE_VALUES, "zh"),
-        _choice(params.get("model"), "model", _available_music_models(), "turbo"),
+        _choice(params.get("model"), "model", available_models, _default_music_model(available_models)),
     ]
 
 

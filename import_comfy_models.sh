@@ -51,6 +51,26 @@ copy_file LTX23_video_vae_bf16.safetensors vae/LTX23_video_vae_bf16.safetensors
 copy_tree LTX-2.3 loras/LTX-2.3
 copy_tree IndexTTS-2 IndexTTS-2
 
+# ACE-Step's XL base/SFT weights are optional in the historical Turbo-only
+# deployment, but import them atomically when their checksum-gated source is
+# staged.  BRMMEDIA_REQUIRE_ACE_STEP_QUALITY=1 makes them a release gate.
+ACE_STEP_QUALITY_SOURCE="$SOURCE_ROOT/ACE-Step-1.5/split_files/diffusion_models"
+ace_step_quality_source_ready() {
+  [ -f "$ACE_STEP_QUALITY_SOURCE/acestep_v1.5_xl_base_bf16.safetensors" ] && \
+    [ -f "$ACE_STEP_QUALITY_SOURCE/acestep_v1.5_xl_sft_bf16.safetensors" ]
+}
+
+if ace_step_quality_source_ready; then
+  "$SCRIPT_DIR/download_acestep_quality_models.sh" --verify
+  copy_file ACE-Step-1.5/split_files/diffusion_models/acestep_v1.5_xl_base_bf16.safetensors diffusion_models/acestep/acestep_v1.5_xl_base_bf16.safetensors
+  copy_file ACE-Step-1.5/split_files/diffusion_models/acestep_v1.5_xl_sft_bf16.safetensors diffusion_models/acestep/acestep_v1.5_xl_sft_bf16.safetensors
+elif [ "${BRMMEDIA_REQUIRE_ACE_STEP_QUALITY:-0}" = "1" ]; then
+  echo "[ERROR] ACE-Step XL base/SFT source weights are missing or incomplete: $ACE_STEP_QUALITY_SOURCE" >&2
+  exit 1
+else
+  echo "[INFO] ACE-Step XL base/SFT source is absent; keeping Turbo-only import."
+fi
+
 # H3 is staged separately because the four files are about 42 GB.  Existing
 # recovery imports remain usable before this optional model source arrives;
 # once any H3 source component is present, require all four atomically.

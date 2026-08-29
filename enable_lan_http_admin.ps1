@@ -25,9 +25,8 @@ function Get-CurrentWslIp {
         return $WslIp
     }
 
-    # The distro is registered to Windows user `deploy`, whereas this script
-    # runs elevated as the interactive administrator. The keeper task reports
-    # the deploy-owned distro IP to D: so SYSTEM/admin can consume it safely.
+    # The keeper task reports the distro IP to D: so SYSTEM/admin can consume
+    # it without relying on the interactive Windows account that owns WSL.
     $deadline = (Get-Date).AddSeconds($(if ($WaitForWslIp) { 120 } else { 0 }))
     do {
         if (Test-Path -LiteralPath $WslIpFile) {
@@ -58,13 +57,33 @@ function Get-CurrentWslIp {
 }
 
 function Get-CurrentLanIp {
-    # 以默认路由所在网卡为准，自动兼容 DHCP 地址变化并排除 WSL 虚拟网卡。
-    $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop |
-        Sort-Object RouteMetric, InterfaceMetric |
-        Select-Object -First 1
-    $address = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop |
-        Where-Object { $_.IPAddress -notlike '127.*' } |
+    # Prefer the dedicated machine-room subnet over a VPN/default route.
+    $address = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+        Where-Object {
+            $_.IPAddress -like '172.16.28.*' -and
+            $_.InterfaceAlias -notmatch 'WSL|vEthernet|Loopback'
+        } |
         Select-Object -First 1 -ExpandProperty IPAddress
+    if (-not (Test-IPv4Address $address)) {
+        # Some isolated machine-room networks intentionally have no default
+        # IPv4 route, so use it only as a general fallback.
+        $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Sort-Object RouteMetric, InterfaceMetric |
+            Select-Object -First 1
+        if ($route) {
+            $address = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike '127.*' } |
+                Select-Object -First 1 -ExpandProperty IPAddress
+        }
+    }
+    if (-not (Test-IPv4Address $address)) {
+        $address = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object {
+                $_.IPAddress -match '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' -and
+                $_.InterfaceAlias -notmatch 'WSL|vEthernet|Loopback'
+            } |
+            Select-Object -First 1 -ExpandProperty IPAddress
+    }
     if (-not (Test-IPv4Address $address)) {
         throw "Unable to determine the Windows LAN IPv4 address from the default route."
     }
@@ -80,18 +99,18 @@ $lanIp = Get-CurrentLanIp
 & netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=80 connectaddress=$wslIp connectport=80 | Out-Null
 
 Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -RemoteAddress '192.168.1.0/24' -Profile Any | Out-Null
+New-NetFirewallRule -DisplayName $RuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort 80 -RemoteAddress @('172.16.28.0/24', '192.168.255.0/24') -Profile Any | Out-Null
 
 if ($InstallBootTask) {
-    # Run as SYSTEM after boot and wait for the deploy-owned keeper to publish
-    # the freshly assigned WSL address before recreating portproxy.
+    # Run as SYSTEM after boot and wait for the keeper to publish the freshly
+    # assigned WSL address before recreating portproxy.
     $action = New-ScheduledTaskAction -Execute 'PowerShell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -WaitForWslIp"
     $trigger = New-ScheduledTaskTrigger -AtStartup
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
 }
 
 Write-Host "BRMMedia LAN HTTP is forwarded: http://${lanIp}/ -> $wslIp:80"
-Write-Host "Firewall scope: 192.168.1.0/24 only"
+Write-Host "Firewall scope: 172.16.28.0/24 and 192.168.255.0/24 only"
 if ($InstallBootTask) {
     Write-Host "Boot refresh task installed: $TaskName"
 }

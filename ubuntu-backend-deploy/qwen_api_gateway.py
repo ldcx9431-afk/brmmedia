@@ -10,6 +10,7 @@ SQLite store contains SHA-256 digests and lifecycle metadata only.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -233,6 +234,34 @@ def _forward_headers(response: requests.Response) -> dict[str, str]:
     return {key: value for key, value in response.headers.items() if key.lower() in allowed}
 
 
+def _prepare_chat_payload(body: bytes) -> bytes:
+    """Make OpenAI-compatible chat checks return answer text by default.
+
+    Qwen reasoning models can spend a small client's entire ``max_tokens``
+    budget on ``reasoning_content`` and leave ``content`` empty.  Most
+    third-party "test connection" forms do not expose the provider-specific
+    switch, so default those requests to answer-only mode while honoring an
+    explicit ``chat_template_kwargs.enable_thinking`` (or the common
+    top-level spelling).
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    template_kwargs = payload.get("chat_template_kwargs")
+    if not isinstance(template_kwargs, dict):
+        template_kwargs = {}
+    if "enable_thinking" not in template_kwargs:
+        if isinstance(payload.get("enable_thinking"), bool):
+            template_kwargs["enable_thinking"] = payload["enable_thinking"]
+        else:
+            template_kwargs["enable_thinking"] = False
+    payload["chat_template_kwargs"] = template_kwargs
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 @app.exception_handler(HTTPException)
 async def _http_error(_: Request, exception: HTTPException) -> JSONResponse:
     return _error_response(exception.status_code, str(exception.detail))
@@ -324,11 +353,14 @@ async def qwen_proxy(upstream_path: str, request: Request):
         for key, value in request.headers.items()
         if key.lower() in {"accept", "content-type", "user-agent"}
     }
+    body = await request.body()
+    if upstream_path.rstrip("/") == "chat/completions":
+        body = _prepare_chat_payload(body)
     try:
         upstream = requests.request(
             request.method,
             target,
-            data=await request.body(),
+            data=body,
             headers=headers,
             stream=True,
             timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),

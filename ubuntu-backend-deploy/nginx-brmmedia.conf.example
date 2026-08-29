@@ -5,14 +5,22 @@ server {
     auth_basic "BRMMedia testing";
     auth_basic_user_file /etc/nginx/.htpasswd-brmmedia;
 
-    # Expose the loopback-only vLLM API through the authenticated LAN entry.
-    # /qwen/v1/models is proxied to http://127.0.0.1:8000/v1/models.
+    # Expose the active local Qwen engine through the authenticated LAN entry.
+    # The model-switch helper atomically replaces the included location block.
     location = /qwen {
         return 308 /qwen/v1/;
     }
+    include /etc/nginx/snippets/brmmedia-qwen-upstream.conf;
 
-    location /qwen/ {
-        proxy_pass http://127.0.0.1:8000/;
+    # OpenAI-compatible Qwen entry for application integrations. This path
+    # deliberately does not inherit the site's Basic Auth: the loopback-only
+    # gateway validates a separately managed Bearer API key per request.
+    location = /qwen-api {
+        return 308 /qwen-api/v1/;
+    }
+    location /qwen-api/v1/ {
+        auth_basic off;
+        proxy_pass http://127.0.0.1:9300/v1/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -22,6 +30,16 @@ server {
         proxy_send_timeout 3700s;
         proxy_buffering off;
         client_max_body_size 32M;
+    }
+
+    # Key lifecycle management remains behind the existing site Basic Auth.
+    location /qwen-api/admin/ {
+        proxy_pass http://127.0.0.1:9300/admin/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     # Stable REST contract for LAN automation.  The process itself is bound to
@@ -36,6 +54,29 @@ server {
         proxy_read_timeout 3700s;
         proxy_send_timeout 3700s;
         client_max_body_size 256M;
+    }
+
+    # Native ComfyUI workflow management.  It remains loopback-only on 8188;
+    # this authenticated proxy is the sole LAN path and preserves WebSocket
+    # traffic needed for execution progress.
+    location = /comfyui {
+        return 308 /comfyui/;
+    }
+
+    location /comfyui/ {
+        proxy_pass http://127.0.0.1:8188/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /comfyui;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3700s;
+        proxy_send_timeout 3700s;
+        proxy_buffering off;
+        client_max_body_size 2G;
     }
 
     location / {
