@@ -295,7 +295,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('window.innerWidth <= 980 ? "132px 14px 34px"', source)
         self.assertIn('class="brm-assets-control-row"', source)
         self.assertIn('.brm-assets-control-row { display:flex; align-items:center; justify-content:space-between;', source)
-        self.assertIn('top:459px !important;', source)
+        self.assertIn('bottom:20px !important;', source)
         self.assertIn('#global-settings-trigger > .wrap,', source)
         self.assertIn('#global-settings-trigger button {\n    justify-content:flex-start', source)
         self.assertIn('box-shadow:none !important;', source)

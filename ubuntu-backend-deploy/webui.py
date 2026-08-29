@@ -1742,10 +1742,10 @@ html, body { min-height:100%; background:var(--brm-bg) !important; }
 #nav-assets { margin-top:18px !important; }
 #global-settings-trigger {
     position:fixed !important;
-    top:459px !important;
+    top:auto !important;
     right:auto !important;
     left:14px !important;
-    bottom:auto !important;
+    bottom:20px !important;
     z-index:1300 !important;
     width:192px !important;
     min-width:192px !important;
