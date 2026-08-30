@@ -1,0 +1,10 @@
+# Validated on BRMMedia Windows 11 + WSL2 host, 2026-08-03.
+# Install PyTorch from https://download.pytorch.org/whl/cu121 before this file.
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
+gradio==6.20.0
+requests==2.34.2
+mutagen==1.48.1
+sentencepiece==0.2.2
+protobuf==4.25.9

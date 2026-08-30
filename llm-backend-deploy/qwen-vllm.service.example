@@ -2,15 +2,22 @@
 Description=Qwen3.6 27B vLLM OpenAI-compatible service
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=2min
+StartLimitBurst=6
 
 [Service]
 Type=simple
 User=YOUR_USER
 WorkingDirectory=/opt/baorongwanxiang/llm-backend-deploy
 ExecStart=/opt/baorongwanxiang/llm-backend-deploy/start_qwen_vllm.sh
-Restart=on-failure
-RestartSec=5
+# vLLM can receive SIGTERM while WSL is resuming.  A deliberate
+# `systemctl stop` is still respected, while an unexpected clean exit is
+# recovered automatically.
+Restart=always
+RestartSec=10
+TimeoutStopSec=90
 Environment=PYTHONUNBUFFERED=1
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 [Install]
 WantedBy=multi-user.target

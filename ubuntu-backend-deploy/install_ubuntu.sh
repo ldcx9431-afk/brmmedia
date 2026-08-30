@@ -5,6 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/baorongwanxiang}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 CUDA_INDEX_URL="${CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu121}"
+TORCH_VERSION="${TORCH_VERSION:-2.5.1+cu121}"
+TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.20.1+cu121}"
+TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.5.1+cu121}"
+# Validated production ComfyUI revision. Override deliberately only when a
+# staged upgrade has passed the smoke workflows.
+COMFYUI_REF="${COMFYUI_REF:-42d2aa55432b57371ddc9d4078ae250b54227641}"
 CPU_THREADS="$(nproc 2>/dev/null || echo 8)"
 
 mkdir -p "$INSTALL_ROOT"
@@ -21,7 +27,11 @@ source .venv/bin/activate
 python -m pip install --upgrade pip wheel setuptools
 
 echo "[2/5] Installing PyTorch CUDA wheels..."
-python -m pip install torch torchvision torchaudio --index-url "$CUDA_INDEX_URL"
+python -m pip install \
+  "torch==$TORCH_VERSION" \
+  "torchvision==$TORCHVISION_VERSION" \
+  "torchaudio==$TORCHAUDIO_VERSION" \
+  --index-url "$CUDA_INDEX_URL"
 
 echo "[3/5] Installing backend requirements..."
 python -m pip install -r requirements-backend.txt
@@ -33,6 +43,7 @@ if [ ! -d "$COMFYUI_ROOT/.git" ]; then
 else
   echo "[INFO] Existing ComfyUI found: $COMFYUI_ROOT"
 fi
+git -C "$COMFYUI_ROOT" checkout --detach "$COMFYUI_REF"
 
 echo "[5/5] Installing ComfyUI requirements..."
 python -m pip install -r "$COMFYUI_ROOT/requirements.txt"

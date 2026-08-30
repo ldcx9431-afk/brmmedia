@@ -1,0 +1,15 @@
+[Unit]
+Description=Download and stage Qwen3.5 4B AWQ model
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brm
+WorkingDirectory=/srv/brmmedia/app
+ExecStart=/mnt/d/brmmedia/source/download_qwen35_4b.sh
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

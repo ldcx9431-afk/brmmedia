@@ -1,18 +1,30 @@
 # 包容万象数智启动器 Ubuntu 后端一体化部署文档
 
+> **Windows 11 + WSL2 MiniMax H3 目标 Profile：** ComfyUI/Gradio 的所有媒体流程使用
+> GPU0（RTX A5000），Qwen3.5-4B AWQ vLLM 使用 GPU1（RTX A4000）；两项服务需同时在线。
+> ComfyUI 使用动态卸载，禁止 `--highvram`、`--gpu-only`。实际切换与验收以仓库根目录的
+> `WSL_TEST_DEPLOY.md` 和 `runtime-locks/minimax-h3-target-profile-2026-08-05.md` 为准。
+
+> **重要：本页后续大量内容是 2026-06 的通用/旧 GPU 参考，不可直接用于当前服务器。**
+> 当前 Windows 11 + WSL2 的生产与恢复步骤只执行 `WSL_TEST_DEPLOY.md`；局域网访问只走
+> Nginx Basic Auth 的 TCP 80，不能直连或开放 Gradio 9000、ComfyUI 8188、Qwen 8000。
+> 管理员如需编辑原生 ComfyUI 节点工作流，只能经受认证保护的 `/comfyui/` 入口访问，不能开放 8188 原始端口。
+> 下文出现的 Qwen3.6、GPU0 ComfyUI/GPU1 Qwen、`/opt/baorongwanxiang`、`H:` 路径和
+> `http://服务器IP:9000` 均为历史参考，不能覆盖现网 `/srv/brmmedia` Profile。
+
 本文档合并了 Ubuntu 后端部署说明、自定义节点清单、模型清单和模型下载链接，方便后续直接发给 AI 或运维脚本进行快速拉取部署。
 
 当前部署包只包含 Gradio 后端、工作流和 Linux 版 ComfyUI 启动桥接，不包含 Windows Electron、Windows Python、模型大文件。
 
 如果使用 `ubuntu-backend-deploy-offline-models.tar` 离线包，则包内已经包含 `models/` 目录。执行 `./install_ubuntu.sh` 时会自动把这些模型同步到 `$COMFYUI_ROOT/models/`，通常不需要再从 Hugging Face 下载。
 
-Qwen3.6 27B LLM 不放在本后端进程里，已单独整合到：
+（历史参考）Qwen3.6 27B LLM 不放在旧后端进程里，曾单独整合到：
 
 ```text
 ../llm-backend-deploy/
 ```
 
-推荐 GPU 分配：
+（历史参考）旧 GPU 分配：
 
 ```text
 GPU0: ComfyUI/Gradio
@@ -98,18 +110,19 @@ chmod +x check_ubuntu_ready.sh tune_nvidia_performance.sh
 | `COMFYUI_PYTHON` | 用来启动 ComfyUI 的 Python，建议使用本包 `.venv/bin/python` |
 | `COMFYUI_HOST` | ComfyUI 监听地址，默认 `127.0.0.1` |
 | `COMFYUI_PORT` | ComfyUI 端口，默认 `8188` |
-| `COMFYUI_ARGS` | 额外 ComfyUI 参数，例如 `--highvram` |
+| `COMFYUI_ARGS` | 额外 ComfyUI 参数；H3 基线保持为空，禁止 `--highvram`、`--gpu-only` 以及其他强制 VRAM/关闭动态异步卸载/关闭智能缓存的参数；`--fast-disk`、`--cache-lru 1`、`--use-ck-attention` 只能按 `H3_V032_RUNTIME_AB.md` 在隔离候选做 A/B |
 | `COMFYUI_STARTUP_TIMEOUT` | ComfyUI 启动等待秒数 |
 | `COMFYUI_TASK_TIMEOUT` | 单个任务最大等待秒数 |
+| `BRM_H3_TASK_TIMEOUT` | 仅 H3 的最大等待秒数，默认 14400（4 小时）；超时后后端会请求中断 ComfyUI，任务记录为“已超时” |
 
 ## 5. 性能模式
 
-默认是稳健的 `balanced`。如果服务器就是专用推理机，并且显存足够，建议打开最大性能模式：
-
-```bash
-echo 'BRM_PERF_PROFILE=max' >> .env
-echo 'COMFYUI_ARGS=--highvram' >> .env
-```
+当前 A5000 媒体优先 Profile 固定使用 `balanced` 与动态卸载。即使服务器专用于
+推理，也不要通过 `COMFYUI_ARGS` 启用 `--highvram`、`--gpu-only`、
+`--lowvram`、`--novram`、`--disable-dynamic-vram`、`--disable-async-offload`、
+`--disable-smart-memory` 或 `--cache-none`：MiniMax H3
+需要在同一张 A5000 上按需装卸 Qwen3-VL 编码器，强制常驻会破坏任务稳定性。
+如需调优并发，只能通过工作台的“全局设置”或运行时配置调整队列数量；H3 保持单并发。
 
 启动脚本会自动设置这些运行期优化变量：
 
