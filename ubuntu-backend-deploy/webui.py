@@ -4159,7 +4159,12 @@ BRM_NAV_JS = r"""
       select.innerHTML = '<option value="">选择要操作的密钥</option>' + keyState.records.map((record) => `<option value="${htmlEscape(record.id)}">${htmlEscape(record.name)} · ${htmlEscape(record.prefix)}</option>`).join("");
       if (keyState.records.some((record) => record.id === selected)) select.value = selected;
       const hasSelection = Boolean(select.value);
-      document.querySelectorAll("[data-key-action='disable'],[data-key-action='enable'],[data-key-action='revoke'],[data-key-action='rotate']").forEach((button) => { button.disabled = !hasSelection || keyState.busy; });
+      const selectedRecord = keyState.records.find((record) => record.id === select.value);
+      document.querySelectorAll("[data-key-action='disable'],[data-key-action='enable'],[data-key-action='revoke'],[data-key-action='rotate']").forEach((button) => {
+        const action = button.dataset.keyAction;
+        button.disabled = !hasSelection || keyState.busy || (selectedRecord?.status === "revoked" && ["disable", "revoke", "rotate"].includes(action));
+        if (action === "revoke") button.textContent = selectedRecord?.status === "revoked" ? "已删除" : "删除密钥";
+      });
     };
     const loadApiKeys = async (quiet = false) => {
       setKeyStatus("正在读取密钥列表…");
@@ -4192,8 +4197,10 @@ BRM_NAV_JS = r"""
         } else setKeyStatus(successMessage);
         await loadApiKeys(Boolean(payload.api_key));
         if (payload.api_key) setKeyStatus("密钥已生成，请立即复制明文；离开此页面后无法再次查看");
+        return true;
       } catch (error) {
         setKeyStatus(error.message || "密钥操作失败", true);
+        return false;
       } finally {
         keyState.busy = false; renderApiKeys();
       }
@@ -4217,9 +4224,17 @@ BRM_NAV_JS = r"""
         return;
       }
       if (!selected) { setKeyStatus("请先选择密钥", true); return; }
+      const selectedRecord = keyState.records.find((record) => record.id === selected);
+      if (selectedRecord?.status === "revoked") { setKeyStatus("该密钥已永久撤销，无需重复删除", true); return; }
       if (action === "revoke" && !window.confirm("撤销后该密钥将永久失效，是否继续？")) return;
       const secretWrap = document.querySelector("#brm-key-secret-wrap"); if (secretWrap && action === "rotate") secretWrap.hidden = true;
-      mutateApiKey(`${keyApiUrl}/${encodeURIComponent(selected)}/${action}`, {method:"POST"}, action === "revoke" ? "密钥已永久撤销" : "密钥状态已更新");
+      mutateApiKey(`${keyApiUrl}/${encodeURIComponent(selected)}/${action}`, {method:"POST"}, action === "revoke" ? "密钥已永久撤销" : "密钥状态已更新").then((success) => {
+        if (success && action === "revoke") {
+          const current = document.querySelector("#brm-key-selected");
+          if (current) current.value = "";
+          renderApiKeys();
+        }
+      });
     });
     document.addEventListener("click", (event) => {
       if (event.target.closest("#global-settings-trigger")) { event.preventDefault(); showGroup("settings"); return; }

@@ -244,6 +244,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('elem_id="key-management-panel"', source)
         self.assertIn('html[data-brm-section="keys"] #workflow-tabs', source)
         self.assertIn('html[data-brm-section="keys"] #task-center', source)
+        self.assertIn('该密钥已永久撤销，无需重复删除', source)
         self.assertIn('BRM_NAV_JS', source)
         self.assertIn('window.__brmSelectCategory', source)
         self.assertIn('window.__brmSelectSection', source)
