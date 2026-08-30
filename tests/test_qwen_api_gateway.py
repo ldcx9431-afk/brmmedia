@@ -71,7 +71,7 @@ class QwenApiGatewayTests(unittest.TestCase):
             self.gateway._validate_and_record_usage(api_key)
         self.assertEqual(expired.exception.status_code, 401)
 
-    def test_key_lifecycle_actions_preserve_audit_records(self):
+    def test_key_lifecycle_actions_and_physical_deletion(self):
         record, api_key = self.gateway._create_key("lifecycle", 30)
         disabled = self.gateway.disable_api_key(record["id"])
         self.assertEqual(disabled["status"], "disabled")
@@ -87,10 +87,24 @@ class QwenApiGatewayTests(unittest.TestCase):
 
         revoked = self.gateway.revoke_api_key(rotated["id"])
         self.assertEqual(revoked["status"], "revoked")
+        deleted = self.gateway.delete_api_key(rotated["id"])
+        self.assertEqual(deleted["id"], rotated["id"])
         with self.gateway._database() as connection:
             rows = connection.execute("SELECT id, status FROM api_keys ORDER BY created_at").fetchall()
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 1)
         self.assertEqual({row["status"] for row in rows}, {"revoked"})
+
+    def test_active_key_must_be_disabled_or_revoked_before_deletion(self):
+        record, _ = self.gateway._create_key("active", 30)
+        with self.assertRaises(self.gateway.HTTPException) as active:
+            self.gateway.delete_api_key(record["id"])
+        self.assertEqual(active.exception.status_code, 409)
+
+        self.gateway.disable_api_key(record["id"])
+        self.gateway.delete_api_key(record["id"])
+        with self.assertRaises(self.gateway.HTTPException) as missing:
+            self.gateway._require_key(record["id"])
+        self.assertEqual(missing.exception.status_code, 404)
 
     def test_upstream_is_derived_from_active_nginx_proxy(self):
         snippet = Path(self.tempdir.name) / "upstream.conf"

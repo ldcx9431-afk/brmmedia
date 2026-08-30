@@ -1929,23 +1929,24 @@ html[data-brm-section="settings"] #global-settings-panel::before { display:none 
 .brm-key-toolbar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; margin-bottom:16px; }
 .brm-key-field { display:flex; flex:1 1 220px; min-width:180px; flex-direction:column; gap:6px; }
 .brm-key-field label { color:#654c48; font-size:.82rem; font-weight:720; }
-.brm-key-field input, .brm-key-field select, #brm-key-selected { min-height:40px; padding:8px 10px; border:1px solid #e8cbc1; border-radius:8px; background:#fff; color:#3f302d; font:inherit; }
-.brm-key-toolbar button, .brm-key-actions button { min-height:40px; padding:0 14px; border:1px solid #efb9a8; border-radius:8px; background:#fff7f3; color:var(--brm-primary-deep); font:inherit; font-weight:720; cursor:pointer; }
-.brm-key-toolbar button:hover, .brm-key-actions button:hover { background:#ffe9e0; border-color:#e88970; }
-.brm-key-toolbar button.primary, .brm-key-actions button.primary { border-color:var(--brm-primary); background:linear-gradient(135deg,var(--brm-primary),var(--brm-accent)); color:#fff; }
-.brm-key-toolbar button:disabled, .brm-key-actions button:disabled { cursor:not-allowed; opacity:.48; }
+.brm-key-field input, .brm-key-field select { min-height:40px; padding:8px 10px; border:1px solid #e8cbc1; border-radius:8px; background:#fff; color:#3f302d; font:inherit; }
+.brm-key-toolbar button, .brm-key-row-actions button { min-height:34px; padding:0 10px; border:1px solid #efb9a8; border-radius:7px; background:#fff7f3; color:var(--brm-primary-deep); font:inherit; font-size:.78rem; font-weight:720; cursor:pointer; }
+.brm-key-toolbar button { min-height:40px; padding:0 14px; font-size:inherit; }
+.brm-key-toolbar button:hover, .brm-key-row-actions button:hover { background:#ffe9e0; border-color:#e88970; }
+.brm-key-toolbar button.primary, .brm-key-row-actions button.primary { border-color:var(--brm-primary); background:linear-gradient(135deg,var(--brm-primary),var(--brm-accent)); color:#fff; }
+.brm-key-row-actions button.danger { border-color:#e7aaa2; background:#fff4f2; color:#ad352a; }
+.brm-key-toolbar button:disabled, .brm-key-row-actions button:disabled { cursor:not-allowed; opacity:.48; }
 #brm-key-status { min-height:22px; margin:2px 0 12px; color:#705652; font-size:.88rem; }
 #brm-key-status.is-error { color:#b42318; }
 .brm-key-table-wrap { overflow:auto; border:1px solid var(--brm-border); border-radius:10px; background:#fff; }
-#brm-key-table { width:100%; border-collapse:collapse; min-width:720px; font-size:.86rem; }
+#brm-key-table { width:100%; border-collapse:collapse; min-width:920px; font-size:.86rem; }
 #brm-key-table th, #brm-key-table td { padding:11px 12px; border-bottom:1px solid #f1e2dc; text-align:left; vertical-align:middle; white-space:nowrap; }
 #brm-key-table th { background:#fff8f4; color:#725a55; font-size:.76rem; font-weight:780; }
 #brm-key-table tbody tr:last-child td { border-bottom:0; }
 .brm-key-state { display:inline-flex; align-items:center; min-height:24px; padding:0 8px; border-radius:999px; background:#edf8ef; color:#237a3b; font-size:.76rem; font-weight:760; }
 .brm-key-state.disabled, .brm-key-state.expired { background:#fff4dc; color:#986212; }
 .brm-key-state.revoked { background:#fbe8e8; color:#a33232; }
-.brm-key-actions { display:flex; flex-wrap:wrap; align-items:center; gap:9px; margin-top:14px; }
-#brm-key-selected { flex:1 1 280px; min-width:220px; }
+.brm-key-row-actions { display:flex; flex-wrap:wrap; gap:6px; }
 #brm-key-secret-wrap { margin-top:16px; padding:14px; border:1px solid #f1bdab; border-radius:10px; background:#fff7f2; }
 #brm-key-secret-wrap[hidden] { display:none; }
 #brm-key-secret-wrap strong { display:block; margin-bottom:6px; color:#8d3527; }
@@ -4145,26 +4146,22 @@ BRM_NAV_JS = r"""
     };
     const renderApiKeys = () => {
       const body = document.querySelector("#brm-key-table tbody");
-      const select = document.querySelector("#brm-key-selected");
-      if (!body || !select) return;
+      if (!body) return;
       if (!keyState.records.length) {
-        body.innerHTML = '<tr><td colspan="6" id="brm-key-empty">暂无密钥</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" id="brm-key-empty">暂无密钥</td></tr>';
       } else {
         body.innerHTML = keyState.records.map((record) => {
           const [label, css] = keyStatus(record);
-          return `<tr><td>${htmlEscape(record.name)}</td><td><code>${htmlEscape(record.prefix)}</code></td><td><span class="brm-key-state ${css}">${label}</span></td><td>${formatTime(record.expires_at)}</td><td>${Number(record.use_count || 0)}</td><td>${formatLastUsed(record.last_used_at)}</td></tr>`;
+          const disabled = keyState.busy ? " disabled" : "";
+          const keyId = htmlEscape(record.id);
+          const controls = record.status === "active"
+            ? `<button type="button" data-key-action="disable" data-key-id="${keyId}"${disabled}>禁用</button><button type="button" class="primary" data-key-action="rotate" data-key-id="${keyId}"${disabled}>轮换</button>`
+            : record.status === "disabled"
+              ? `<button type="button" data-key-action="enable" data-key-id="${keyId}"${disabled}>启用</button><button type="button" class="danger" data-key-action="delete" data-key-id="${keyId}"${disabled}>删除</button>`
+              : `<button type="button" class="danger" data-key-action="delete" data-key-id="${keyId}"${disabled}>删除</button>`;
+          return `<tr><td>${htmlEscape(record.name)}</td><td><code>${htmlEscape(record.prefix)}</code></td><td><span class="brm-key-state ${css}">${label}</span></td><td>${formatTime(record.expires_at)}</td><td>${Number(record.use_count || 0)}</td><td>${formatLastUsed(record.last_used_at)}</td><td><div class="brm-key-row-actions">${controls}</div></td></tr>`;
         }).join("");
       }
-      const selected = select.value;
-      select.innerHTML = '<option value="">选择要操作的密钥</option>' + keyState.records.map((record) => `<option value="${htmlEscape(record.id)}">${htmlEscape(record.name)} · ${htmlEscape(record.prefix)}</option>`).join("");
-      if (keyState.records.some((record) => record.id === selected)) select.value = selected;
-      const hasSelection = Boolean(select.value);
-      const selectedRecord = keyState.records.find((record) => record.id === select.value);
-      document.querySelectorAll("[data-key-action='disable'],[data-key-action='enable'],[data-key-action='revoke'],[data-key-action='rotate']").forEach((button) => {
-        const action = button.dataset.keyAction;
-        button.disabled = !hasSelection || keyState.busy || (selectedRecord?.status === "revoked" && ["disable", "revoke", "rotate"].includes(action));
-        if (action === "revoke") button.textContent = selectedRecord?.status === "revoked" ? "已删除" : "删除密钥";
-      });
     };
     const loadApiKeys = async (quiet = false) => {
       setKeyStatus("正在读取密钥列表…");
@@ -4205,16 +4202,12 @@ BRM_NAV_JS = r"""
         keyState.busy = false; renderApiKeys();
       }
     };
-    document.addEventListener("change", (event) => {
-      if (event.target.id === "brm-key-selected") renderApiKeys();
-    });
     document.addEventListener("click", (event) => {
       const keyAction = event.target.closest("[data-key-action]");
       if (!keyAction) return;
       const action = keyAction.dataset.keyAction;
-      if (!["create", "disable", "enable", "revoke", "rotate"].includes(action)) return;
+      if (!["create", "disable", "enable", "delete", "rotate"].includes(action)) return;
       event.preventDefault();
-      const selected = document.querySelector("#brm-key-selected")?.value || "";
       if (action === "create") {
         const name = document.querySelector("#brm-key-name")?.value.trim() || "";
         const expires = document.querySelector("#brm-key-expires")?.value || "";
@@ -4223,18 +4216,14 @@ BRM_NAV_JS = r"""
         mutateApiKey(keyApiUrl, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, expires_in_days: expires ? Number(expires) : null})}, "密钥已创建");
         return;
       }
-      if (!selected) { setKeyStatus("请先选择密钥", true); return; }
+      const selected = keyAction.dataset.keyId || "";
       const selectedRecord = keyState.records.find((record) => record.id === selected);
-      if (selectedRecord?.status === "revoked") { setKeyStatus("该密钥已永久撤销，无需重复删除", true); return; }
-      if (action === "revoke" && !window.confirm("撤销后该密钥将永久失效，是否继续？")) return;
+      if (!selectedRecord) { setKeyStatus("找不到要操作的密钥，请刷新列表后重试", true); return; }
+      if (action === "delete" && !window.confirm(`确认从数据库永久删除“${selectedRecord.name}”吗？此操作不可恢复。`)) return;
       const secretWrap = document.querySelector("#brm-key-secret-wrap"); if (secretWrap && action === "rotate") secretWrap.hidden = true;
-      mutateApiKey(`${keyApiUrl}/${encodeURIComponent(selected)}/${action}`, {method:"POST"}, action === "revoke" ? "密钥已永久撤销" : "密钥状态已更新").then((success) => {
-        if (success && action === "revoke") {
-          const current = document.querySelector("#brm-key-selected");
-          if (current) current.value = "";
-          renderApiKeys();
-        }
-      });
+      const method = action === "delete" ? "DELETE" : "POST";
+      const path = action === "delete" ? "" : `/${action}`;
+      mutateApiKey(`${keyApiUrl}/${encodeURIComponent(selected)}${path}`, {method}, action === "delete" ? "密钥已从数据库永久删除" : "密钥状态已更新");
     });
     document.addEventListener("click", (event) => {
       if (event.target.closest("#global-settings-trigger")) { event.preventDefault(); showGroup("settings"); return; }
@@ -4404,16 +4393,9 @@ def build_ui():
             <div id="brm-key-status" role="status" aria-live="polite">打开页面后读取密钥列表</div>
             <div class="brm-key-table-wrap">
               <table id="brm-key-table">
-                <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>有效期至</th><th>调用次数</th><th>最近使用</th></tr></thead>
-                <tbody><tr><td colspan="6" id="brm-key-empty">正在读取…</td></tr></tbody>
+                <thead><tr><th>名称</th><th>前缀</th><th>状态</th><th>有效期至</th><th>调用次数</th><th>最近使用</th><th>操作</th></tr></thead>
+                <tbody><tr><td colspan="7" id="brm-key-empty">正在读取…</td></tr></tbody>
               </table>
-            </div>
-            <div class="brm-key-actions">
-              <select id="brm-key-selected" aria-label="选择要操作的密钥"><option value="">选择要操作的密钥</option></select>
-              <button type="button" data-key-action="disable" disabled>禁用</button>
-              <button type="button" data-key-action="enable" disabled>启用</button>
-              <button type="button" data-key-action="revoke" disabled>删除密钥</button>
-              <button type="button" class="primary" data-key-action="rotate" disabled>轮换密钥</button>
             </div>
             <div id="brm-key-secret-wrap" hidden>
               <strong>仅显示这一次：请立即复制并保存新密钥</strong>

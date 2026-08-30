@@ -326,7 +326,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 ### 推荐入口：业务系统 Bearer API Key
 
-新接入的包融万象或其他业务系统使用 `http://172.16.28.8/qwen-api/v1`，不要保存、编码或复用工作台的 Basic Auth 账号密码。管理员可在工作台左侧“密钥管理”页面，或调用受 Basic Auth 保护的 `/qwen-api/admin/api-keys`，创建、设置有效期、禁用/启用、删除（永久撤销）和轮换专用密钥；明文密钥只在创建或轮换时返回一次，后端仅保存哈希和使用元数据。
+新接入的包融万象或其他业务系统使用 `http://172.16.28.8/qwen-api/v1`，不要保存、编码或复用工作台的 Basic Auth 账号密码。管理员可在工作台左侧“密钥管理”页面，或调用受 Basic Auth 保护的 `/qwen-api/admin/api-keys`，创建、设置有效期、禁用/启用、撤销和轮换专用密钥；已禁用或已撤销的记录可再物理删除。明文密钥只在创建或轮换时返回一次，后端仅保存哈希和使用元数据。
 
 #### 第三方软件“自定义模型”表单填写
 
@@ -343,7 +343,19 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 如果软件启用了“完整 URL”，则应填写完整的 `http://172.16.28.8/qwen-api/v1/chat/completions`，不能再让软件追加路径。优先使用 `/qwen-api/v1`，旧 `/qwen/v1` 是网页/局域网兼容入口，认证方式为 HTTP Basic Auth，通常不能直接填入只有“API 密钥”一个字段的软件。
 
+#### 能力边界与“image input is not supported”
+
+当前 `qwen38-27b-q4-k-m` 是 **纯文本 Qwen3.8-27B GGUF**，生产启动参数没有 `--mmproj`，因此只支持文本 `messages[].content`。不要在第三方软件中把它标记为视觉/多模态模型，也不要用带 `image_url` 的连接性测试；这类请求会由 llama.cpp 返回 HTTP 500：`image input is not supported - hint: if this is unexpected, you may need to provide the mmproj`。这不是地址、API Key 或 Clash 代理错误。
+
+需要图片理解时，应使用本项目的 `/api/v1` 图片/媒体工作流，或单独部署与视觉 GGUF 配套的模型和 `mmproj`；不能给当前文本 GGUF 随意追加其他模型的 `mmproj`。如果客户端无法关闭视觉测试，请改用其“文本模型”类型或仅发送纯文本请求。
+
 当前该地址只对机房局域网（或已正确下发 `172.16.28.0/24` 路由的 VPN）开放，公网未开放；当前为 HTTP，不能直接暴露到互联网。外网接入需要另建 HTTPS 反向代理、独立域名/API Key、限流、来源控制和审计，不应把 `172.16.28.8` 直接做公网端口映射。
+
+当前生产 Qwen 服务的 `n_ctx` 为 `4096`。请求的系统提示、历史消息、工具定义和本轮输入会共同计入该额度；即使用户只输入几个字，IDE/Agent 自动注入的项目上下文也可能使 `n_prompt_tokens` 达到数万，服务会返回 `400 exceed_context_size_error`。客户端填写更大的“上下文窗口”不会改变服务端上限，也不会自动截断请求。遇到该错误应先新建空白会话并关闭项目/工具上下文；需要长上下文时必须单独部署并验收更大 `--ctx-size` 的模型服务。
+
+容量估算：上下文从 4K 提升到 32K 时，KV Cache 近似按 8 倍增长；当前双 A4000 的实时余量不适合直接在生产切换。按默认 `f16` KV Cache，32K 预计至少需要 3 张 16GB 级 GPU 才有可靠余量；两张卡只有在使用 `q8_0` KV Cache、单并发且降低其他显存占用时才可能勉强运行，必须做停机灰度验证。最近一次 TRAE 请求为 `35366` tokens，32K 本身仍不够，目标应至少为 48K，稳妥建议 64K。
+
+主机内存不能等价替代显存。当前 WSL 实际识别约 `94.2 GiB`（可用约 `82.9 GiB`），llama.cpp 可用 `--no-kv-offload` 将 KV Cache 留在主机内存；按默认 `f16` 估算，32K 约需 8 GiB、64K 约需 16 GiB，容量足够但会显著降低生成速度并增加 PCIe 往返。该方式只建议作为单并发灰度/应急回退，生产优先使用 GPU KV Cache 或增加显存。
 
 ```bash
 export BRM_QWEN_BASE='http://172.16.28.8/qwen-api/v1'

@@ -60,7 +60,7 @@ location /qwen-api/admin/ {
 
 管理接口继承站点的 Nginx Basic Auth；不要将 Basic Auth 密码或 Bearer Key 写入 shell 历史、Git、日志或工单。
 
-登录 BRM AI 工作台后，左侧导航的“密钥管理”页面提供同样的生命周期操作：查看已有密钥的名称、前缀、状态、有效期和调用次数，添加密钥，禁用/启用，删除（永久撤销）以及轮换。历史密钥不会显示明文；新建或轮换成功后明文只在页面提示区展示一次，请立即复制到目标软件的密钥存储中。
+登录 BRM AI 工作台后，左侧导航的“密钥管理”页面会在每条密钥记录后显示可用操作：正常密钥可禁用或轮换；已禁用密钥可启用或物理删除；已撤销密钥可物理删除。物理删除会从数据库移除该记录，且不可恢复。历史密钥不会显示明文；新建或轮换成功后明文只在页面提示区展示一次，请立即复制到目标软件的密钥存储中。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -69,6 +69,7 @@ location /qwen-api/admin/ {
 | `POST` | `/qwen-api/admin/api-keys/{id}/disable` | 暂停密钥 |
 | `POST` | `/qwen-api/admin/api-keys/{id}/enable` | 恢复未撤销密钥 |
 | `POST` | `/qwen-api/admin/api-keys/{id}/revoke` | 永久撤销密钥 |
+| `DELETE` | `/qwen-api/admin/api-keys/{id}` | 物理删除已禁用或已撤销的密钥记录 |
 | `POST` | `/qwen-api/admin/api-keys/{id}/rotate` | 撤销旧密钥并创建替代密钥 |
 
 创建示例：

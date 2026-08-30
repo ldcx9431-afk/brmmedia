@@ -322,6 +322,22 @@ def revoke_api_key(key_id: str) -> dict[str, Any]:
     return _record_from_row(row)
 
 
+@app.delete("/admin/api-keys/{key_id}", response_model=KeyRecord)
+def delete_api_key(key_id: str) -> dict[str, Any]:
+    """Permanently remove a key that is already unable to authenticate."""
+    with _database() as connection:
+        row = connection.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="API key not found")
+        if row["status"] not in {"disabled", "revoked"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Disable or revoke an API key before permanently deleting it",
+            )
+        connection.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    return _record_from_row(row)
+
+
 @app.post("/admin/api-keys/{key_id}/rotate", response_model=CreatedKey, status_code=201)
 def rotate_api_key(key_id: str) -> dict[str, Any]:
     previous = _require_key(key_id)
