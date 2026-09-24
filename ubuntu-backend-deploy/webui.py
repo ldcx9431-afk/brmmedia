@@ -46,6 +46,7 @@ from comfyui_server import (
     start_comfyui, stop_comfyui, is_alive, run_workflow,
     get_view_file, interrupt, BASE, COMFY_ROOT, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
 )
+from lan_user_management import add_lan_user
 
 
 # ============================================================================
@@ -4352,23 +4353,42 @@ def build_ui():
                 )
             save_settings_btn = gr.Button("保存并应用", variant="primary")
             settings_status = gr.Markdown("")
-            gr.Markdown("---\n#### 局域网访问密码")
+            gr.Markdown("---\n#### brmadmin 主账号密码")
             gr.Markdown(
-                "修改的是进入 AI 工作台与 `/qwen/v1` API 的 Basic Auth 密码。"
+                "这里只修改 `brmadmin` 主账号的 Basic Auth 密码，不影响新增用户。"
                 "修改后当前浏览器需要用新密码重新登录。"
             )
             lan_current_password = gr.Textbox(
-                label="当前访问密码", type="password", max_length=128,
+                label="brmadmin 当前密码", type="password", max_length=128,
             )
             with gr.Row():
                 lan_new_password = gr.Textbox(
-                    label="新访问密码", type="password", max_length=128,
+                    label="brmadmin 新密码", type="password", max_length=128,
                 )
                 lan_confirm_password = gr.Textbox(
-                    label="确认新访问密码", type="password", max_length=128,
+                    label="确认 brmadmin 新密码", type="password", max_length=128,
                 )
-            change_lan_password_btn = gr.Button("修改局域网访问密码", variant="secondary")
+            change_lan_password_btn = gr.Button("修改 brmadmin 主账号密码", variant="secondary")
             lan_password_status = gr.Markdown("")
+
+            gr.Markdown("---\n#### 新增访问用户")
+            gr.Markdown(
+                "新增用户将获得与 `brmadmin` 相同的工作台和接口访问权限；"
+                "当前不区分角色或设置单独权限。用户名 3–32 位，以字母开头；密码至少 8 个字符、最多 72 个 UTF-8 字节。"
+            )
+            lan_new_username = gr.Textbox(
+                label="新用户名", max_length=32,
+                placeholder="例如：zhangsan",
+            )
+            with gr.Row():
+                lan_user_new_password = gr.Textbox(
+                    label="新用户密码", type="password", max_length=72,
+                )
+                lan_user_confirm_password = gr.Textbox(
+                    label="确认新用户密码", type="password", max_length=72,
+                )
+            add_lan_user_btn = gr.Button("新增用户", variant="secondary")
+            lan_user_status = gr.Markdown("")
 
         gr.HTML(
             """
@@ -5013,6 +5033,15 @@ def build_ui():
             api_visibility="private",
             concurrency_limit=1,
             concurrency_id="lan-password-change",
+            show_progress="minimal",
+        )
+        add_lan_user_btn.click(
+            fn=add_lan_user,
+            inputs=[lan_new_username, lan_user_new_password, lan_user_confirm_password],
+            outputs=[lan_new_username, lan_user_new_password, lan_user_confirm_password, lan_user_status],
+            api_visibility="private",
+            concurrency_limit=1,
+            concurrency_id="lan-user-add",
             show_progress="minimal",
         )
         qwen_submit_event = qwen_send_btn.click(

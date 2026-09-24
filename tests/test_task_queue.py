@@ -64,6 +64,8 @@ def _install_import_stubs() -> None:
 
 def _load_webui(output_dir: Path):
     _install_import_stubs()
+    if str(WEBUI_PATH.parent) not in sys.path:
+        sys.path.insert(0, str(WEBUI_PATH.parent))
     os.environ["BRM_OUTPUT_DIR"] = str(output_dir)
     spec = importlib.util.spec_from_file_location("brmmedia_webui_under_test", WEBUI_PATH)
     assert spec and spec.loader

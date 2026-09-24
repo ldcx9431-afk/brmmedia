@@ -7,12 +7,18 @@ HTPASSWD_FILE="/etc/nginx/.htpasswd-brmmedia"
 HTPASSWD_BIN="/usr/bin/htpasswd"
 NGINX_BIN="/usr/sbin/nginx"
 USERNAME="brmadmin"
+LOCK_FILE="/run/lock/brmmedia-htpasswd.lock"
 
 IFS= read -r current_password || exit 2
 IFS= read -r new_password || exit 2
 
 [ -n "$current_password" ] || exit 2
 [ "${#new_password}" -ge 8 ] || exit 2
+
+# Serialize password rotation with account creation; both actions atomically
+# replace the same Nginx Basic Auth file.
+exec 9>"$LOCK_FILE"
+/usr/bin/flock -x 9 || exit 4
 
 # 先校验旧密码，避免已登录浏览器或其他已授权会话意外更改入口凭据。
 "$HTPASSWD_BIN" -vb "$HTPASSWD_FILE" "$USERNAME" "$current_password" >/dev/null 2>&1 || exit 3

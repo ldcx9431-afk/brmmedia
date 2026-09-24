@@ -12,6 +12,10 @@
 > 下文出现的 Qwen3.6、GPU0 ComfyUI/GPU1 Qwen、`/opt/baorongwanxiang`、`H:` 路径和
 > `http://服务器IP:9000` 均为历史参考，不能覆盖现网 `/srv/brmmedia` Profile。
 
+### 生产工作台访问账号
+
+全局设置中的“新增访问用户”创建与 `brmadmin` 具有相同工作台和 API 权限的 Nginx Basic Auth 账号，不提供角色区分。部署需同步 `webui.py`、`lan_user_management.py`、`brmmedia-add-lan-user.sh`、`brmmedia-add-lan-user.sudoers` 与 `install_lan_user_helper.sh`；新增 helper/sudoers 首次部署后，以 root 在该目录执行 `sh ./install_lan_user_helper.sh`。用户名限制为 3–32 位且以字母开头，密码至少 8 个字符、最多 72 个 UTF-8 字节。helper 只允许服务账号调用固定的用户新增命令，并以 bcrypt 哈希原子更新 Nginx 认证文件；`brmmedia-set-lan-password.sh` 与其使用同一把锁，避免并发改密/加用户覆盖对方更新。部署后重启 `baorong-backend` 并检查 Gradio `:9000`、Nginx 及既有 Basic Auth 入口。
+
 本文档合并了 Ubuntu 后端部署说明、自定义节点清单、模型清单和模型下载链接，方便后续直接发给 AI 或运维脚本进行快速拉取部署。
 
 当前部署包只包含 Gradio 后端、工作流和 Linux 版 ComfyUI 启动桥接，不包含 Windows Electron、Windows Python、模型大文件。
