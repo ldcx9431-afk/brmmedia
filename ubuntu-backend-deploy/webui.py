@@ -3067,7 +3067,7 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 WORKFLOW_BUILDERS = {
     "image_z_image_turbo": (build_workflow_1, "文生图"),
-    "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图片编辑"),
+    "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图生图 FLUX.2-klein"),
     "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
     "MiniMaxH3-图生视频": (build_workflow_4, "MiniMax H3 图生视频"),
     "LTX23-文生视频": (build_workflow_ltx3, "LTX2.3 文生视频"),
@@ -4065,7 +4065,7 @@ def clear_qwen_chat():
 BRM_NAV_JS = r"""
 (() => {
   const groups = {
-    "任务中心": "home", "文生图Z-Image": "image", "图片编辑FLUX.2-klein": "image",
+    "任务中心": "home", "文生图Z-Image": "image", "图生图FLUX.2-klein": "image",
     "MiniMax H3 文生视频": "video", "MiniMax H3 图生视频": "video",
     "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
     "首尾帧视频LTX2.3": "video", "数字人-语音驱动LTX2.3": "video",
@@ -4449,8 +4449,8 @@ def build_ui():
                 )
 
             # ========== Tab 2 ==========
-            with gr.Tab("图片编辑FLUX.2-klein"):
-                gr.Markdown("## 图片编辑 FLUX.2-klein", elem_classes=["workflow-heading"])
+            with gr.Tab("图生图FLUX.2-klein"):
+                gr.Markdown("## 图生图 FLUX.2-klein", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         prompt2 = gr.Textbox(label="提示词", autofocus=True, placeholder="输入图片提示词", lines=13, max_lines=13)
@@ -4893,7 +4893,7 @@ def build_ui():
                         '<details id="dashboard-new-task-menu"><summary>＋ 新建任务</summary>'
                         '<div class="brm-new-task-list">'
                         '<button type="button" data-brm-action="workflow" data-workflow="文生图Z-Image">图像 · 文生图</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="图片编辑FLUX.2-klein">图像 · 图片编辑</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="图生图FLUX.2-klein">图像 · 图生图 FLUX.2-klein</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 文生视频">视频 · H3 文生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 图生视频">视频 · H3 图生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="文生视频 LTX2.3">视频 · LTX 文生视频</button>'
