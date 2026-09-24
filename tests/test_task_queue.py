@@ -18,6 +18,7 @@ import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,8 @@ def _install_import_stubs() -> None:
 
 
 def _load_webui(output_dir: Path):
+    module_names = ("requests", "gradio", "comfyui_server")
+    previous_modules = {name: sys.modules.get(name) for name in module_names}
     _install_import_stubs()
     if str(WEBUI_PATH.parent) not in sys.path:
         sys.path.insert(0, str(WEBUI_PATH.parent))
@@ -71,7 +74,14 @@ def _load_webui(output_dir: Path):
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in previous_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module
 
 
@@ -97,6 +107,13 @@ class TaskQueueTests(unittest.TestCase):
         self.assertEqual(status["state"], "queued")
         self.assertEqual(status["queue_position"], 1)
         self.assertEqual(status["output_files"], [])
+
+    def test_task_names_replace_path_separators_for_artifact_filenames(self):
+        name = self.webui.make_task_name("SeedVR2-图像/视频增强修复")
+
+        self.assertNotIn("/", name)
+        self.assertNotIn("\\", name)
+        self.assertTrue(name.startswith("任务_SeedVR2-图像-视频增强修复_"))
 
     def test_prompt_and_progress_are_persisted_and_exposed(self):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
@@ -238,6 +255,7 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('elem_id="nav-home"', source)
         self.assertIn('elem_id="nav-image"', source)
         self.assertIn('elem_id="nav-video"', source)
+        self.assertIn('elem_id="nav-media"', source)
         self.assertIn('elem_id="nav-audio"', source)
         self.assertIn('elem_id="nav-tools"', source)
         self.assertIn('elem_id="nav-assets"', source)
@@ -250,6 +268,22 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('确认从数据库永久删除', source)
         self.assertIn('BRM_NAV_JS', source)
         self.assertIn('window.__brmSelectCategory', source)
+        self.assertIn('with gr.Tab("图像/视频增强修复 SeedVR2")', source)
+        self.assertIn('"图像/视频增强修复 SeedVR2": "media"', source)
+        self.assertIn('media:"图像/视频增强修复 SeedVR2"', source)
+        self.assertIn('window.__brmSelectCategory?.("media")', source)
+        self.assertIn('"全高清 1080p", "1080p"', source)
+        self.assertIn('"高清 720p", "720p"', source)
+        self.assertIn('file_types=["video"]', source)
+        self.assertIn('大小写均支持', source)
+        self.assertIn('("3B 快速模式"', source)
+        self.assertIn('"model_variant": model_variant', source)
+        self.assertIn('不会替换或删除 7B', source)
+        self.assertIn('interactive=False', source)
+        self.assertIn('update_seedvr2_submit_button', source)
+        self.assertNotIn('4K UHD（待显存验证，暂不可提交）', source)
+        self.assertIn('api_name="submit_seedvr2_enhance"', source)
+        self.assertIn('interactive=bool(ready and model_installed(COMFY_ROOT, model_variant))', source)
         self.assertIn('window.__brmSelectSection', source)
         self.assertIn('new Set(["home", "assets", "history", "settings", "keys"])', source)
         self.assertIn('document.documentElement.dataset.brmSection = group', source)
@@ -323,6 +357,65 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn('label="常用风格预设"', source)
         self.assertIn('music_style_preset8.change(', source)
         self.assertIn('outputs=tags8', source)
+
+    def test_seedvr2_workflows_use_requested_scale_strength_and_native_chunks(self):
+        image = self.webui.build_seedvr2_workflow("SeedVR2", {
+            "mode": "image", "image_filename": "input.png", "scale": 2,
+            "strength": "light",
+        })
+        self.assertEqual(
+            image["2"]["inputs"]["unet_name"], "seedvr2_7b_int8_convrot.safetensors",
+        )
+        self.assertEqual(image["4"]["inputs"]["scale_by"], 2.0)
+        self.assertEqual(image["8"]["inputs"]["denoise"], 0.6)
+        self.assertEqual(image["1"]["inputs"]["image"], "input.png")
+
+        video = self.webui.build_seedvr2_workflow("SeedVR2", {
+            "mode": "video", "video_filename": "input.mp4", "scale": 1,
+            "strength": "strong",
+        })
+        self.assertEqual(
+            video["4"]["inputs"]["unet_name"], "seedvr2_7b_int8_convrot.safetensors",
+        )
+        self.assertEqual(video["3"]["inputs"]["scale_by"], 1.0)
+        self.assertEqual(video["8"]["inputs"]["chunking_mode"], "auto")
+        self.assertEqual(video["8"]["inputs"]["temporal_overlap"], 1)
+        self.assertEqual(video["10"]["inputs"]["denoise"], 1.0)
+        self.assertEqual(video["14"]["inputs"]["fps"], ["2", 2])
+        self.assertEqual(video["15"]["inputs"]["format"], "mp4")
+        self.assertEqual(video["15"]["inputs"]["codec"], "h264")
+
+        fast_image = self.webui.build_seedvr2_workflow("SeedVR2", {
+            "mode": "image", "image_filename": "input.png", "scale": 2,
+            "model_variant": "3b",
+        })
+        fast_video = self.webui.build_seedvr2_workflow("SeedVR2", {
+            "mode": "video", "video_filename": "input.mp4", "scale": 1,
+            "model_variant": "3b",
+        })
+        self.assertEqual(
+            fast_image["2"]["inputs"]["unet_name"], "seedvr2_3b_int8_convrot.safetensors",
+        )
+        self.assertEqual(
+            fast_video["4"]["inputs"]["unet_name"], "seedvr2_3b_int8_convrot.safetensors",
+        )
+
+        preset_video = self.webui.build_seedvr2_workflow("SeedVR2", {
+            "mode": "video", "video_filename": "input.mp4", "scale": 2,
+            "scale_by": 1.5, "resolution_preset": "1080p", "strength": "standard",
+        })
+        self.assertEqual(preset_video["3"]["inputs"]["scale_by"], 1.5)
+
+    def test_seedvr2_submit_button_tracks_selected_model_installation(self):
+        with patch.object(self.webui, "model_installed", side_effect=lambda _root, variant: variant == "3b"):
+            self.assertEqual(
+                self.webui.update_seedvr2_submit_button("video", "", "input.mp4", "3b"),
+                {"interactive": True},
+            )
+            self.assertEqual(
+                self.webui.update_seedvr2_submit_button("video", "", "input.mp4", "7b"),
+                {"interactive": False},
+            )
 
     def test_restart_reattaches_running_prompt_without_resubmitting(self):
         history = {

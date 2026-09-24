@@ -29,6 +29,20 @@ class ApiDocumentationTests(unittest.TestCase):
         self.assertIn("download_url", text)
         self.assertIn("asset_id", text)
 
+    def test_documents_seedvr2_workflow_and_video_upload(self) -> None:
+        text = DOC_PATH.read_text(encoding="utf-8")
+        deployment = (DOC_PATH.parent / "ubuntu-backend-deploy" / "SEEDVR2_DEPLOYMENT.md").read_text(encoding="utf-8")
+
+        self.assertIn("kind=image / audio / video", text)
+        self.assertIn("seedvr2-enhance", text)
+        self.assertIn("2 GiB", text)
+        self.assertIn("大小写不敏感", text)
+        self.assertIn("1080p", text)
+        self.assertIn("媒体处理", text)
+        self.assertIn("API 也会拒绝 4K 请求", text)
+        self.assertIn("5aa0d25fc9d35e449b659d0c9a5dcb22e2a4fa04032101b95a39da42b32c1be6", deployment)
+        self.assertIn("20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1", deployment)
+
     def test_does_not_reintroduce_retired_direct_lan_routes(self) -> None:
         text = DOC_PATH.read_text(encoding="utf-8")
 

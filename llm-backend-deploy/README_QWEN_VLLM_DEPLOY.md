@@ -152,9 +152,14 @@ Ubuntu 目标路径：
 /opt/baorongwanxiang/brmmedia/llm-backend-deploy/models/Qwen3.6-35B-A3B-AWQ-4bit
 ```
 
-## Qwen3.8-27B 双 A4000（Windows 原生 llama.cpp）
+## Qwen3.8-27B 双 A4000（历史候选：Windows 原生 llama.cpp）
 
-Qwen3.8 的 `UD-Q4_K_XL` 需要两张 A4000 分担模型层。由于官方 CUDA
+> 本节记录早期 `UD-Q4_K_XL` Windows 原生候选方案，不是当前生产配置。当前生产已改为
+> WSL 内 `llama.cpp` 运行 Unsloth `Qwen3.8-27B-UD-Q4_K_M.gguf`，模型 ID
+> `qwen38-27b-ud-q4-k-m`，`n_ctx=140288`、q8_0 K/V cache、单并发；详见
+> `QWEN38_PRODUCTION.md` 和项目 `DEPLOYMENT.md`。
+
+历史候选 Qwen3.8 的 `UD-Q4_K_XL` 需要两张 A4000 分担模型层。由于官方 CUDA
 预编译 `llama-server` 面向 Windows，本项目将该服务放在 Windows 主机上，
 WSL 只通过 NAT 网关访问其回环受限端口；局域网用户仍只访问既有的
 `/qwen/v1` Nginx Basic Auth 入口。

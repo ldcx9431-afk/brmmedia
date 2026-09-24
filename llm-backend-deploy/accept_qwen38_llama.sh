@@ -8,7 +8,7 @@ else
   BASE="http://127.0.0.1:8001/v1"
 fi
 RUNS="${BRMMEDIA_QWEN38_ACCEPTANCE_RUNS:-10}"
-MODEL="${BRMMEDIA_QWEN38_MODEL:-qwen38-27b-q4-k-m}"
+MODEL="${BRMMEDIA_QWEN38_MODEL:-qwen38-27b-ud-q4-k-m}"
 case "$RUNS" in ''|*[!0-9]*) echo "RUNS must be a positive integer" >&2; exit 2;; esac
 [ "$RUNS" -gt 0 ] || { echo "RUNS must be greater than zero" >&2; exit 2; }
 

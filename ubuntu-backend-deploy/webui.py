@@ -26,7 +26,9 @@ import os
 import uuid
 import time
 import random
+import math
 import shutil
+import tempfile
 import threading
 import subprocess
 import hashlib
@@ -47,6 +49,29 @@ from comfyui_server import (
     get_view_file, interrupt, BASE, COMFY_ROOT, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
 )
 from lan_user_management import add_lan_user
+from seedvr2_support import (
+    MAX_OUTPUT_EDGE,
+    MAX_OUTPUT_PIXELS,
+    SEEDVR2_MODEL_DEFAULT,
+    SEEDVR2_VAE,
+    STRENGTH_DENOISE,
+    TASK_MAX_SECONDS,
+    TASK_TIMEOUT_SECONDS,
+    VIDEO_UPLOAD_MAX_BYTES,
+    available_disk_bytes,
+    estimated_video_workspace_bytes,
+    is_supported_video_filename,
+    installed_model_variants,
+    model_installed,
+    models_installed,
+    output_dimensions,
+    probe_video,
+    resolve_comfy_input,
+    seedvr2_model_filename,
+    segment_duration_seconds,
+    validate_video_info,
+    video_output_dimensions,
+)
 
 
 # ============================================================================
@@ -68,6 +93,12 @@ if VIDEO_ENGINE not in {"ltx23", "h3"}:
 # During staging or rollback the same two tabs continue to work through LTX,
 # but must not present H3 profiles/audio promises that are unavailable.
 H3_ENABLED = VIDEO_ENGINE == "h3"
+SEEDVR2_ENABLED = models_installed(COMFY_ROOT)
+SEEDVR2_AVAILABLE_VARIANTS = installed_model_variants(COMFY_ROOT)
+SEEDVR2_DEFAULT_VARIANT = (
+    SEEDVR2_MODEL_DEFAULT if SEEDVR2_MODEL_DEFAULT in SEEDVR2_AVAILABLE_VARIANTS
+    else next(iter(SEEDVR2_AVAILABLE_VARIANTS), SEEDVR2_MODEL_DEFAULT)
+)
 VOICE_ENGINE = os.environ.get("BRMMEDIA_VOICE_ENGINE", "indextts2").strip().lower()
 if VOICE_ENGINE not in {"indextts2", "indextts25"}:
     raise RuntimeError("BRMMEDIA_VOICE_ENGINE must be indextts2 or indextts25")
@@ -118,6 +149,7 @@ DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时�
 MEDIA_CACHE_DIR = OUTPUT_DIR / ".brm-cache"
 THUMB_CACHE_DIR = MEDIA_CACHE_DIR / "thumbnails"
 DOWNLOAD_CACHE_DIR = MEDIA_CACHE_DIR / "downloads"
+DOWNLOAD_CACHE_KEEP = 10
 _thumb_jobs: stdlib_queue.Queue[tuple[Path, Path, str]] = stdlib_queue.Queue()
 _thumb_pending: set[str] = set()
 _thumb_lock = threading.Lock()
@@ -216,7 +248,7 @@ def config_int(name, default=1, min_value=1, max_value=4):
 # must never overlap another ComfyUI workflow on that GPU.  The regular LTX
 # mode keeps the existing user-configurable range, while H3 makes the queue a
 # deliberate single-worker queue rather than merely a UI recommendation.
-MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" else 4
+MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED else 4
 QUEUE_CONCURRENCY = config_int(
     "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
 )
@@ -275,7 +307,11 @@ class Task:
 
 def make_task_name(wfname: str) -> str:
     """任务名:工作流名 + 时间戳。也作为产物文件名前缀。"""
-    return "任务_" + wfname.strip() + time.strftime("_%Y%m%d-%H%M%S_") + str(random.randint(1000, 9999))
+    # Workflow display names may contain separators (for example
+    # "SeedVR2-图像/视频增强修复").  Task names are also used as filenames,
+    # so never let a label create an unintended subdirectory.
+    safe_workflow_name = re.sub(r"[\\/]+", "-", str(wfname).strip()).strip(" .")
+    return "任务_" + safe_workflow_name + time.strftime("_%Y%m%d-%H%M%S_") + str(random.randint(1000, 9999))
 
 
 class TaskQueue:
@@ -580,8 +616,8 @@ class TaskQueue:
         """Apply and durably store a ComfyUI lifecycle/progress event."""
         now = time.time()
         with self._lock:
-            if event.get("prompt_id"):
-                task.prompt_id = str(event["prompt_id"])
+            if "prompt_id" in event:
+                task.prompt_id = str(event.get("prompt_id") or "")
             if event.get("stage"):
                 task.stage = str(event["stage"])
             if "node_id" in event:
@@ -809,6 +845,7 @@ footer {
 }
 #primary-nav[data-active="image"] #nav-image,
 #primary-nav[data-active="video"] #nav-video,
+#primary-nav[data-active="media"] #nav-media,
 #primary-nav[data-active="audio"] #nav-audio,
 #primary-nav[data-active="tools"] #nav-tools {
     border-color: #f3bcaa !important;
@@ -1708,7 +1745,7 @@ html, body { min-height:100%; background:var(--brm-bg) !important; }
     gap:7px !important;
     width:100% !important;
     height:auto !important;
-    min-height:368px !important;
+    min-height:414px !important;
     max-height:none !important;
     overflow:visible !important;
 }
@@ -1730,6 +1767,7 @@ html, body { min-height:100%; background:var(--brm-bg) !important; }
 #primary-nav[data-active="home"] #nav-home,
 #primary-nav[data-active="image"] #nav-image,
 #primary-nav[data-active="video"] #nav-video,
+#primary-nav[data-active="media"] #nav-media,
 #primary-nav[data-active="audio"] #nav-audio,
 #primary-nav[data-active="tools"] #nav-tools,
 #primary-nav[data-active="assets"] #nav-assets,
@@ -2302,7 +2340,14 @@ H3_EFFECTIVE_SETTING_KEYS = (
 VOICE_CLONE_EFFECTIVE_SETTING_KEYS = (
     "engine", "language", "speed", "output_format", "temperature_deprecated",
 )
-TASK_EFFECTIVE_SETTING_KEYS = H3_EFFECTIVE_SETTING_KEYS + VOICE_CLONE_EFFECTIVE_SETTING_KEYS
+SEEDVR2_EFFECTIVE_SETTING_KEYS = (
+    "engine", "model_variant", "mode", "scale", "strength", "input_width", "input_height",
+    "output_width", "output_height", "duration", "fps", "segments",
+)
+TASK_EFFECTIVE_SETTING_KEYS = (
+    H3_EFFECTIVE_SETTING_KEYS + VOICE_CLONE_EFFECTIVE_SETTING_KEYS
+    + SEEDVR2_EFFECTIVE_SETTING_KEYS
+)
 
 INDEXTTS25_SERVICE_URL = os.environ.get(
     "BRMMEDIA_INDEXTTS25_URL", "http://127.0.0.1:9205"
@@ -2447,14 +2492,18 @@ def h3_profile_default_seconds(profile: str) -> int:
     return H3_PROFILES.get(str(profile), H3_PROFILES["preview"])["default_seconds"]
 
 
-def extract_result(outputs: dict, task: Task) -> list:
+def extract_result(
+    outputs: dict, task: Task, *, destination_dir: Path | str | None = None,
+    filename_prefix: str | None = None,
+) -> list:
     """
     把 ComfyUI 执行完的 outputs 里的产物(音频 / 视频 / 图片)下载并保存到
     BASE_DIR/outputs。文件名以 task.name 为前缀;若有多个产物,则追加
     _1、_2……(从 1 开始);只有一个产物时不加编号。
     返回保存后的文件路径(字符串)列表。
     """
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    destination = Path(destination_dir) if destination_dir is not None else OUTPUT_DIR
+    destination.mkdir(parents=True, exist_ok=True)
 
     # 先把所有媒体产物的引用收集起来,便于判断是否“多个输出”。
     items = []
@@ -2474,7 +2523,8 @@ def extract_result(outputs: dict, task: Task) -> list:
             continue
         ext = Path(item["filename"]).suffix             # 沿用原文件后缀,区分图/音/视频
         suffix = f"_{len(saved) + 1}" if multiple else ""
-        out_path = OUTPUT_DIR / f"{task.name}{suffix}{ext}"
+        prefix = filename_prefix or task.name
+        out_path = destination / f"{prefix}{suffix}{ext}"
         out_path.write_bytes(raw)
         saved.append(str(out_path))
     return saved
@@ -2716,6 +2766,143 @@ def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model
     })
 
 
+def on_seedvr2_video_upload(filepath):
+    """Upload a validated video into ComfyUI input for the SeedVR2 page."""
+    if not filepath:
+        return ""
+    source = Path(filepath)
+    if not is_supported_video_filename(source):
+        raise gr.Error("视频格式仅支持 MP4、MOV、MKV、WebM 或 AVI")
+    if source.stat().st_size > VIDEO_UPLOAD_MAX_BYTES:
+        raise gr.Error(f"视频文件不能超过 {VIDEO_UPLOAD_MAX_BYTES // (1024 ** 3)} GiB")
+    try:
+        info = probe_video(source)
+        validate_video_info(info)
+        output_dimensions(info["width"], info["height"], 1)
+        timeout = max(120, min(900, int(source.stat().st_size / (10 * 1024 * 1024) * 60)))
+        return upload_image(source, timeout=timeout)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise gr.Error(f"视频检查或上传失败：{exc}") from exc
+
+
+def update_seedvr2_mode_ui(mode, resolution_preset="1080p"):
+    is_image = str(mode or "image").lower() == "image"
+    return (
+        gr.update(visible=is_image),
+        gr.update(visible=not is_image),
+        gr.update(visible=is_image or str(resolution_preset or "native") == "native"),
+        gr.update(visible=not is_image),
+    )
+
+
+def update_seedvr2_video_preset_ui(mode, resolution_preset):
+    is_image = str(mode or "image").lower() == "image"
+    return gr.update(visible=is_image or str(resolution_preset or "native") == "native")
+
+
+def update_seedvr2_submit_button(mode, image_filename, video_filename, model_variant="7b"):
+    mode = str(mode or "image").lower()
+    ready = bool(image_filename) if mode == "image" else bool(video_filename)
+    return gr.update(interactive=bool(ready and model_installed(COMFY_ROOT, model_variant)))
+
+
+def submit_seedvr2_enhance(
+    mode, image_filename, video_filename, scale=2, strength="standard", resolution_preset="native",
+    model_variant=SEEDVR2_MODEL_DEFAULT,
+):
+    """Queue one image or video restore job on the shared A5000 worker."""
+    model_variant = str(model_variant or SEEDVR2_MODEL_DEFAULT).strip().lower()
+    try:
+        seedvr2_model_filename(model_variant)  # Validate before checking the corresponding installed file.
+    except ValueError as exc:
+        raise gr.Error(str(exc)) from exc
+    if not model_installed(COMFY_ROOT, model_variant):
+        raise gr.Error(f"SeedVR2 {model_variant.upper()} 权重或共享 VAE 尚未安装完成，请稍后重试")
+    mode = str(mode or "image").lower()
+    if mode not in {"image", "video"}:
+        raise gr.Error("请选择图片或视频任务")
+    if mode == "video" and not video_filename:
+        raise gr.Error("视频仍在上传/导入，或尚未准备好；请等上传完成、提交按钮启用后再提交。")
+    if mode == "image" and not image_filename:
+        raise gr.Error("请先上传并等待图片导入完成。")
+    try:
+        scale = int(scale)
+    except (TypeError, ValueError):
+        raise gr.Error("输出倍率仅支持 1× 或 2×") from None
+    if scale not in (1, 2):
+        raise gr.Error("输出倍率仅支持 1× 或 2×")
+    strength = str(strength or "standard").lower()
+    if strength not in STRENGTH_DENOISE:
+        raise gr.Error("修复强度仅支持轻度、标准或强力")
+    resolution_preset = str(resolution_preset or "native").strip().lower()
+
+    args = {
+        "mode": mode,
+        "image_filename": "",
+        "video_filename": "",
+        "scale": scale,
+        "resolution_preset": resolution_preset if mode == "video" else "native",
+        "strength": strength,
+        "model_variant": model_variant,
+        "engine": f"SeedVR2 {model_variant.upper()} INT8",
+    }
+    if mode == "image":
+        try:
+            source = resolve_comfy_input(COMFY_ROOT, image_filename)
+            from PIL import Image
+
+            with Image.open(source) as image:
+                out_width, out_height = output_dimensions(image.width, image.height, scale)
+                args.update({
+                    "image_filename": image_filename,
+                    "input_width": image.width,
+                    "input_height": image.height,
+                    "output_width": out_width,
+                    "output_height": out_height,
+                })
+        except (ImportError, OSError, ValueError) as exc:
+            raise gr.Error(f"无法验证图像素材：{exc}") from exc
+        workflow_label = f"SeedVR2 {model_variant.upper()} 图像增强修复"
+    else:
+        try:
+            source = resolve_comfy_input(COMFY_ROOT, video_filename)
+            info = probe_video(source)
+            validate_video_info(info)
+            out_width, out_height, scale_by = video_output_dimensions(
+                info["width"], info["height"], resolution_preset, scale,
+            )
+            resource_scale = 2 if scale_by > 1 else 1
+            required = estimated_video_workspace_bytes(source.stat().st_size, resource_scale)
+            roots = {OUTPUT_DIR, source.parent}
+            free = available_disk_bytes(roots)
+            if free < required:
+                raise ValueError(
+                    f"视频处理至少需要 {required / 1024 ** 3:.1f} GiB 可用空间，"
+                    f"当前仅 {free / 1024 ** 3:.1f} GiB；请先清理空间。"
+                )
+            args.update({
+                "video_filename": video_filename,
+                "input_width": info["width"],
+                "input_height": info["height"],
+                "output_width": out_width,
+                "output_height": out_height,
+                "scale_by": scale_by,
+                "resource_scale": resource_scale,
+                "duration": round(info["duration"], 3),
+                "fps": info["fps"],
+                "frame_count": info["frame_count"],
+                "has_audio": info["has_audio"],
+                "segments": max(
+                    1,
+                    math.ceil(info["duration"] / segment_duration_seconds(info["fps"])),
+                ),
+            })
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise gr.Error(f"无法提交视频修复任务：{exc}") from exc
+        workflow_label = f"SeedVR2 {model_variant.upper()} 视频增强修复"
+    return submit("SeedVR2-图像/视频增强修复", {**args, "workflow_label": workflow_label})
+
+
 # Public API wrappers deliberately use ordinary typed arguments instead of
 # gr.State.  Gradio omits State components from generated public APIs, which
 # would otherwise make the file-name arguments for edit/video/TTS workflows
@@ -2794,6 +2981,16 @@ def api_submit_workflow_8(
     tags: str, lyrics: str, duration: float, bpm: int, language: str, model: str
 ) -> dict:
     return submit_workflow_8(tags, lyrics, duration, bpm, language, model)
+
+
+def api_submit_seedvr2_enhance(
+    mode: str, image_filename: str, video_filename: str, scale: int, strength: str,
+    resolution_preset: str = "native",
+    model_variant: str = SEEDVR2_MODEL_DEFAULT,
+) -> dict:
+    return submit_seedvr2_enhance(
+        mode, image_filename, video_filename, scale, strength, resolution_preset, model_variant,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3062,6 +3259,124 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
     return wf
 
 
+def _seedvr2_sampler_inputs(model, conditioning, latent, args):
+    return {
+        "model": model,
+        "positive": conditioning[0],
+        "negative": conditioning[1],
+        "latent_image": latent,
+        "seed": random.randint(1, 2**32 - 1),
+        "steps": 1,
+        "cfg": 1.0,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": STRENGTH_DENOISE[str(args.get("strength", "standard"))],
+    }
+
+
+def build_seedvr2_image_workflow(workflow_name: str, args: dict) -> dict:
+    """ComfyUI API-format SeedVR2 7B INT8 single-image restoration graph."""
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": args["image_filename"]}},
+        "2": {"class_type": "UNETLoader", "inputs": {
+            "unet_name": seedvr2_model_filename(args.get("model_variant", SEEDVR2_MODEL_DEFAULT)),
+            "weight_dtype": "default",
+        }},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": SEEDVR2_VAE}},
+        "4": {"class_type": "ImageScaleBy", "inputs": {
+            "image": ["1", 0], "upscale_method": "lanczos", "scale_by": float(args["scale"]),
+        }},
+        "5": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["4", 0]}},
+        "6": {"class_type": "VAEEncodeTiled", "inputs": {
+            "pixels": ["5", 0], "vae": ["3", 0],
+            "tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8,
+        }},
+        "7": {"class_type": "SeedVR2Conditioning", "inputs": {
+            "model": ["2", 0], "vae_conditioning": ["6", 0],
+        }},
+        "8": {"class_type": "KSampler", "inputs": _seedvr2_sampler_inputs(["2", 0], (["7", 0], ["7", 1]), ["6", 0], args)},
+        "9": {"class_type": "VAEDecodeTiled", "inputs": {
+            "samples": ["8", 0], "vae": ["3", 0],
+            "tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8,
+        }},
+        "10": {"class_type": "SeedVR2PostProcessing", "inputs": {
+            "images": ["9", 0], "original_resized_images": ["4", 0],
+            "color_correction_method": "lab",
+        }},
+        "11": {"class_type": "SaveImage", "inputs": {
+            "images": ["10", 0], "filename_prefix": "SeedVR2/image",
+        }},
+    }
+
+
+def build_seedvr2_video_workflow(workflow_name: str, args: dict) -> dict:
+    """ComfyUI API-format video graph with native adaptive temporal chunking.
+
+    Audio is deliberately not sent through the restoration graph. The worker
+    muxes the original source audio onto the final MP4 after all video chunks
+    have been restored.
+    """
+    denoise_args = dict(args)
+    mode, video_filename = args.get("mode"), args.get("video_filename")
+    if mode != "video" or not video_filename:
+        raise ValueError("SeedVR2 video workflow requires an uploaded video")
+    nodes = {
+        "1": {"class_type": "LoadVideo", "inputs": {"file": video_filename}},
+        "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+        "3": {"class_type": "ImageScaleBy", "inputs": {
+            "image": ["2", 0], "upscale_method": "lanczos",
+            "scale_by": float(args.get("scale_by", args["scale"])),
+        }},
+        "4": {"class_type": "UNETLoader", "inputs": {
+            "unet_name": seedvr2_model_filename(args.get("model_variant", SEEDVR2_MODEL_DEFAULT)),
+            "weight_dtype": "default",
+        }},
+        "5": {"class_type": "VAELoader", "inputs": {"vae_name": SEEDVR2_VAE}},
+        "6": {"class_type": "SeedVR2Preprocess", "inputs": {"resized_images": ["3", 0]}},
+        "7": {"class_type": "VAEEncodeTiled", "inputs": {
+            "pixels": ["6", 0], "vae": ["5", 0],
+            "tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8,
+        }},
+        "8": {"class_type": "SeedVR2TemporalChunk", "inputs": {
+            "latent": ["7", 0], "temporal_overlap": 1, "chunking_mode": "auto",
+        }},
+        "9": {"class_type": "SeedVR2Conditioning", "inputs": {
+            "model": ["4", 0], "vae_conditioning": ["8", 0],
+        }},
+        "10": {"class_type": "KSampler", "inputs": _seedvr2_sampler_inputs(["4", 0], (["9", 0], ["9", 1]), ["8", 0], denoise_args)},
+        "11": {"class_type": "SeedVR2TemporalMerge", "inputs": {
+            "latents": ["10", 0], "temporal_overlap": ["8", 1],
+        }},
+        "12": {"class_type": "VAEDecodeTiled", "inputs": {
+            "samples": ["11", 0], "vae": ["5", 0],
+            "tile_size": 512, "overlap": 128, "temporal_size": 64, "temporal_overlap": 8,
+        }},
+        "13": {"class_type": "SeedVR2PostProcessing", "inputs": {
+            "images": ["12", 0], "original_resized_images": ["3", 0],
+            "color_correction_method": "lab",
+        }},
+        "14": {"class_type": "CreateVideo", "inputs": {
+            "images": ["13", 0], "fps": ["2", 2],
+        }},
+        "15": {"class_type": "SaveVideo", "inputs": {
+            "video": ["14", 0], "filename_prefix": "SeedVR2/video-part",
+            # SaveVideo's codec is a dynamic combo input. In the API prompt
+            # format it must be a flat selected value; nesting the selector
+            # shape here causes ComfyUI to drop the argument before execute().
+            "format": "mp4", "codec": "h264",
+        }},
+    }
+    return nodes
+
+
+def build_seedvr2_workflow(workflow_name: str, args: dict) -> dict:
+    if args.get("mode") == "image":
+        return build_seedvr2_image_workflow(workflow_name, args)
+    if args.get("mode") == "video":
+        return build_seedvr2_video_workflow(workflow_name, args)
+    raise ValueError("SeedVR2 mode must be image or video")
+
+
 # ---------------------------------------------------------------------------
 # 工作流登记表:工作流名 -> 构建函数。新增工作流时,在这里登记一行即可。
 # ---------------------------------------------------------------------------
@@ -3078,6 +3393,7 @@ WORKFLOW_BUILDERS = {
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),
     "IndexTTS-2.5-语音克隆": (build_workflow_7, "语音克隆 IndexTTS-2.5"),
     "音乐生成": (build_workflow_8, "音乐生成"),
+    "SeedVR2-图像/视频增强修复": (build_seedvr2_workflow, "SeedVR2 图像/视频增强修复"),
 }
 
 H3_STAGE_BY_NODE = {
@@ -3091,9 +3407,282 @@ H3_STAGE_BY_NODE = {
     "110": "saving_artifacts",
 }
 
+SEEDVR2_STAGE_BY_NODE = {
+    "4": "loading_diffusion_model",
+    "5": "loading_vae",
+    "7": "encoding_video",
+    "8": "chunking_video",
+    "10": "restoring_video",
+    "12": "decoding_video",
+    "15": "saving_video",
+}
+
+
+def _run_seedvr2_command(command: list[str], task: Task, deadline: float) -> None:
+    """Run one media command with task cancellation and an overall deadline."""
+    if task.cancel_event.is_set():
+        raise RuntimeError("用户请求中断")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("SeedVR2 视频任务超过 12 小时处理上限")
+    try:
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"无法启动媒体处理程序：{exc}") from exc
+    while process.poll() is None:
+        if task.cancel_event.is_set() or time.monotonic() >= deadline:
+            process.terminate()
+            try:
+                _, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                _, stderr = process.communicate()
+            if task.cancel_event.is_set():
+                raise RuntimeError("用户请求中断")
+            raise TimeoutError("SeedVR2 视频任务超过 12 小时处理上限")
+        time.sleep(0.25)
+    _, stderr = process.communicate()
+    if process.returncode != 0:
+        detail = (stderr or "").strip()[-700:]
+        raise RuntimeError(f"SeedVR2 视频处理失败：{detail or '媒体工具返回错误'}")
+
+
+def _cleanup_seedvr2_comfy_outputs(outputs: dict) -> None:
+    """Delete only ComfyUI output files that were already copied to workspace."""
+    output_root = (COMFY_ROOT / "output").resolve()
+    for node_out in outputs.values():
+        for key in MEDIA_KEYS:
+            for item in node_out.get(key, []):
+                if item.get("type", "output") != "output":
+                    continue
+                try:
+                    candidate = (
+                        output_root / str(item.get("subfolder", ""))
+                        / str(item.get("filename", ""))
+                    ).resolve()
+                    candidate.relative_to(output_root)
+                    if candidate.is_file():
+                        candidate.unlink()
+                except (OSError, ValueError):
+                    continue
+
+
+def _seedvr2_video_segments(source: Path, info: dict, temp_dir: Path, task: Task, deadline: float) -> list[Path]:
+    """Transcode long sources into sequential, audio-free, bounded segments."""
+    segment_seconds = segment_duration_seconds(info["fps"])
+    if info["duration"] <= segment_seconds:
+        return [source]
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("服务器未安装 ffmpeg，无法分段处理长视频")
+    task_queue.update_execution(task, {"stage": "preparing_video_segments", "progress": 0.01})
+    pattern = temp_dir / "input_%04d.mp4"
+    command = [
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(source), "-map", "0:v:0", "-an", "-c:v", "libx264",
+        "-preset", "ultrafast", "-crf", "18", "-fps_mode", "cfr",
+        "-r", str(info["fps_text"]), "-force_key_frames",
+        f"expr:gte(t,n_forced*{segment_seconds:.9f})", "-f", "segment",
+        "-segment_time", f"{segment_seconds:.9f}", "-reset_timestamps", "1", str(pattern),
+    ]
+    _run_seedvr2_command(command, task, deadline)
+    segments = sorted(temp_dir.glob("input_*.mp4"))
+    if not segments:
+        raise RuntimeError("长视频分段结果为空")
+    return segments
+
+
+def run_seedvr2_video_task(task: Task) -> list[str]:
+    """Process a video one segment at a time, then mux the original audio."""
+    if task.prompt_id:
+        # Task history intentionally does not persist source filenames or
+        # temporary segments. Never re-run only the tail of a partially lost job.
+        raise RuntimeError("SeedVR2 视频任务在服务重启后无法安全续跑，请重新提交")
+    source = resolve_comfy_input(COMFY_ROOT, str(task.args.get("video_filename", "")))
+    info = probe_video(source)
+    validate_video_info(info)
+    expected_width, expected_height, scale_by = video_output_dimensions(
+        info["width"], info["height"],
+        str(task.args.get("resolution_preset", "native")), int(task.args["scale"]),
+    )
+    resource_scale = 2 if scale_by > 1 else 1
+    reserve = estimated_video_workspace_bytes(source.stat().st_size, resource_scale)
+    filesystems = {OUTPUT_DIR, source.parent}
+    minimum_free = available_disk_bytes(filesystems)
+    if minimum_free < reserve:
+        raise RuntimeError(
+            f"磁盘可用空间不足：处理此视频至少需要 {reserve / 1024 ** 3:.1f} GiB，"
+            f"当前仅 {minimum_free / 1024 ** 3:.1f} GiB。"
+        )
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("服务器未安装 ffmpeg，无法合并视频与原音轨")
+    deadline = time.monotonic() + TASK_TIMEOUT_SECONDS
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    final_path = OUTPUT_DIR / f"{task.name}.mp4"
+    if final_path.exists():
+        raise RuntimeError("SeedVR2 输出文件名冲突，请重新提交任务")
+    try:
+        with tempfile.TemporaryDirectory(prefix=f".seedvr2-{task.id}-", dir=OUTPUT_DIR) as temporary:
+            temp_dir = Path(temporary)
+            segments = _seedvr2_video_segments(source, info, temp_dir, task, deadline)
+            segment_outputs: list[Path] = []
+            task.args["segments"] = len(segments)
+            for index, segment in enumerate(segments, start=1):
+                if task.cancel_event.is_set():
+                    raise RuntimeError("用户请求中断")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("SeedVR2 视频任务超过 12 小时处理上限")
+                uploaded_name = str(task.args["video_filename"])
+                uploaded_by_worker = False
+                if segment != source:
+                    upload_timeout = max(120, min(900, int(segment.stat().st_size / (10 * 1024 * 1024) * 60)))
+                    uploaded_name = upload_image(segment, timeout=upload_timeout)
+                    uploaded_by_worker = True
+                task_queue.update_execution(task, {
+                    "prompt_id": "",
+                    "stage": f"processing_video_segment_{index}_of_{len(segments)}",
+                    "current_step": index - 1,
+                    "total_steps": len(segments),
+                    "progress": (index - 1) / len(segments),
+                })
+                args = {
+                    **task.args, "mode": "video", "video_filename": uploaded_name,
+                    "scale_by": scale_by,
+                }
+                workflow = build_seedvr2_video_workflow(task.workflow_name, args)
+
+                def submitted(prompt_id: str) -> None:
+                    task_queue.update_execution(task, {"prompt_id": prompt_id})
+
+                def progress(event: dict) -> None:
+                    event = dict(event)
+                    if event.get("node_id") in SEEDVR2_STAGE_BY_NODE:
+                        event["stage"] = SEEDVR2_STAGE_BY_NODE[event["node_id"]]
+                    if event.get("progress") is not None:
+                        event["progress"] = (
+                            index - 1 + float(event["progress"])
+                        ) / len(segments)
+                    task_queue.update_execution(task, event)
+
+                outputs = None
+                try:
+                    remaining = max(1, int(deadline - time.monotonic()))
+                    outputs = run_workflow(
+                        workflow,
+                        timeout=remaining,
+                        submit_timeout=min(remaining, 600),
+                        stop_event=task.cancel_event,
+                        on_submitted=submitted,
+                        on_progress=progress,
+                    )
+                    part_dir = temp_dir / f"result_{index:04d}"
+                    saved = extract_result(
+                        outputs, task, destination_dir=part_dir,
+                        filename_prefix=f"part_{index:04d}",
+                    )
+                    videos = [Path(path) for path in saved if Path(path).suffix.lower() in VIDEO_EXTS]
+                    if len(videos) != 1 or videos[0].stat().st_size <= 0:
+                        raise RuntimeError("SeedVR2 分段没有生成有效 MP4 视频")
+                    segment_outputs.append(videos[0])
+                finally:
+                    if outputs is not None:
+                        _cleanup_seedvr2_comfy_outputs(outputs)
+                    if uploaded_by_worker:
+                        try:
+                            resolve_comfy_input(COMFY_ROOT, uploaded_name).unlink(missing_ok=True)
+                        except (OSError, ValueError):
+                            pass
+                    if segment != source:
+                        segment.unlink(missing_ok=True)
+                task_queue.update_execution(task, {
+                    "prompt_id": "",
+                    "stage": f"video_segment_{index}_of_{len(segments)}_complete",
+                    "current_step": index,
+                    "total_steps": len(segments),
+                    "progress": index / len(segments),
+                })
+
+            if not segment_outputs:
+                raise RuntimeError("SeedVR2 没有生成可合并的视频片段")
+            merged_path = temp_dir / "merged.mp4"
+            if len(segment_outputs) == 1:
+                shutil.copy2(segment_outputs[0], merged_path)
+            else:
+                concat_list = temp_dir / "segments.txt"
+                entries = [
+                    "file '" + path.resolve().as_posix().replace("'", "'\\''") + "'"
+                    for path in segment_outputs
+                ]
+                concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
+                concat_command = [
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                    "-map", "0:v:0", "-c:v", "copy", "-an", str(merged_path),
+                ]
+                try:
+                    _run_seedvr2_command(concat_command, task, deadline)
+                except RuntimeError:
+                    if task.cancel_event.is_set():
+                        raise
+                    merged_path.unlink(missing_ok=True)
+                    codec_index = concat_command.index("-c:v") + 1
+                    concat_command[codec_index] = "libx264"
+                    output_index = concat_command.index(str(merged_path))
+                    concat_command[output_index:output_index] = ["-preset", "medium", "-crf", "18"]
+                    _run_seedvr2_command(concat_command, task, deadline)
+
+            task_queue.update_execution(task, {"stage": "muxing_original_audio", "progress": 0.98})
+            if info["has_audio"]:
+                remux = [
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(merged_path), "-i", str(source),
+                    "-map", "0:v:0", "-map", "1:a?", "-map_metadata", "1",
+                    "-c:v", "copy", "-c:a", "copy", "-t", str(info["duration"]),
+                    "-movflags", "+faststart", str(final_path),
+                ]
+                try:
+                    _run_seedvr2_command(remux, task, deadline)
+                except RuntimeError:
+                    if task.cancel_event.is_set():
+                        raise
+                    final_path.unlink(missing_ok=True)
+                    remux[remux.index("copy", remux.index("-c:a"))] = "aac"
+                    output_index = remux.index(str(final_path))
+                    remux[output_index:output_index] = ["-b:a", "192k"]
+                    _run_seedvr2_command(remux, task, deadline)
+            else:
+                shutil.copy2(merged_path, final_path)
+            final_info = probe_video(final_path)
+            validate_video_info(final_info)
+            if (final_info["width"], final_info["height"]) != (expected_width, expected_height):
+                raise RuntimeError(
+                    f"SeedVR2 输出尺寸异常：期望 {expected_width}×{expected_height}，"
+                    f"实际 {final_info['width']}×{final_info['height']}。"
+                )
+            if final_info["has_audio"] != info["has_audio"]:
+                raise RuntimeError("SeedVR2 输出未能按要求保留源视频音轨")
+            if abs(final_info["fps"] - info["fps"]) / info["fps"] > 0.02:
+                raise RuntimeError("SeedVR2 输出帧率与源视频不一致")
+        return [str(final_path)]
+    except Exception:
+        final_path.unlink(missing_ok=True)
+        raise
+
 
 def process_task(task: Task) -> None:
     """一次完整执行:构建工作流 -> 提交并等待 -> 解析并保存结果。供任务队列调用。"""
+    if task.workflow_name == "SeedVR2-图像/视频增强修复":
+        model_variant = task.args.get("model_variant", SEEDVR2_MODEL_DEFAULT)
+        if not model_installed(COMFY_ROOT, model_variant):
+            raise RuntimeError(f"SeedVR2 {model_variant} 权重或共享 VAE 不存在，请检查模型部署状态")
+        if task.args.get("mode") == "video":
+            task.result = run_seedvr2_video_task(task)
+            task_queue.update_execution(task, {"stage": "completed", "progress": 1.0})
+            return
     if task.workflow_name == "IndexTTS-2.5-语音克隆":
         # Keep IndexTTS-2.5 out of ComfyUI's Python 3.12 runtime.  It still
         # runs inside the same TaskQueue worker, so it cannot contend with H3
@@ -3107,7 +3696,11 @@ def process_task(task: Task) -> None:
         if builder is None:
             raise ValueError(f"未登记的工作流:{task.workflow_name}")
         workflow = builder[0](task.workflow_name, task.args)
-    timeout = H3_TASK_TIMEOUT if task.workflow_name.startswith("MiniMaxH3-") else None
+    timeout = (
+        H3_TASK_TIMEOUT if task.workflow_name.startswith("MiniMaxH3-")
+        else TASK_TIMEOUT_SECONDS if task.workflow_name == "SeedVR2-图像/视频增强修复"
+        else None
+    )
 
     def submitted(prompt_id: str) -> None:
         task_queue.update_execution(task, {"prompt_id": prompt_id, "stage": "submitted"})
@@ -3116,6 +3709,8 @@ def process_task(task: Task) -> None:
         event = dict(event)
         if task.workflow_name.startswith("MiniMaxH3-") and event.get("node_id") in H3_STAGE_BY_NODE:
             event["stage"] = H3_STAGE_BY_NODE[event["node_id"]]
+        if task.workflow_name == "SeedVR2-图像/视频增强修复" and event.get("node_id") in SEEDVR2_STAGE_BY_NODE:
+            event["stage"] = SEEDVR2_STAGE_BY_NODE[event["node_id"]]
         task_queue.update_execution(task, event)
 
     outputs = run_workflow(
@@ -3129,6 +3724,24 @@ def process_task(task: Task) -> None:
     )
     task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
     task.result = extract_result(outputs, task)
+    if task.workflow_name == "SeedVR2-图像/视频增强修复":
+        _cleanup_seedvr2_comfy_outputs(outputs)
+        image_results = [
+            Path(path) for path in (task.result or [])
+            if Path(path).suffix.lower() in IMAGE_EXTS
+        ]
+        if not image_results:
+            raise RuntimeError("SeedVR2 图像工作流没有生成有效图片")
+        try:
+            from PIL import Image
+
+            for result_path in image_results:
+                with Image.open(result_path) as result_image:
+                    output_dimensions(result_image.width, result_image.height, 1)
+        except (ImportError, OSError, ValueError) as exc:
+            for result_path in image_results:
+                result_path.unlink(missing_ok=True)
+            raise RuntimeError(f"SeedVR2 图片结果校验失败：{exc}") from exc
 
 
 # 任务队列实例,processor 指向本页面的 process_task。
@@ -3805,6 +4418,22 @@ def build_completed_assets_bundle():
                     filename = f"{index:02d}-{filename}"
                 used_names.add(filename)
                 archive.write(safe_path, arcname=filename)
+        # The dashboard can be used repeatedly and each export is a full copy
+        # of the selected media. Keep only a small rolling cache so repeated
+        # downloads cannot grow without bound; the original assets remain in
+        # OUTPUT_DIR and every archive can be recreated on demand.
+        cached_bundles = []
+        for cached_bundle in DOWNLOAD_CACHE_DIR.glob("BRM-AI-素材-*.zip"):
+            try:
+                cached_bundles.append((cached_bundle.stat().st_mtime_ns, cached_bundle))
+            except OSError:
+                pass
+        cached_bundles.sort(key=lambda item: item[0], reverse=True)
+        for _, stale_bundle in cached_bundles[DOWNLOAD_CACHE_KEEP:]:
+            try:
+                stale_bundle.unlink(missing_ok=True)
+            except OSError:
+                pass
         return gr.update(value=str(bundle), visible=True) if bundle.is_file() else gr.update(value=None, visible=False)
     except (OSError, zipfile.BadZipFile):
         return gr.update(value=None, visible=False)
@@ -4068,11 +4697,12 @@ BRM_NAV_JS = r"""
     "任务中心": "home", "文生图Z-Image": "image", "图生图FLUX.2-klein": "image",
     "MiniMax H3 文生视频": "video", "MiniMax H3 图生视频": "video",
     "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
+    "图像/视频增强修复 SeedVR2": "media",
     "首尾帧视频LTX2.3": "video", "数字人-语音驱动LTX2.3": "video",
     "语音克隆 IndexTTS-2.5": "audio", "语音克隆 IndexTTS-2（回退）": "audio",
     "音乐生成ACE-Step 1.5": "audio", "Qwen 大模型": "tools"
   };
-  const firstTabs = { image:"文生图Z-Image", video:"MiniMax H3 文生视频", audio:"语音克隆 IndexTTS-2.5", tools:"Qwen 大模型", home:"任务中心" };
+  const firstTabs = { image:"文生图Z-Image", video:"MiniMax H3 文生视频", media:"图像/视频增强修复 SeedVR2", audio:"语音克隆 IndexTTS-2.5", tools:"Qwen 大模型", home:"任务中心" };
   const auxiliarySections = new Set(["home", "assets", "history", "settings", "keys"]);
   const boot = () => {
     const root = document.querySelector("#workflow-tabs"); const nav = document.querySelector("#primary-nav");
@@ -4304,6 +4934,8 @@ def build_ui():
                     with gr.Column(scale=1, min_width=120):
                         nav_video_btn = gr.Button("视频创作", elem_id="nav-video")
                     with gr.Column(scale=1, min_width=120):
+                        nav_media_btn = gr.Button("媒体处理", elem_id="nav-media")
+                    with gr.Column(scale=1, min_width=120):
                         nav_audio_btn = gr.Button("音频创作", elem_id="nav-audio")
                     with gr.Column(scale=1, min_width=120):
                         nav_tools_btn = gr.Button("智能工具", elem_id="nav-tools")
@@ -4327,8 +4959,8 @@ def build_ui():
                 "### 全局设置\n"
                 "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
                 + (
-                    "MiniMax H3 当前启用：为避免 A5000 显存争用，媒体队列固定为 **1**。"
-                    if VIDEO_ENGINE == "h3"
+                    "当前媒体工作流共享 A5000 队列；为避免显存争用，并发固定为 **1**。"
+                    if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED
                     else "视频、数字人等高显存任务通常建议保持并发 **1**。"
                 )
             )
@@ -4467,6 +5099,129 @@ def build_ui():
                     inputs=[prompt2, uploaded_name2],
                     api_name="ui_submit_workflow_2",
                     api_visibility="private",
+                )
+
+            # ========== Tab SeedVR2 ==========
+            with gr.Tab("图像/视频增强修复 SeedVR2"):
+                gr.Markdown(
+                    "## 图像 / 视频增强修复 · SeedVR2\n"
+                    f"模型安全上限：输出最长边 {MAX_OUTPUT_EDGE}px、总像素 {MAX_OUTPUT_PIXELS:,}；"
+                    f"视频单文件最多 {VIDEO_UPLOAD_MAX_BYTES // (1024 ** 3)} GiB、最长 {TASK_MAX_SECONDS // 3600} 小时。"
+                    + ("\n\n✅ 至少一个模型已就绪，任务将排入共享 A5000 单队列。"
+                       if SEEDVR2_ENABLED else "\n\n⚠️ SeedVR2 模型权重或共享 VAE 尚未安装；部署完成并重启工作台后即可提交。")
+                    + "\n\n模型模式：7B INT8 高质量（默认，保留原有模型）；3B INT8 快速（需额外安装 3B 权重）。"
+                    + "\n\n视频支持按倍率、720p、1080p 预设并保持原画幅。4K 暂不提供；"
+                    "待 A5000 显存与稳定性实测通过后再开放。",
+                    elem_classes=["workflow-heading"],
+                )
+                seedvr2_mode = gr.Radio(
+                    choices=[("图片", "image"), ("视频", "video")],
+                    value="image", label="处理类型", interactive=True,
+                )
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=1):
+                        seedvr2_image = gr.Image(
+                            type="filepath", height=400, label="待增强图片", visible=True,
+                        )
+                        seedvr2_image_name = gr.State("")
+                        seedvr2_video = gr.File(
+                            type="filepath", file_count="single",
+                            # Match MIME type in the browser, then validate the
+                            # extension case-insensitively in the callback below.
+                            file_types=["video"],
+                            label="待增强视频（.mp4 / .mov / .mkv / .webm / .avi；大小写均支持）",
+                            visible=False,
+                        )
+                        seedvr2_video_name = gr.State("")
+                    with gr.Column(scale=1):
+                        seedvr2_model = gr.Dropdown(
+                            choices=[
+                                ("7B 高质量（保留默认）" + ("" if model_installed(COMFY_ROOT, "7b") else " · 未安装"), "7b"),
+                                ("3B 快速模式" + ("" if model_installed(COMFY_ROOT, "3b") else " · 未安装"), "3b"),
+                            ],
+                            value=SEEDVR2_DEFAULT_VARIANT,
+                            label="修复模型",
+                            info="3B 是独立快速选项，不会替换或删除 7B；两者共用 A5000 单队列。",
+                        )
+                        with gr.Row():
+                            seedvr2_scale = gr.Dropdown(
+                                choices=[("1×", "1"), ("2×", "2")],
+                                value="2", label="输出倍率（图片 / 按倍率视频）",
+                            )
+                            seedvr2_video_preset = gr.Dropdown(
+                                choices=[
+                                    ("按倍率 1× / 2×", "native"),
+                                    ("高清 720p", "720p"),
+                                    ("全高清 1080p", "1080p"),
+                                ],
+                                value="1080p", label="视频输出规格", visible=False,
+                                info="保留源画幅比例；4K 尚未通过 A5000 实测，目前不提供。",
+                            )
+                            seedvr2_strength = gr.Dropdown(
+                                choices=[("轻度", "light"), ("标准", "standard"), ("强力", "strong")],
+                                value="standard", label="修复强度",
+                                info="强度映射到 SeedVR2 去噪值 0.6 / 0.8 / 1.0。",
+                            )
+                        seedvr2_submit = gr.Button(
+                            "提交增强修复任务", variant="primary", interactive=False,
+                        )
+                        gr.Markdown(
+                            "视频保留源帧率和原音轨；长视频自动分段、串行处理并合并。"
+                            "上传/导入完成、提交按钮启用后再提交；如果文件较大，请先确认服务器有足够可用空间。"
+                        )
+                seedvr2_mode.change(
+                    fn=update_seedvr2_mode_ui,
+                    inputs=[seedvr2_mode, seedvr2_video_preset],
+                    outputs=[seedvr2_image, seedvr2_video, seedvr2_scale, seedvr2_video_preset],
+                    api_visibility="private",
+                )
+                seedvr2_video_preset.change(
+                    fn=update_seedvr2_video_preset_ui,
+                    inputs=[seedvr2_mode, seedvr2_video_preset],
+                    outputs=seedvr2_scale,
+                    api_visibility="private",
+                )
+                seedvr2_mode.change(
+                    fn=update_seedvr2_submit_button,
+                    inputs=[seedvr2_mode, seedvr2_image_name, seedvr2_video_name, seedvr2_model],
+                    outputs=seedvr2_submit,
+                    api_visibility="private",
+                )
+                seedvr2_image_name.change(
+                    fn=update_seedvr2_submit_button,
+                    inputs=[seedvr2_mode, seedvr2_image_name, seedvr2_video_name, seedvr2_model],
+                    outputs=seedvr2_submit,
+                    api_visibility="private",
+                )
+                seedvr2_video_name.change(
+                    fn=update_seedvr2_submit_button,
+                    inputs=[seedvr2_mode, seedvr2_image_name, seedvr2_video_name, seedvr2_model],
+                    outputs=seedvr2_submit,
+                    api_visibility="private",
+                )
+                seedvr2_model.change(
+                    fn=update_seedvr2_submit_button,
+                    inputs=[seedvr2_mode, seedvr2_image_name, seedvr2_video_name, seedvr2_model],
+                    outputs=seedvr2_submit,
+                    api_visibility="private",
+                )
+                seedvr2_image.upload(
+                    fn=on_ref_upload, inputs=seedvr2_image, outputs=seedvr2_image_name,
+                    api_visibility="private",
+                )
+                seedvr2_image.clear(fn=lambda: "", outputs=seedvr2_image_name, api_visibility="private")
+                seedvr2_video.upload(
+                    fn=on_seedvr2_video_upload, inputs=seedvr2_video, outputs=seedvr2_video_name,
+                    api_visibility="private",
+                )
+                seedvr2_video.clear(fn=lambda: "", outputs=seedvr2_video_name, api_visibility="private")
+                seedvr2_submit.click(
+                    fn=submit_seedvr2_enhance,
+                    inputs=[
+                        seedvr2_mode, seedvr2_image_name, seedvr2_video_name,
+                        seedvr2_scale, seedvr2_strength, seedvr2_video_preset, seedvr2_model,
+                    ],
+                    api_name="ui_submit_seedvr2_enhance", api_visibility="private",
                 )
 
             # ========== Tab 3 ==========
@@ -4972,6 +5727,7 @@ def build_ui():
         gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
         gr.api(api_submit_workflow_7, api_name="submit_workflow_7")
         gr.api(api_submit_workflow_8, api_name="submit_workflow_8")
+        gr.api(api_submit_seedvr2_enhance, api_name="submit_seedvr2_enhance")
         gr.api(api_task_status, api_name="task_status")
 
         # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
@@ -4988,6 +5744,11 @@ def build_ui():
         nav_video_btn.click(
             fn=None,
             js='() => { window.__brmSelectCategory?.("video"); return []; }',
+            api_visibility="private",
+        )
+        nav_media_btn.click(
+            fn=None,
+            js='() => { window.__brmSelectCategory?.("media"); return []; }',
             api_visibility="private",
         )
         nav_audio_btn.click(

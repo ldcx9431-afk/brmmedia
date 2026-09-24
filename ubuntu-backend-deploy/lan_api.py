@@ -26,7 +26,36 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from comfyui_server import BASE as COMFY_BASE, audio_duration, upload_image
+from comfyui_server import BASE as COMFY_BASE, COMFY_ROOT, audio_duration, upload_image
+from seedvr2_support import (
+    MAX_OUTPUT_EDGE,
+    MAX_OUTPUT_PIXELS,
+    PLANNED_VIDEO_RESOLUTION_PRESETS,
+    SEEDVR2_FAST_MODEL,
+    SEEDVR2_FAST_MODEL_SHA256,
+    SEEDVR2_MODEL,
+    SEEDVR2_MODEL_DEFAULT,
+    SEEDVR2_MODEL_SHA256,
+    SEEDVR2_MODELS,
+    SEEDVR2_REPO,
+    SEEDVR2_REVISION,
+    SEEDVR2_VAE,
+    STRENGTH_DENOISE,
+    TASK_MAX_SECONDS,
+    TASK_TIMEOUT_SECONDS,
+    VIDEO_EXTENSIONS,
+    VIDEO_UPLOAD_MAX_BYTES,
+    available_disk_bytes,
+    estimated_video_workspace_bytes,
+    is_supported_video_filename,
+    model_installed,
+    models_installed,
+    output_dimensions,
+    probe_video,
+    resolve_comfy_input,
+    validate_video_info,
+    video_output_dimensions,
+)
 
 
 API_PREFIX = "/api/v1"
@@ -41,7 +70,7 @@ ASSET_TTL_SECONDS = max(3600, int(os.environ.get("BRM_LAN_API_ASSET_TTL", str(7 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}
-MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 SIZE_VALUES = [
     "512 × 512", "768 × 768", "1024 × 1024", "2048 × 2048",
     "1024 × 768", "768 × 1024", "1344 × 768", "768 × 1344",
@@ -410,6 +439,66 @@ def _normal_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> lis
     ]
 
 
+def _normal_seedvr2_enhance(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    mode = _choice(params.get("mode"), "mode", ["image", "video"], "image")
+    model_variant = _choice(
+        params.get("model_variant"), "model_variant", list(SEEDVR2_MODELS), SEEDVR2_MODEL_DEFAULT,
+    )
+    scale = _number(params.get("scale", 2), "scale", minimum=1, maximum=2, integer=True)
+    strength = _choice(params.get("strength"), "strength", list(STRENGTH_DENOISE), "standard")
+    resolution_preset = "native"
+    if mode == "video":
+        requested_preset = str(params.get("resolution_preset", "native") or "native").strip().lower()
+        if requested_preset == "4k":
+            _fail(
+                422,
+                "4K UHD 预设暂未开放：3840×2160 超出当前 A5000 安全输出上限。"
+                "需先完成 4K 显存、稳定性与画质实测后再启用。",
+            )
+        resolution_preset = _choice(
+            requested_preset, "resolution_preset", ["native", "720p", "1080p"], "native",
+        )
+    image_filename = ""
+    video_filename = ""
+    if mode == "image":
+        image = _asset(params, assets, "image_asset_id", "image")
+        try:
+            image_path = resolve_comfy_input(COMFY_ROOT, image.filename)
+            from PIL import Image
+
+            with Image.open(image_path) as source:
+                output_dimensions(source.width, source.height, int(scale))
+        except ImportError:
+            _fail(503, "图像尺寸检查依赖 Pillow 不可用")
+        except (OSError, ValueError) as exc:
+            _fail(422, f"无法验证图像素材：{exc}")
+        image_filename = image.filename
+    else:
+        video = _asset(params, assets, "video_asset_id", "video")
+        try:
+            video_path = resolve_comfy_input(COMFY_ROOT, video.filename)
+            info = probe_video(video_path)
+            validate_video_info(info)
+            _, _, scale_by = video_output_dimensions(
+                info["width"], info["height"], resolution_preset, int(scale),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            _fail(422, str(exc))
+        try:
+            required = estimated_video_workspace_bytes(video.size_bytes, 2 if scale_by > 1 else 1)
+            free = available_disk_bytes({OUTPUT_DIR, video_path.parent})
+        except OSError as exc:
+            _fail(503, f"无法检查视频处理空间：{exc}")
+        if free < required:
+            _fail(
+                507,
+                f"视频处理至少需要 {required / 1024 ** 3:.1f} GiB 可用空间，"
+                f"当前仅 {free / 1024 ** 3:.1f} GiB；请先清理空间。",
+            )
+        video_filename = video.filename
+    return [mode, image_filename, video_filename, int(scale), strength, resolution_preset, model_variant]
+
+
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "text-to-image": WorkflowSpec("submit_workflow_1", "Z-Image 文生图", {}, _normal_text_to_image),
     "image-edit": WorkflowSpec("submit_workflow_2", "FLUX.2-klein 图片编辑", {"image_asset_id": "image"}, _normal_image_edit),
@@ -464,6 +553,59 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
          }},
     ),
     "music-generate": WorkflowSpec("submit_workflow_8", "ACE-Step 1.5 音乐生成", {}, _normal_music),
+    "seedvr2-enhance": WorkflowSpec(
+        "submit_seedvr2_enhance", "SeedVR2 图像/视频增强修复", {},
+        _normal_seedvr2_enhance,
+        {
+            "engine": "SeedVR2 INT8",
+            "availability": "ready" if models_installed(COMFY_ROOT) else "models_missing",
+            "default_model_variant": SEEDVR2_MODEL_DEFAULT,
+            "models": {
+                "7b": {
+                    "filename": SEEDVR2_MODEL,
+                    "sha256": SEEDVR2_MODEL_SHA256,
+                    "available": model_installed(COMFY_ROOT, "7b"),
+                    "role": "高质量，保留原有默认模型",
+                },
+                "3b": {
+                    "filename": SEEDVR2_FAST_MODEL,
+                    "sha256": SEEDVR2_FAST_MODEL_SHA256,
+                    "available": model_installed(COMFY_ROOT, "3b"),
+                    "role": "快速模式",
+                },
+            },
+            "model": {
+                "repository": SEEDVR2_REPO,
+                "revision": SEEDVR2_REVISION,
+                "diffusion_model": SEEDVR2_MODEL,
+                "vae": SEEDVR2_VAE,
+            },
+            "max_task_seconds": TASK_MAX_SECONDS,
+            "task_timeout_seconds": TASK_TIMEOUT_SECONDS,
+            "max_output": {"long_edge": MAX_OUTPUT_EDGE, "pixels": MAX_OUTPUT_PIXELS},
+            "params": {
+                "mode": {"type": "string", "required": False, "default": "image", "enum": ["image", "video"]},
+                "model_variant": {
+                    "type": "string", "required": False, "default": SEEDVR2_MODEL_DEFAULT,
+                    "enum": list(SEEDVR2_MODELS),
+                    "description": "7b 保留原高质量模式；3b 为额外快速模式，不替换 7b。",
+                },
+                "image_asset_id": {"type": "asset_id", "required_for_mode": "image", "asset_kind": "image"},
+                "video_asset_id": {"type": "asset_id", "required_for_mode": "video", "asset_kind": "video"},
+                "scale": {"type": "integer", "required": False, "default": 2, "enum": [1, 2]},
+                "resolution_preset": {
+                    "type": "string", "required": False, "default": "native",
+                    "enum": ["native", "720p", "1080p"],
+                    "planned": sorted(PLANNED_VIDEO_RESOLUTION_PRESETS),
+                    "description": "视频专用；按短边指定分辨率并保持源画幅。4K 暂未通过 A5000 安全验证。",
+                },
+                "strength": {
+                    "type": "string", "required": False, "default": "standard",
+                    "enum": list(STRENGTH_DENOISE), "denoise": STRENGTH_DENOISE,
+                },
+            },
+        },
+    ),
 }
 
 INDEXTTS2_WORKFLOW = WorkflowSpec(
@@ -631,6 +773,11 @@ def capabilities() -> dict[str, Any]:
             "h3_available": active_engine == "h3",
         },
         "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "max_upload_bytes_by_kind": {
+            "image": MAX_UPLOAD_BYTES,
+            "audio": MAX_UPLOAD_BYTES,
+            "video": VIDEO_UPLOAD_MAX_BYTES,
+        },
         "asset_ttl_seconds": ASSET_TTL_SECONDS,
         "size_values": SIZE_VALUES,
         "music_languages": LANGUAGE_VALUES,
@@ -648,27 +795,49 @@ def capabilities() -> dict[str, Any]:
 
 @app.post(f"{API_PREFIX}/files", status_code=201, tags=["assets"])
 def upload_file(kind: str, file: UploadFile = File(...)) -> dict[str, Any]:
-    if kind not in {"image", "audio"}:
-        _fail(422, "kind must be image or audio")
+    if kind not in {"image", "audio", "video"}:
+        _fail(422, "kind must be image, audio or video")
     source_name = Path(file.filename or "upload").name
     extension = Path(source_name).suffix.lower()
-    allowed = IMAGE_EXTENSIONS if kind == "image" else AUDIO_EXTENSIONS
-    if extension not in allowed:
+    allowed = IMAGE_EXTENSIONS if kind == "image" else AUDIO_EXTENSIONS if kind == "audio" else VIDEO_EXTENSIONS
+    supported = is_supported_video_filename(source_name) if kind == "video" else extension in allowed
+    if not supported:
         _fail(422, f"unsupported {kind} extension")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     temporary = UPLOAD_DIR / f"{uuid.uuid4().hex}{extension}"
     size = 0
     digest = hashlib.sha256()
+    duration = None
+    video_info = None
+    upload_limit = VIDEO_UPLOAD_MAX_BYTES if kind == "video" else MAX_UPLOAD_BYTES
     try:
         with temporary.open("wb") as target:
             while chunk := file.file.read(1024 * 1024):
                 size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    _fail(413, f"file exceeds {MAX_UPLOAD_BYTES} byte upload limit")
+                if size > upload_limit:
+                    _fail(413, f"file exceeds {upload_limit} byte {kind} upload limit")
                 digest.update(chunk)
                 target.write(chunk)
-        comfy_filename = upload_image(temporary)
+        if kind == "video":
+            try:
+                video_info = probe_video(temporary)
+                validate_video_info(video_info)
+                output_dimensions(video_info["width"], video_info["height"], 1)
+            except (OSError, RuntimeError, ValueError) as exc:
+                _fail(422, str(exc))
+            try:
+                required = estimated_video_workspace_bytes(size, 2)
+                free = available_disk_bytes({OUTPUT_DIR, COMFY_ROOT / "input"})
+            except OSError as exc:
+                _fail(503, f"unable to check video workspace disk space: {exc}")
+            if free < required:
+                _fail(
+                    507,
+                    f"视频导入至少需要 {required / 1024 ** 3:.1f} GiB 可用空间，"
+                    f"当前仅 {free / 1024 ** 3:.1f} GiB。",
+                )
+        comfy_filename = upload_image(temporary, timeout=600 if kind == "video" else 60)
         duration = audio_duration(temporary) if kind == "audio" else None
         if kind == "audio" and (duration is None or duration <= 0):
             _fail(422, "unable to read a valid audio duration")
@@ -706,6 +875,15 @@ def upload_file(kind: str, file: UploadFile = File(...)) -> dict[str, Any]:
     }
     if duration is not None:
         response["duration"] = round(duration, 3)
+    if video_info is not None:
+        response.update({
+            "duration": round(video_info["duration"], 3),
+            "width": video_info["width"],
+            "height": video_info["height"],
+            "fps": round(video_info["fps"], 6),
+            "has_audio": video_info["has_audio"],
+            "max_task_seconds": TASK_MAX_SECONDS,
+        })
     return response
 
 
@@ -714,8 +892,14 @@ def submit_task(submission: TaskSubmission) -> dict[str, Any]:
     spec = _active_workflows().get(submission.workflow)
     if spec is None:
         _fail(422, "unknown workflow; use GET /api/v1/capabilities")
+    if submission.workflow == "seedvr2-enhance" and not models_installed(COMFY_ROOT):
+        _fail(503, "SeedVR2 model files are not installed yet")
     assets = _load_assets()
     arguments = spec.normalizer(submission.params, assets)
+    if submission.workflow == "seedvr2-enhance":
+        selected_model = arguments[-1]
+        if not model_installed(COMFY_ROOT, selected_model):
+            _fail(503, f"SeedVR2 {selected_model.upper()} 权重或共享 VAE 尚未安装")
     try:
         accepted = _gradio_call(spec.endpoint, arguments)
     except RuntimeError as exc:

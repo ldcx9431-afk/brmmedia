@@ -13,7 +13,7 @@ exec 9>"$lock"
 flock -n 9 || { echo "Another Qwen switch is in progress." >&2; exit 1; }
 
 if [ "$target" = qwen38 ]; then
-  target_service=qwen38-llama; target_port=8001; target_model=qwen38-27b-ud-q4-xl
+  target_service=qwen38-llama; target_port=8001; target_model=qwen38-27b-ud-q4-k-m
   profile=/srv/brmmedia/app/llm-backend-deploy/.env.qwen38-27b
   if [ -f "$profile" ]; then
     set -a

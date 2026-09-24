@@ -13,7 +13,7 @@ if [ -f .env.qwen38-27b ]; then
 fi
 
 BIN="${QWEN38_BIN:-/srv/brmmedia/qwen38-llama/bin/llama-server}"
-MODEL="${QWEN38_MODEL:-/srv/brmmedia/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf}"
+MODEL="${QWEN38_MODEL:-/srv/brmmedia/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf}"
 HOST="${QWEN38_HOST:-127.0.0.1}"
 
 [ -x "$BIN" ] || { echo "[ERROR] llama-server is missing or not executable: $BIN" >&2; exit 2; }
@@ -29,14 +29,16 @@ unset GGML_CUDA_ENABLE_UNIFIED_MEMORY
 
 exec "$BIN" \
   --model "$MODEL" \
-  --alias "${QWEN38_SERVED_MODEL_NAME:-qwen38-27b-ud-q4-xl}" \
+  --alias "${QWEN38_SERVED_MODEL_NAME:-qwen38-27b-ud-q4-k-m}" \
   --host "$HOST" \
   --port "${QWEN38_PORT:-8001}" \
-  --ctx-size "${QWEN38_CONTEXT_SIZE:-4096}" \
+  --ctx-size "${QWEN38_CONTEXT_SIZE:-140288}" \
   --parallel "${QWEN38_PARALLEL:-1}" \
   --gpu-layers "${QWEN38_GPU_LAYERS:-all}" \
   --split-mode "${QWEN38_SPLIT_MODE:-layer}" \
   --tensor-split "${QWEN38_TENSOR_SPLIT:-1,1}" \
   --flash-attn "${QWEN38_FLASH_ATTN:-auto}" \
+  --cache-type-k "${QWEN38_CACHE_TYPE_K:-q8_0}" \
+  --cache-type-v "${QWEN38_CACHE_TYPE_V:-q8_0}" \
   --log-colors off \
   --metrics

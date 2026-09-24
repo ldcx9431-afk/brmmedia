@@ -53,7 +53,9 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3700s;
         proxy_send_timeout 3700s;
-        client_max_body_size 256M;
+        # The API enforces the exact 2 GiB video-file limit; leave a small
+        # allowance here for multipart boundaries and request headers.
+        client_max_body_size 2100M;
     }
 
     # Native ComfyUI workflow management.  It remains loopback-only on 8188;

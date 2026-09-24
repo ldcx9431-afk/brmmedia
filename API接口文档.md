@@ -1,7 +1,7 @@
 # BRMMedia 局域网 API
 
 > **更新日期：2026-08-19**
-> **当前生产快照：** MiniMax H3 / IndexTTS-2.5 / ACE-Step 1.5 均通过单媒体队列使用 A5000；Qwen 使用 `qwen38-27b-q4-k-m`，通过两张 A4000 运行。本文件不包含任何密码、Token、内网绝对路径或模型文件路径。
+> **当前生产快照：** MiniMax H3 / IndexTTS-2.5 / ACE-Step 1.5 均通过单媒体队列使用 A5000；Qwen 使用 Unsloth `Qwen3.8-27B-UD-Q4_K_M`，通过两张 A4000 运行。本文件不包含任何密码、Token、内网绝对路径或模型文件路径。
 >
 > 推荐业务系统调用稳定 REST API v1；原有 Gradio API 仅保留给既有脚本与工作台调试。Qwen 则使用 OpenAI 兼容 API。不要把任何回环端口、ComfyUI 内部 API 或 Gradio 私有端点当成稳定集成接口。
 
@@ -74,7 +74,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | `GET` | `/api/v1/health` | 检查 Gradio 与 ComfyUI 依赖 | `200` |
 | `GET` | `/api/v1/capabilities` | 获取当前可用工作流、参数、枚举和限制 | `200` |
-| `POST` | `/api/v1/files?kind=image|audio` | 上传调用素材，取得短期 `asset_id` | `201` |
+| `POST` | `/api/v1/files?kind=image / audio / video` | 上传调用素材，取得短期 `asset_id` | `201` |
 | `POST` | `/api/v1/tasks` | 异步提交媒体任务 | `202` |
 | `GET` | `/api/v1/tasks/{task_id}` | 查询任务状态、进度、实际生效设置与产物 | `200` |
 | `GET` | `/api/v1/tasks/{task_id}/artifacts/{filename}` | 下载已完成产物 | `200` |
@@ -86,7 +86,7 @@ sequenceDiagram
 | 状态 | 含义 | 调用方动作 |
 | --- | --- | --- |
 | `200/201/202` | 请求已成功处理、文件已上传或任务已受理 | 对 `202` 继续轮询任务，不重复提交 |
-| `400/404/413/422` | 请求、路径、文件大小或参数不合法 | 修正请求，不自动重试 |
+| `400/404/413/422/507` | 请求、路径、文件大小、参数不合法或可用磁盘空间不足 | 修正请求，不自动重试；`507` 清理空间后再提交 |
 | `401` | 缺少或错误的 Basic Auth | 更新凭据，不要在日志打印 Authorization 头 |
 | `502/503` | 工作台、ComfyUI 或文件导入依赖暂不可用 | 最多有限次数指数退避；先调用 `/health` 排查 |
 | `5xx` | 服务端异常 | 记录 `task_id`、时间和安全错误摘要，再有限重试 |
@@ -95,9 +95,9 @@ sequenceDiagram
 
 ## 3. 上传素材
 
-`POST /files?kind=image` 或 `POST /files?kind=audio`，请求为 `multipart/form-data`，文件字段名固定为 `file`。
+`POST /files?kind=image`、`POST /files?kind=audio` 或 `POST /files?kind=video`，请求为 `multipart/form-data`，文件字段名固定为 `file`。
 
-支持图片 `png/jpg/jpeg/webp/bmp/gif`，音频 `mp3/wav/flac/m4a/aac/ogg`。上传上限默认 256 MiB，以 `/capabilities` 的 `max_upload_bytes` 为准。服务会把素材安全导入 ComfyUI 输入区，调用者不需要、也不能提供服务器路径。
+支持图片 `png/jpg/jpeg/webp/bmp/gif`，音频 `mp3/wav/flac/m4a/aac/ogg`，视频 `mp4/mov/mkv/webm/avi`；视频扩展名大小写不敏感（如 `.mp4`、`.MP4`、`.mov`、`.MOV` 均可）。图片和音频上传上限默认 256 MiB，以 `/capabilities` 的 `max_upload_bytes` 为准；视频上限为 2 GiB，以 `max_upload_bytes_by_kind.video` 为准。视频还须是恒定帧率、1–120 fps，时长不超过 12 小时。服务会把素材安全导入 ComfyUI 输入区，调用者不需要、也不能提供服务器路径。
 
 ```bash
 IMAGE_JSON=$(curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
@@ -169,6 +169,25 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | `talking-head` | `prompt`、`image_asset_id`、`audio_asset_id`、`duration` | `size`（默认 `768 × 1024`）；应使用上传音频返回的 `duration` |
 | `voice-clone` | `prompt`、`ref_audio_asset_id` | IndexTTS‑2.5：`language`（`zh/en/ja/es/ar`，默认 `zh`）、`speed`（0.5–2.0，默认 1.0）；旧 `temperature` 仍接受但已废弃且不影响 2.5 推理 |
 | `music-generate` | `tags` | `lyrics`、`duration`（1–600）、`bpm`（30–300）、`language`、`model`（仅限 `/capabilities` 当前列出的已安装权重） |
+| `seedvr2-enhance` | 根据 `mode` 提供 `image_asset_id` 或 `video_asset_id` | `model_variant`（`7b` 默认高质量、`3b` 快速模式）、`scale`（1 或 2，默认 2）、视频专用 `resolution_preset`（`native` 默认、`720p`、`1080p`；4K 暂未开放）、`strength`（`light` / `standard` 默认 / `strong`）；所选模型或共享 VAE 未安装时返回 `503` |
+
+### SeedVR2 图像 / 视频增强修复
+
+SeedVR2 是“媒体处理”主菜单下的独立任务，图片和视频共用 A5000 单队列。保留原有 `7b` INT8 高质量模型作为默认选项，并新增独立的 `3b` INT8 快速模式；两份权重并存，`3b` 不会覆盖或删除 `7b`。先上传素材，再提交 `workflow=seedvr2-enhance`。`mode` 默认 `image`；`model_variant` 默认 `7b`，可显式设为 `3b`；图片模式只读取 `image_asset_id`，视频模式只读取 `video_asset_id`。提交所选模型前会检查对应权重和共享 VAE；缺失时返回 `503`。默认安全上限为输出最长边 2560 px、总像素 4,000,000；实际限制以 `/capabilities` 中该工作流的 `options.max_output` 为准，超限的尺寸会被明确拒绝。视频 `resolution_preset` 支持 `720p` 与 `1080p`，按短边定输出像素并保持源画幅比例；`native` 则按 `scale` 选择 1× / 2×。4K 当前未在界面提供；API 也会拒绝 4K 请求，3840×2160 超出当前 A5000 安全上限，必须先通过生产显存和稳定性实测再开放。视频保留源帧率并在输出 MP4 中复用原音轨；无音轨时输出无音轨 MP4。长视频会按帧数切分并串行处理，单任务最长 12 小时；提交时会检查可用磁盘空间。视频暂不接受可变帧率输入。
+
+```bash
+VIDEO_JSON=$(curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
+  -F 'file=@./source.mp4' \
+  "$BRM_API/files?kind=video")
+VIDEO_ASSET_ID=$(printf '%s' "$VIDEO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["asset_id"])')
+
+curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d "{\"workflow\":\"seedvr2-enhance\",\"params\":{\"mode\":\"video\",\"model_variant\":\"3b\",\"video_asset_id\":\"$VIDEO_ASSET_ID\",\"resolution_preset\":\"1080p\",\"strength\":\"standard\"}}" \
+  "$BRM_API/tasks"
+```
+
+图片任务只需把模式和素材字段替换为 `"mode":"image"` 与 `"image_asset_id":"…"`。修复强度分别映射为工作流去噪值 `0.6`、`0.8` 和 `1.0`。`GET /capabilities` 会列出固定的 Hugging Face revision、两个模型文件名、当前是否已安装及资源上限。
 
 例如，图片编辑使用上传得到的引用：
 
@@ -337,7 +356,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 | API 格式 | `OpenAI Chat Completions 格式` |
 | 自定义请求地址 | `http://172.16.28.8/qwen-api/v1` |
 | 完整 URL | **关闭**；软件会自动追加 `/chat/completions` |
-| 模型 ID | `qwen38-27b-q4-k-m`（也可先请求 `/models`，以返回的 `data[0].id` 为准） |
+| 模型 ID | `qwen38-27b-ud-q4-k-m`（也可先请求 `/models`，以返回的 `data[0].id` 为准） |
 | 模型显示名称 | 可填 `Qwen3.8-27B`，仅用于界面显示 |
 | API 密钥 | 填管理员签发的 `brm_...` Bearer Key；不要填网页 Basic Auth 密码 |
 
@@ -345,17 +364,19 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 #### 能力边界与“image input is not supported”
 
-当前 `qwen38-27b-q4-k-m` 是 **纯文本 Qwen3.8-27B GGUF**，生产启动参数没有 `--mmproj`，因此只支持文本 `messages[].content`。不要在第三方软件中把它标记为视觉/多模态模型，也不要用带 `image_url` 的连接性测试；这类请求会由 llama.cpp 返回 HTTP 500：`image input is not supported - hint: if this is unexpected, you may need to provide the mmproj`。这不是地址、API Key 或 Clash 代理错误。
+当前 `qwen38-27b-ud-q4-k-m` 是 **纯文本 Unsloth Qwen3.8-27B GGUF**，生产启动参数没有 `--mmproj`，因此只支持文本 `messages[].content`。不要在第三方软件中把它标记为视觉/多模态模型，也不要用带 `image_url` 的连接性测试；这类请求会由 llama.cpp 返回 HTTP 500：`image input is not supported - hint: if this is unexpected, you may need to provide the mmproj`。这不是地址、API Key 或 Clash 代理错误。
 
 需要图片理解时，应使用本项目的 `/api/v1` 图片/媒体工作流，或单独部署与视觉 GGUF 配套的模型和 `mmproj`；不能给当前文本 GGUF 随意追加其他模型的 `mmproj`。如果客户端无法关闭视觉测试，请改用其“文本模型”类型或仅发送纯文本请求。
 
 当前该地址只对机房局域网（或已正确下发 `172.16.28.0/24` 路由的 VPN）开放，公网未开放；当前为 HTTP，不能直接暴露到互联网。外网接入需要另建 HTTPS 反向代理、独立域名/API Key、限流、来源控制和审计，不应把 `172.16.28.8` 直接做公网端口映射。
 
-当前生产 Qwen 服务的 `n_ctx` 为 `4096`。请求的系统提示、历史消息、工具定义和本轮输入会共同计入该额度；即使用户只输入几个字，IDE/Agent 自动注入的项目上下文也可能使 `n_prompt_tokens` 达到数万，服务会返回 `400 exceed_context_size_error`。客户端填写更大的“上下文窗口”不会改变服务端上限，也不会自动截断请求。遇到该错误应先新建空白会话并关闭项目/工具上下文；需要长上下文时必须单独部署并验收更大 `--ctx-size` 的模型服务。
+当前生产 Qwen 服务的 `n_ctx` 为 `140288`，使用 q8_0 K/V cache、单并发，已通过约 `129,504` 输入 token + `4096` 最大输出 token 的长上下文验收。请求的系统提示、历史消息、工具定义和本轮输入会共同计入该额度；超过上限仍会返回 `400 exceed_context_size_error`。客户端填写更大的“上下文窗口”不会改变服务端上限，也不会自动截断请求；长请求仍应关闭不必要的项目/工具上下文并控制实际 token 数。
 
-容量估算：上下文从 4K 提升到 32K 时，KV Cache 近似按 8 倍增长；当前双 A4000 的实时余量不适合直接在生产切换。按默认 `f16` KV Cache，32K 预计至少需要 3 张 16GB 级 GPU 才有可靠余量；两张卡只有在使用 `q8_0` KV Cache、单并发且降低其他显存占用时才可能勉强运行，必须做停机灰度验证。最近一次 TRAE 请求为 `35366` tokens，32K 本身仍不够，目标应至少为 48K，稳妥建议 64K。
+容量估算（历史参考）：上下文从 4K 提升到 32K 时，KV Cache 近似按 8 倍增长；在当前双 A4000 配置上，已通过 q8_0 K/V cache 的 140288 上下文灰度，但长测时 GPU1 峰值约 `15.7/16 GiB`，余量很小。不要直接提高并发或继续扩大上下文；任何参数调整必须先做独立灰度和回滚准备。此前 `35366` token 的请求说明 32K 仍不足，目标应至少为 48K，稳妥建议 64K。
 
 主机内存不能等价替代显存。当前 WSL 实际识别约 `94.2 GiB`（可用约 `82.9 GiB`），llama.cpp 可用 `--no-kv-offload` 将 KV Cache 留在主机内存；按默认 `f16` 估算，32K 约需 8 GiB、64K 约需 16 GiB，容量足够但会显著降低生成速度并增加 PCIe 往返。该方式只建议作为单并发灰度/应急回退，生产优先使用 GPU KV Cache 或增加显存。
+
+若测试目标是 **输入 128K + 输出 4K**，当前生产已采用 `--ctx-size 140288`（为模板和控制标记留出余量），GGUF 元数据训练上下文为 `262144`。按当前 Qwen3.8-27B 的 KV 维度粗估，f16 KV Cache 约需 `33–34 GiB`，q8_0 约需 `17 GiB`；实际长测已通过，但双 A4000 显存余量偏紧，保持单并发。
 
 ```bash
 export BRM_QWEN_BASE='http://172.16.28.8/qwen-api/v1'
@@ -369,7 +390,7 @@ curl --fail -H "Authorization: Bearer $BRM_QWEN_API_KEY" \
 
 ### 兼容入口：局域网 Basic Auth
 
-Qwen 与媒体生成队列独立，入口为 `http://172.16.28.8/qwen/v1`。当前生产模型是 **Qwen3.8-27B / Q4_K_M GGUF**，服务 ID 为 `qwen38-27b-q4-k-m`，由两张 A4000 以 layer split 运行；上下文上限为 4096，当前单并发。这些属于当前运行快照，调用时始终以 `/models` 返回为准。
+Qwen 与媒体生成队列独立，入口为 `http://172.16.28.8/qwen/v1`。当前生产模型是 **Unsloth Qwen3.8-27B / UD-Q4_K_M GGUF**，服务 ID 为 `qwen38-27b-ud-q4-k-m`，由两张 A4000 以 layer split 运行；生产上下文为 140288，K/V cache 为 q8_0，当前单并发。这些属于当前运行快照，调用时始终以 `/models` 返回为准。
 
 ### 模型发现
 
@@ -384,7 +405,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 {
   "object": "list",
   "data": [{
-    "id": "qwen38-27b-q4-k-m",
+    "id": "qwen38-27b-ud-q4-k-m",
     "object": "model",
     "owned_by": "llamacpp"
   }]
@@ -461,7 +482,7 @@ response = requests.post(
     "http://172.16.28.8/qwen/v1/chat/completions",
     auth=(os.environ["BRM_USER"], os.environ["BRM_PASSWORD"]),
     json={
-        "model": "qwen38-27b-q4-k-m",
+        "model": "qwen38-27b-ud-q4-k-m",
         "messages": [{"role": "user", "content": "请列出三个项目风险。"}],
         "stream": True,
         "max_tokens": 512,

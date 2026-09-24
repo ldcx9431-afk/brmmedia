@@ -16,6 +16,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,10 @@ H3_ACCEPTANCE = ROOT / "accept_minimax_h3_video.sh"
 
 def _load_lan_api():
     """Load the normalizers without FastAPI/ComfyUI production dependencies."""
+    module_names = ("requests", "fastapi", "fastapi.responses", "pydantic", "comfyui_server")
+    previous_modules = {name: sys.modules.get(name) for name in module_names}
+    if str(LAN_API.parent) not in sys.path:
+        sys.path.insert(0, str(LAN_API.parent))
     requests = types.ModuleType("requests")
 
     class RequestException(Exception):
@@ -88,6 +93,7 @@ def _load_lan_api():
 
     comfy = types.ModuleType("comfyui_server")
     comfy.BASE = "http://127.0.0.1:8188"
+    comfy.COMFY_ROOT = ROOT / "ubuntu-backend-deploy" / "ComfyUI"
     comfy.audio_duration = lambda *args, **kwargs: 0.0
     comfy.upload_image = lambda *args, **kwargs: "mock-input"
     sys.modules["comfyui_server"] = comfy
@@ -96,7 +102,14 @@ def _load_lan_api():
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in previous_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module
 
 
@@ -146,6 +159,7 @@ class LanApiContractTests(unittest.TestCase):
         service = SERVICE.read_text(encoding="utf-8")
         self.assertIn("location /api/", nginx)
         self.assertIn("proxy_pass http://127.0.0.1:9100", nginx)
+        self.assertIn("client_max_body_size 2100M", nginx)
         self.assertIn("location /comfyui/", nginx)
         self.assertIn("proxy_pass http://127.0.0.1:8188/", nginx)
         self.assertIn('proxy_set_header Upgrade $http_upgrade', nginx)
@@ -252,6 +266,80 @@ class LanApiContractTests(unittest.TestCase):
         self.assertIn("params", text_video["options"])
         self.assertIn("ltx-text-to-video", capabilities["workflows"])
         self.assertIn("ltx-image-to-video", capabilities["workflows"])
+
+    def test_seedvr2_capabilities_publish_modes_upload_limit_and_safe_defaults(self) -> None:
+        capabilities = self.api.capabilities()
+        workflow = capabilities["workflows"]["seedvr2-enhance"]
+        options = workflow["options"]
+        params = options["params"]
+        self.assertEqual(options["engine"], "SeedVR2 INT8")
+        self.assertEqual(options["default_model_variant"], "7b")
+        self.assertEqual(options["models"]["7b"]["filename"], "seedvr2_7b_int8_convrot.safetensors")
+        self.assertEqual(options["models"]["3b"]["filename"], "seedvr2_3b_int8_convrot.safetensors")
+        self.assertEqual(options["models"]["3b"]["role"], "快速模式")
+        self.assertEqual(params["mode"]["enum"], ["image", "video"])
+        self.assertEqual(params["model_variant"]["default"], "7b")
+        self.assertEqual(params["model_variant"]["enum"], ["7b", "3b"])
+        self.assertEqual(params["scale"]["enum"], [1, 2])
+        self.assertEqual(params["resolution_preset"]["enum"], ["native", "720p", "1080p"])
+        self.assertEqual(params["resolution_preset"]["planned"], ["4k"])
+        self.assertEqual(params["strength"]["denoise"], {
+            "light": 0.6, "standard": 0.8, "strong": 1.0,
+        })
+        self.assertEqual(capabilities["max_upload_bytes_by_kind"]["video"], 2 * 1024**3)
+        self.assertEqual(options["max_task_seconds"], 12 * 60 * 60)
+
+    def test_seedvr2_rejects_missing_or_wrong_kind_asset(self) -> None:
+        with self.assertRaises(self.api.HTTPException) as missing:
+            self.api._normal_seedvr2_enhance({"mode": "image"}, {})
+        self.assertEqual(missing.exception.status_code, 422)
+
+        audio = self.api.AssetRecord(
+            asset_id="a" * 32, kind="audio", filename="source.wav",
+            source_filename="source.wav", size_bytes=1, sha256="b" * 64, created_at=0,
+        )
+        with self.assertRaises(self.api.HTTPException) as mismatch:
+            self.api._normal_seedvr2_enhance(
+                {"mode": "video", "video_asset_id": audio.asset_id}, {audio.asset_id: audio},
+            )
+        self.assertEqual(mismatch.exception.status_code, 422)
+
+        with self.assertRaises(self.api.HTTPException) as unsupported_model:
+            self.api._normal_seedvr2_enhance({"model_variant": "1b"}, {})
+        self.assertEqual(unsupported_model.exception.status_code, 422)
+        self.assertIn("model_variant", unsupported_model.exception.detail)
+
+        with self.assertRaises(self.api.HTTPException) as four_k:
+            self.api._normal_seedvr2_enhance({"mode": "video", "resolution_preset": "4k"}, {})
+        self.assertEqual(four_k.exception.status_code, 422)
+        self.assertIn("暂未开放", four_k.exception.detail)
+
+    def test_seedvr2_video_preset_reaches_workbench_arguments(self) -> None:
+        video = self.api.AssetRecord(
+            asset_id="c" * 32, kind="video", filename="sample.MP4",
+            source_filename="sample.MP4", size_bytes=1024, sha256="d" * 64, created_at=0,
+        )
+        fake_path = Path("/tmp/sample.MP4")
+        info = {
+            "width": 1280, "height": 720, "duration": 10,
+            "fps": 24, "frame_count": 240,
+        }
+        with patch.object(self.api, "resolve_comfy_input", return_value=fake_path), patch.object(
+            self.api, "probe_video", return_value=info,
+        ), patch.object(self.api, "validate_video_info"), patch.object(
+            self.api, "video_output_dimensions", return_value=(1920, 1080, 1.5),
+        ), patch.object(self.api, "estimated_video_workspace_bytes", return_value=1), patch.object(
+            self.api, "available_disk_bytes", return_value=1024**4,
+        ):
+            arguments = self.api._normal_seedvr2_enhance(
+                {
+                    "mode": "video", "video_asset_id": video.asset_id,
+                    "resolution_preset": "1080p",
+                    "model_variant": "3b",
+                },
+                {video.asset_id: video},
+            )
+        self.assertEqual(arguments, ["video", "", "sample.MP4", 2, "standard", "1080p", "3b"])
 
     def test_h3_acceptance_follows_task_artifact_contract(self) -> None:
         text = H3_ACCEPTANCE.read_text(encoding="utf-8")

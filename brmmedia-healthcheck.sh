@@ -61,8 +61,8 @@ fi
 qwen_model="${QWEN_ACTIVE_MODEL:-qwen35-4b-awq}"
 qwen_port="${QWEN_ACTIVE_PORT:-8000}"
 qwen_upstream="${QWEN_ACTIVE_UPSTREAM:-http://127.0.0.1:8000/}"
-if [ "$qwen_model" = "qwen38-27b-ud-q4-xl" ]; then
-  qwen_service="windows-qwen38-task"
+if [[ "$qwen_model" == qwen38-27b-* ]]; then
+  qwen_service="${QWEN_ACTIVE_SERVICE:-qwen38-llama}"
   mode="a5000-media-dual-a4000-qwen38"
 else
   qwen_service="qwen-vllm"

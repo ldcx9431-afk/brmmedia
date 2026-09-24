@@ -78,7 +78,7 @@ ComfyUI 全部媒体流程使用 GPU0（RTX A5000）。Qwen 的内部启动方�
 方案切换为独立 llama.cpp 服务，业务调用统一使用 Nginx 的 `/qwen/v1` 入口。
 
 ```text
-QWEN_MODEL=qwen38-27b-q4-k-m
+QWEN_MODEL=qwen38-27b-ud-q4-k-m
 QWEN_BASE_URL=http://172.16.28.8/qwen/v1
 QWEN_CONTEXT_SIZE=4096
 QWEN_MAX_CONCURRENCY=1

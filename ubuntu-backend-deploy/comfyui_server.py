@@ -403,14 +403,19 @@ def wait_for_outputs(
     raise TimeoutError(f"Timed out waiting for ComfyUI task ({timeout}s); {result.summary()}")
 
 
-def upload_image(filepath, subfolder: str = "", overwrite: bool = False) -> str:
+def upload_image(
+    filepath, subfolder: str = "", overwrite: bool = False, timeout: int = 60
+) -> str:
     # ComfyUI uses /upload/image for image-like and many audio input nodes.
     with open(filepath, "rb") as f:
         files = {"image": (Path(filepath).name, f, "application/octet-stream")}
         data = {"type": "input", "overwrite": str(overwrite).lower()}
         if subfolder:
             data["subfolder"] = subfolder
-        r = requests.post(f"{BASE}/upload/image", files=files, data=data, timeout=60)
+        r = requests.post(
+            f"{BASE}/upload/image", files=files, data=data,
+            timeout=max(60, int(timeout or 60)),
+        )
     r.raise_for_status()
     info = r.json()
     return f"{info['subfolder']}/{info['name']}" if info.get("subfolder") else info["name"]

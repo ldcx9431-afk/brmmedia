@@ -12,7 +12,7 @@ if [ "$target" = qwen38 ]; then
   host_gateway="$(awk '/^nameserver / {print $2; exit}' /etc/resolv.conf)"
   [ -n "$host_gateway" ] || { echo "Windows WSL gateway is unavailable" >&2; exit 1; }
   upstream="http://$host_gateway:8001/"
-  model=qwen38-27b-ud-q4-xl
+  model=qwen38-27b-ud-q4-k-m
   backend_api="http://$host_gateway:8001/v1"
 else
   upstream=http://127.0.0.1:8000/
