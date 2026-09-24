@@ -60,3 +60,12 @@ $COMFYUI_ROOT/models/vae/ema_vae_fp16.safetensors
 - 256×256 合成短视频经 2×输出为 512×512、1 fps、5 帧、5 秒 H.264 MP4；带音轨样例保留 5 秒 AAC 原音轨，无音轨样例输出不含音轨的 MP4。三段产物均由 `ffprobe` 验证可解码。
 - 246 秒、246 帧无音轨样例识别为 2 段并串行成功，输出为 512×512、1 fps、246 帧、246 秒 H.264 MP4；处理约 62 秒。A5000 峰值显存占用约 18,063 MiB / 24,564 MiB，任务后回落至约 9.4 GiB；Qwen 所在 GPU 未参与 SeedVR2 推理，Qwen `/qwen/v1/models` 检查仍为 HTTP 200。
 - 这轮样例验证了任务闭环、音轨处理、分段合并与资源行为；画质表现仍需用业务真实图片/视频由使用者确认。测试输入、生成产物与临时验收文件在验收后清理，模型权重和部署回滚备份保留。
+
+## 生产增补记录（2026-09-25）：3B 快速模式上线
+
+- 已在生产 `$COMFYUI_ROOT=/srv/brmmedia/ComfyUI-h3-v032-canary` 单独安装 `seedvr2_3b_int8_convrot.safetensors`（3,458,259,704 bytes），SHA-256 为 `c3dec8bcc5916843a8a858572970597462e1f2dc598d6dfd818f6cd40f53a157`。原 7B (`5aa0d25fc9d35e449b659d0c9a5dcb22e2a4fa04032101b95a39da42b32c1be6`) 和共享 VAE (`20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1`) 校验值未变，3B 没有覆盖或删除它们。
+- 发布代码到当前活动 release `/srv/brmmedia/releases/h3-23d7084/ubuntu-backend-deploy`，包括 `webui.py`、`lan_api.py`、`comfyui_server.py`、`seedvr2_support.py`；发布前备份位于 `/srv/brmmedia/releases/h3-23d7084/runtime-locks/seedvr2-3b-f17a8b5-20260925`。服务端 Python 编译检查通过。Nginx 当前已配置 2100M multipart 上限及 API 2G 限制，因此未改动或 reload Nginx。
+- 在等待原有 SeedVR2 视频任务完成、确认 ComfyUI 队列为空后，依次重启 `baorong-backend` 与 `brmmedia-lan-api`；未升级 ComfyUI、未安装自定义节点、未重启 Qwen。重启后两个服务、Nginx 与 Qwen 均 active，工作台、ComfyUI、LAN API health 均 HTTP 200。
+- `/api/v1/capabilities` 现报告 7B 与 3B 均可用，默认模型仍为 7B；3B 权重 SHA 与上表一致。工作台配置包含“媒体处理”和“3B 快速模式”。经 Nginx Basic Auth 保护的 `172.16.28.8` 入口验证主页、health 和 capabilities 均 HTTP 200。
+- 已通过生产 LAN API 对 256×256 合成图片完成 3B 冒烟任务（`scale=1`、`strength=light`），任务状态为 `completed`；结果为可解码的 256×256 PNG（122,532 bytes），任务 effective settings 确认为 `SeedVR2 3B INT8 / model_variant=3b`。验收后 ComfyUI 队列为空，Qwen `/v1/models` 仍 HTTP 200。
+- 本地发布提交为 `f17a8b5`；GitHub 推送当时因当前账号无仓库写权限而返回 HTTP 403，需恢复远端写入权限后再推送。生产代码及模型已部署，但 GitHub 分支尚未包含此提交。
