@@ -1,0 +1,13 @@
+[Unit]
+Description=Verify imported BRMMedia ComfyUI models against D drive source
+After=baorong-model-import.service
+Requires=baorong-model-import.service
+
+[Service]
+Type=oneshot
+User=brm
+WorkingDirectory=/srv/brmmedia/app
+ExecStart=/mnt/d/brmmedia/source/verify_comfy_models.sh
+
+[Install]
+WantedBy=multi-user.target

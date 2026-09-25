@@ -1,0 +1,17 @@
+[Unit]
+Description=BRMMedia LAN REST automation API
+After=network-online.target baorong-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/baorongwanxiang/ubuntu-backend-deploy
+ExecStart=/opt/baorongwanxiang/ubuntu-backend-deploy/.venv/bin/python -m uvicorn lan_api:app --host 127.0.0.1 --port 9100 --proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

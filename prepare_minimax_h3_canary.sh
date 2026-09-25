@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# Prepare an isolated ComfyUI + Gradio configuration for H3 burn-in.  It is
+# intentionally separate from the production LTX checkout so completion of
+# the expensive H3 acceptance suite is a prerequisite for production cutover.
+set -euo pipefail
+
+APP_ROOT="${BRMMEDIA_APP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+BACKEND_DIR="$APP_ROOT/ubuntu-backend-deploy"
+BACKEND_ENV="$BACKEND_DIR/.env"
+SERVICE_USER="${BRMMEDIA_SERVICE_USER:-brm}"
+CANARY_COMFY_ROOT="${BRMMEDIA_H3_CANARY_COMFY_ROOT:-/srv/brmmedia/ComfyUI-h3-v032-canary}"
+CANARY_ENV="${BRMMEDIA_H3_CANARY_ENV:-$APP_ROOT/runtime-locks/h3-v032-canary.env}"
+RUNTIME_LOCK="${BRMMEDIA_H3_RUNTIME_LOCK:-$APP_ROOT/runtime-locks/h3-comfyui-v0.32.0.env}"
+CANARY_OUTPUT_DIR="$BACKEND_DIR/outputs-h3-canary"
+CANARY_WORKFLOW_DIR="$APP_ROOT/runtime-locks/h3-canary-workflows"
+# The staged H3 runtime normally links .venv to the active release to retain
+# normal-service dependencies.  A canary must not mutate that shared venv when
+# ComfyUI installs the H3 requirements, so it always receives a physical copy.
+CANARY_VENV="${BRMMEDIA_H3_CANARY_VENV:-$APP_ROOT/runtime-locks/venvs/h3-v032-canary}"
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "[ERROR] Run with sudo: sudo $0" >&2
+  exit 1
+fi
+if [ ! -f "$BACKEND_ENV" ] || [ ! -x "$BACKEND_DIR/start_backend.sh" ]; then
+  echo "[ERROR] Candidate runtime is incomplete: $APP_ROOT" >&2
+  exit 1
+fi
+if [ ! -f "$RUNTIME_LOCK" ]; then
+  echo "[ERROR] Reviewed ComfyUI v0.32 runtime lock is missing: $RUNTIME_LOCK" >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$RUNTIME_LOCK"
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  echo "[ERROR] Linux service user does not exist: $SERVICE_USER" >&2
+  exit 1
+fi
+if systemctl is-active --quiet baorong-backend || systemctl is-active --quiet baorong-backend-h3-canary; then
+  echo "[ERROR] Drain and stop the production backend before preparing the A5000 H3 canary." >&2
+  exit 1
+fi
+
+dotenv_value() {
+  sed -n "s/^$1=//p" "$BACKEND_ENV" | tail -n1 | sed -e 's/^"//' -e 's/"$//'
+}
+set_dotenv_value() {
+  local key="$1" value="$2" escaped
+  escaped="$(printf '%s' "$value" | sed 's/[&|]/\\&/g')"
+  if grep -q "^$key=" "$CANARY_ENV"; then
+    sed -i "s|^$key=.*|$key=$escaped|" "$CANARY_ENV"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$CANARY_ENV"
+  fi
+}
+
+PRODUCTION_COMFY_ROOT="$(dotenv_value COMFYUI_ROOT)"
+PRODUCTION_COMFY_ROOT="${PRODUCTION_COMFY_ROOT:-/srv/brmmedia/ComfyUI}"
+PRODUCTION_PYTHON="$(dotenv_value COMFYUI_PYTHON)"
+PRODUCTION_PYTHON="${PRODUCTION_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
+if [ ! -d "$PRODUCTION_COMFY_ROOT/.git" ] || [ ! -x "$PRODUCTION_PYTHON" ]; then
+  echo "[ERROR] Production ComfyUI source or candidate Python is unavailable." >&2
+  exit 1
+fi
+PRODUCTION_VENV="$(cd "$(dirname "$PRODUCTION_PYTHON")/.." && pwd -P)"
+CANARY_VENV_PARENT="$(dirname "$CANARY_VENV")"
+if [ "$(realpath -m "$CANARY_VENV")" = "$PRODUCTION_VENV" ]; then
+  echo "[ERROR] H3 canary venv must not point at the production venv: $PRODUCTION_VENV" >&2
+  exit 1
+fi
+
+prepare_isolated_venv() {
+  if [ -e "$CANARY_VENV" ]; then
+    if [ -L "$CANARY_VENV" ] || [ ! -x "$CANARY_VENV/bin/python" ]; then
+      echo "[ERROR] Existing H3 canary venv is unsafe or incomplete: $CANARY_VENV" >&2
+      echo "        It must be a physical, complete venv; preserve/remove it explicitly before retrying." >&2
+      return 1
+    fi
+    echo "[INFO] Reusing isolated H3 canary venv: $CANARY_VENV"
+    return 0
+  fi
+
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$CANARY_VENV_PARENT"
+  local source_kib available_kib staging
+  source_kib="$(du -sk "$PRODUCTION_VENV" | awk '{print $1}')"
+  available_kib="$(df -Pk "$CANARY_VENV_PARENT" | awk 'NR == 2 {print $4}')"
+  # Keep one GiB headroom for pip's temporary files while the H3 dependency
+  # installation changes the clone.  Do not start a copy likely to exhaust E:.
+  if [ -z "$source_kib" ] || [ -z "$available_kib" ] || [ "$available_kib" -lt $((source_kib + 1048576)) ]; then
+    echo "[ERROR] Insufficient free space for an isolated H3 canary venv (need $((source_kib + 1048576)) KiB; have ${available_kib:-0} KiB)." >&2
+    return 1
+  fi
+  staging="${CANARY_VENV}.new.$$"
+  if [ -e "$staging" ]; then
+    echo "[ERROR] Refusing to reuse a stale canary venv staging path: $staging" >&2
+    return 1
+  fi
+  echo "[INFO] Creating physical H3 canary venv from $PRODUCTION_VENV ..."
+  # --reflink=auto uses copy-on-write when E:'s filesystem supports it; unlike
+  # hard links it is safe for pip to replace or mutate files in the canary.
+  if ! cp -a --reflink=auto "$PRODUCTION_VENV" "$staging"; then
+    rm -rf "$staging"
+    echo "[ERROR] Could not create isolated H3 canary venv." >&2
+    return 1
+  fi
+  chown -R "$SERVICE_USER:$SERVICE_USER" "$staging"
+  {
+    printf 'source_venv=%s\n' "$PRODUCTION_VENV"
+    printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
+    "$PRODUCTION_PYTHON" -m pip freeze
+  } > "$staging/.brm-canary-venv-source.txt"
+  mv "$staging" "$CANARY_VENV"
+  echo "[OK] Isolated H3 canary venv created: $CANARY_VENV"
+}
+
+prepare_isolated_venv
+CANARY_PYTHON="$CANARY_VENV/bin/python"
+# The production checkout is provisioned by root while this preparer runs as
+# the service user.  Make the one, fully-resolved checkout an explicit safe
+# directory rather than weakening Git's ownership protection globally.
+if [ -n "$(git -c safe.directory="$PRODUCTION_COMFY_ROOT" -C "$PRODUCTION_COMFY_ROOT" status --porcelain)" ]; then
+  echo "[ERROR] Production ComfyUI has local changes; preserve them before creating a reproducible canary." >&2
+  exit 1
+fi
+PRODUCTION_COMFY_ORIGIN="$(git -c safe.directory="$PRODUCTION_COMFY_ROOT" -C "$PRODUCTION_COMFY_ROOT" remote get-url origin 2>/dev/null || true)"
+if [ -z "$PRODUCTION_COMFY_ORIGIN" ]; then
+  echo "[ERROR] Production ComfyUI has no origin remote for the pinned H3 revision." >&2
+  exit 1
+fi
+
+if [ ! -e "$CANARY_COMFY_ROOT" ]; then
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_COMFY_ROOT")"
+  runuser -u "$SERVICE_USER" -- git clone --shared "$PRODUCTION_COMFY_ROOT" "$CANARY_COMFY_ROOT"
+elif [ ! -d "$CANARY_COMFY_ROOT/.git" ]; then
+  echo "[ERROR] Existing canary path is not a Git checkout: $CANARY_COMFY_ROOT" >&2
+  exit 1
+fi
+# `git clone <local-path>` would otherwise make the canary's origin point at
+# the mutable production working tree.  The pinned H3 preparer must fetch the
+# same upstream revision as production, not trust a local branch ref.
+runuser -u "$SERVICE_USER" -- git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" remote set-url origin "$PRODUCTION_COMFY_ORIGIN"
+
+# Reuse immutable weights instead of duplicating the 42+ GB model store.
+# A new ComfyUI clone normally has no model directory.  Refuse to replace a
+# populated non-link directory so this script cannot discard operator data.
+if [ -e "$CANARY_COMFY_ROOT/models" ] && [ ! -L "$CANARY_COMFY_ROOT/models" ]; then
+  # A pristine ComfyUI checkout includes Git-tracked placeholder files under
+  # models/.  They are safe to replace with the shared E: model store; any
+  # untracked entry would be operator data, so keep refusing in that case.
+  untracked_models="$(git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" \
+    ls-files --others --exclude-standard -- models)"
+  if [ -n "$untracked_models" ]; then
+    echo "[ERROR] Canary model directory contains untracked data and is not a shared-model symlink: $CANARY_COMFY_ROOT/models" >&2
+    printf '%s\n' "$untracked_models" >&2
+    exit 1
+  fi
+  rm -rf "$CANARY_COMFY_ROOT/models"
+fi
+if [ ! -e "$CANARY_COMFY_ROOT/models" ]; then
+  ln -s "$PRODUCTION_COMFY_ROOT/models" "$CANARY_COMFY_ROOT/models"
+fi
+if [ -d "$PRODUCTION_COMFY_ROOT/custom_nodes" ]; then
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$CANARY_COMFY_ROOT/custom_nodes"
+  rsync -a --delete "$PRODUCTION_COMFY_ROOT/custom_nodes/" "$CANARY_COMFY_ROOT/custom_nodes/"
+fi
+for config in extra_model_paths.yaml extra_model_paths.yaml.example; do
+  if [ -f "$PRODUCTION_COMFY_ROOT/$config" ]; then
+    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0644 "$PRODUCTION_COMFY_ROOT/$config" "$CANARY_COMFY_ROOT/$config"
+  fi
+done
+
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$(dirname "$CANARY_ENV")" "$CANARY_OUTPUT_DIR" "$CANARY_WORKFLOW_DIR"
+# Keep the canary's workflow graph private.  In particular this snapshot
+# contains the H3-only Sage Attention node, while production continues using
+# the already accepted workflow files until the benchmark gate passes.
+runuser -u "$SERVICE_USER" -- rsync -a --delete "$BACKEND_DIR/workflows/" "$CANARY_WORKFLOW_DIR/"
+install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0600 "$BACKEND_ENV" "$CANARY_ENV"
+set_dotenv_value COMFYUI_ROOT "$CANARY_COMFY_ROOT"
+set_dotenv_value COMFYUI_PYTHON "$CANARY_PYTHON"
+set_dotenv_value BRMMEDIA_BACKEND_VENV "$CANARY_VENV"
+set_dotenv_value COMFYUI_PORT 8189
+set_dotenv_value BRM_GRADIO_HOST 127.0.0.1
+set_dotenv_value BRM_GRADIO_PORT 9001
+set_dotenv_value BRMMEDIA_VIDEO_ENGINE h3
+set_dotenv_value BRM_OUTPUT_DIR "$CANARY_OUTPUT_DIR"
+set_dotenv_value BRMMEDIA_WORKFLOW_DIR "$CANARY_WORKFLOW_DIR"
+set_dotenv_value BRMMEDIA_H3_CANARY_ROOT "$CANARY_COMFY_ROOT"
+set_dotenv_value BRMMEDIA_H3_COMFYUI_VERSION "$BRMMEDIA_H3_COMFYUI_VERSION"
+set_dotenv_value BRMMEDIA_H3_COMFYUI_REF "$BRMMEDIA_H3_COMFYUI_REF"
+set_dotenv_value BRMMEDIA_H3_AB_ATTENTION workflow-sage
+set_dotenv_value BRMMEDIA_H3_AB_FAST_DISK off
+set_dotenv_value BRMMEDIA_H3_AB_CACHE default
+set_dotenv_value BRMMEDIA_H3_AB_CELL workflow-sage-fastdisk_off-cache_default
+set_dotenv_value COMFYUI_ARGS ""
+
+echo "[1/2] Verifying imported H3 components through the shared E: model store..."
+# `wait_import_minimax_h3_models.sh` has already content-verified the complete
+# model store after its D: -> E: import.  Re-comparing every legacy model here
+# would make a canary wait on unrelated multi-GB assets.  Check the exact four
+# H3 components here; the subsequent live workflow gate and generation suite
+# exercise their actual loading and inference paths.
+declare -A h3_sizes=(
+  ["diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"]=20970379616
+  ["text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]=15687142551
+  ["vae/minimax_h3_video_vae_fp16.safetensors"]=5207808496
+  ["vae/minimax_h3_audio_vae_fp32.safetensors"]=605254808
+)
+for relative in "${!h3_sizes[@]}"; do
+  component="$CANARY_COMFY_ROOT/models/$relative"
+  actual_size="$(stat -c%s "$component" 2>/dev/null || true)"
+  if [ "$actual_size" != "${h3_sizes[$relative]}" ]; then
+    echo "[ERROR] H3 component is missing or has the wrong size: $relative ($actual_size/${h3_sizes[$relative]})" >&2
+    exit 1
+  fi
+done
+echo '[OK] Four H3 components are present in the shared E: model store.'
+
+echo '[gate] Verifying optional LightX2V Turbo LoRAs before exposing Turbo choices...'
+declare -A turbo_sha256=(
+  ["minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"]="2339acdf19bfe123f46b971ea35d367a84adb85de43627e1eceafa5a5b2b111e"
+  ["minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors"]="c396a9a06f58399e9df9754b18299818d84a2ddd371724ba48fe4a41221437dc"
+)
+for name in "${!turbo_sha256[@]}"; do
+  model="$CANARY_COMFY_ROOT/models/loras/$name"
+  if [ ! -f "$model" ]; then
+    echo "[ERROR] Reviewed LightX2V Turbo model is missing: $model" >&2
+    echo "        Run import_minimax_h3_turbo_models.sh after its pinned download verifies both files." >&2
+    exit 1
+  fi
+  actual_hash="$(sha256sum "$model" | awk '{print $1}')"
+  if [ "$actual_hash" != "${turbo_sha256[$name]}" ]; then
+    echo "[ERROR] LightX2V Turbo model checksum mismatch: $name" >&2
+    exit 1
+  fi
+done
+echo '[OK] Two pinned LightX2V Turbo LoRAs are present and content verified.'
+
+echo "[2/2] Preparing the pinned native-H3 ComfyUI canary checkout..."
+runuser -u "$SERVICE_USER" -- env COMFYUI_ROOT="$CANARY_COMFY_ROOT" \
+  COMFYUI_PYTHON="$CANARY_PYTHON" BRMMEDIA_BACKEND_VENV="$CANARY_VENV" \
+  BRMMEDIA_APP_ROOT="$APP_ROOT" BRMMEDIA_H3_COMFYUI_REF="$BRMMEDIA_H3_COMFYUI_REF" \
+  "$APP_ROOT/prepare_minimax_h3_comfyui.sh"
+
+actual_ref="$(git -c safe.directory="$CANARY_COMFY_ROOT" -C "$CANARY_COMFY_ROOT" rev-parse HEAD)"
+if [ "$actual_ref" != "$BRMMEDIA_H3_COMFYUI_REF" ]; then
+  echo "[ERROR] ComfyUI v0.32 canary commit drift: $actual_ref (expected $BRMMEDIA_H3_COMFYUI_REF)" >&2
+  exit 1
+fi
+actual_version="$(runuser -u "$SERVICE_USER" -- "$CANARY_PYTHON" - "$CANARY_COMFY_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from comfyui_version import __version__
+print(__version__)
+PY
+)"
+if [ "$actual_version" != "$BRMMEDIA_H3_COMFYUI_VERSION" ]; then
+  echo "[ERROR] ComfyUI candidate version drift: $actual_version (expected $BRMMEDIA_H3_COMFYUI_VERSION)" >&2
+  exit 1
+fi
+
+echo "[OK] H3 canary prepared. Start it with: sudo $APP_ROOT/start_minimax_h3_canary.sh"
+echo "     env=$CANARY_ENV comfy=$CANARY_COMFY_ROOT gradio=127.0.0.1:9001 api=127.0.0.1:9101"

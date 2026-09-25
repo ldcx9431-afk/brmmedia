@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VLLM_PIP_SPEC="${VLLM_PIP_SPEC:-vllm}"
+# vLLM 0.26.0 is the production-verified build for the Qwen3.5 4B profile.
+# Do not silently resolve the newest vLLM on a recovery server.
+VLLM_PIP_SPEC="${VLLM_PIP_SPEC:-vllm==0.26.0}"
+VLLM_EXTRA_INDEX_URL="${VLLM_EXTRA_INDEX_URL:-}"
 
 cd "$SCRIPT_DIR"
 
@@ -13,11 +16,27 @@ source .venv/bin/activate
 python -m pip install --upgrade pip wheel setuptools
 
 echo "[2/4] Installing vLLM..."
-python -m pip install "$VLLM_PIP_SPEC" "huggingface_hub[cli]" openai
+VLLM_INSTALL_ARGS=("$VLLM_PIP_SPEC" "huggingface_hub[cli]" openai)
+if [ "${VLLM_USE_UV:-false}" = "true" ]; then
+  python -m pip install uv
+  UV_ARGS=(pip install --python "$SCRIPT_DIR/.venv/bin/python" --torch-backend="${VLLM_TORCH_BACKEND:-auto}")
+  if [ -n "$VLLM_EXTRA_INDEX_URL" ]; then
+    # Nightly may temporarily omit x86_64 wheels.  Allow uv to fall back to
+    # PyPI's compatible build while still considering the nightly index.
+    UV_ARGS+=(--extra-index-url "$VLLM_EXTRA_INDEX_URL" --index-strategy unsafe-best-match)
+  fi
+  uv "${UV_ARGS[@]}" "${VLLM_INSTALL_ARGS[@]}"
+elif [ -n "$VLLM_EXTRA_INDEX_URL" ]; then
+  python -m pip install --extra-index-url "$VLLM_EXTRA_INDEX_URL" "${VLLM_INSTALL_ARGS[@]}"
+else
+  python -m pip install "${VLLM_INSTALL_ARGS[@]}"
+fi
 
 echo "[3/4] Preparing .env..."
 if [ ! -f .env ]; then
-  cp .env.example .env
+  # The current production profile separates Qwen (GPU1/A4000) from ComfyUI
+  # media jobs (GPU0/A5000).  Never recreate the obsolete GPU0/Qwen3.6 file.
+  cp .env.qwen35-4b.example .env
   sed -i "s#^HF_HOME=.*#HF_HOME=$SCRIPT_DIR/.cache/huggingface#" .env
 fi
 

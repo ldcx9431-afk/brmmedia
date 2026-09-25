@@ -21,10 +21,11 @@ nvidia-smi --query-gpu=name,persistence_mode,power.limit,power.draw,utilization.
 
 cat <<'EOF'
 
-Recommended high-performance runtime profile:
+Recommended MiniMax H3 runtime profile:
 
-  echo 'BRM_PERF_PROFILE=max' >> .env
-  echo 'COMFYUI_ARGS=--highvram' >> .env
+  # Keep the default dynamic-offload profile. Do not add --highvram or
+  # --gpu-only: H3 loads its Qwen3-VL encoder on demand on the A5000.
+  echo 'BRM_PERF_PROFILE=balanced' >> .env
 
 Notes:
 - This script intentionally avoids application clock locking by default because
