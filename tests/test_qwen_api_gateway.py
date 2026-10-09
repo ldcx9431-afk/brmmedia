@@ -113,6 +113,15 @@ class QwenApiGatewayTests(unittest.TestCase):
         self.gateway.ACTIVE_QWEN_ENV = Path(self.tempdir.name) / "missing.env"
         self.assertEqual(self.gateway._active_qwen_base(), "http://172.20.0.1:8001/v1")
 
+    def test_chat_payload_preserves_image_message_parts(self):
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "识别图片"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+        ]}]
+        prepared = json.loads(self.gateway._prepare_chat_payload(json.dumps({"messages": messages}).encode()))
+        self.assertEqual(prepared["messages"], messages)
+        self.assertFalse(prepared["chat_template_kwargs"]["enable_thinking"])
+
     def test_chat_payload_defaults_to_answer_only_for_compatibility(self):
         body = json.dumps({"model": "qwen", "messages": []}).encode()
         prepared = json.loads(self.gateway._prepare_chat_payload(body))

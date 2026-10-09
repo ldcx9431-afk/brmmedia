@@ -362,11 +362,28 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 如果软件启用了“完整 URL”，则应填写完整的 `http://172.16.28.8/qwen-api/v1/chat/completions`，不能再让软件追加路径。优先使用 `/qwen-api/v1`，旧 `/qwen/v1` 是网页/局域网兼容入口，认证方式为 HTTP Basic Auth，通常不能直接填入只有“API 密钥”一个字段的软件。
 
-#### 能力边界与“image input is not supported”
+#### 图片理解（2026-10-09 启用）
 
-当前 `qwen38-27b-ud-q4-k-m` 是 **纯文本 Unsloth Qwen3.8-27B GGUF**，生产启动参数没有 `--mmproj`，因此只支持文本 `messages[].content`。不要在第三方软件中把它标记为视觉/多模态模型，也不要用带 `image_url` 的连接性测试；这类请求会由 llama.cpp 返回 HTTP 500：`image input is not supported - hint: if this is unexpected, you may need to provide the mmproj`。这不是地址、API Key 或 Clash 代理错误。
+当前 `qwen38-27b-ud-q4-k-m` 已加载与主权重同一固定版本的 `mmproj-F16.gguf`，支持文本与图片理解。视觉编码使用 CPU，语言模型继续使用两张 A4000；服务保持 140288 上下文、q8_0 K/V cache 和单并发。每张图片的视觉 token 预算上限为 1024；大图会按模型预处理规则缩放，密集小字识别建议先裁剪关注区域。单张图片的颜色识别、OCR 与图片 SSE 流式回答已经过生产接口验收；多图和视频理解尚未验收。
 
-需要图片理解时，应使用本项目的 `/api/v1` 图片/媒体工作流，或单独部署与视觉 GGUF 配套的模型和 `mmproj`；不能给当前文本 GGUF 随意追加其他模型的 `mmproj`。如果客户端无法关闭视觉测试，请改用其“文本模型”类型或仅发送纯文本请求。
+业务软件继续使用原有 `/qwen-api/v1` Base URL、模型 ID 和 Bearer API Key，可开启视觉输入。图片理解使用 `/chat/completions` 的 `image_url` 消息部分，与 `/api/v1` 的图片生成/修复任务不同，不需要上传素材获得 `asset_id`。优先将 PNG/JPEG 以 Base64 data URL 内嵌，避免远程图片 URL 的网络、代理与访问权限问题。Nginx 请求体上限为 32 MiB，Base64 编码会增加约三分之一体积，请控制完整 JSON 请求大小。
+
+```json
+{
+  "model": "qwen38-27b-ud-q4-k-m",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "请识别图片中的文字"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,<图片Base64>"}}
+    ]
+  }],
+  "max_tokens": 1024,
+  "stream": true
+}
+```
+
+图片内容和历史消息共同占用上下文；保留原有文本请求格式也可正常使用。若再次出现 `image input is not supported`，应检查实际运行的 llama.cpp 是否加载了匹配组件，不要随意替换其他模型的 `mmproj`。工作台现有 Qwen 聊天页仍为文本输入；本次图片能力通过 OpenAI 兼容 API 和第三方软件提供。
 
 当前该地址只对机房局域网（或已正确下发 `172.16.28.0/24` 路由的 VPN）开放，公网未开放；当前为 HTTP，不能直接暴露到互联网。外网接入需要另建 HTTPS 反向代理、独立域名/API Key、限流、来源控制和审计，不应把 `172.16.28.8` 直接做公网端口映射。
 
@@ -414,7 +431,7 @@ curl --fail --user "$BRM_USER:$BRM_PASSWORD" \
 
 ### 非流式对话
 
-`POST /qwen/v1/chat/completions`。支持标准 `messages`、`temperature`、`max_tokens` 与 `stream` 字段；文本对话是本轮唯一承诺能力，不要提交视觉输入或工具调用字段。
+`POST /qwen/v1/chat/completions`。支持标准 `messages`、`temperature`、`max_tokens` 与 `stream` 字段；支持文本与上述 `image_url` 图片消息。工具调用未在本轮验收。
 
 ```bash
 QWEN_MODEL=$(curl --fail --user "$BRM_USER:$BRM_PASSWORD" \

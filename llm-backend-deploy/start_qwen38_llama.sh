@@ -27,6 +27,25 @@ export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 # current WSL/NVIDIA driver stack, while the validated default loads normally.
 unset GGML_CUDA_ENABLE_UNIFIED_MEMORY
 
+vision_args=()
+if [ -n "${QWEN38_MMPROJ:-}" ]; then
+  [ -r "$QWEN38_MMPROJ" ] || { echo "[ERROR] Qwen visual projector is missing or unreadable." >&2; exit 2; }
+  if [ -n "${QWEN38_MMPROJ_SHA256:-}" ]; then
+    printf '%s  %s\n' "$QWEN38_MMPROJ_SHA256" "$QWEN38_MMPROJ" | sha256sum --check --status || {
+      echo "[ERROR] Qwen visual projector checksum mismatch." >&2; exit 2;
+    }
+  fi
+  image_tokens="${QWEN38_IMAGE_MAX_TOKENS:-1024}"
+  case "$image_tokens" in ''|*[!0-9]*) echo "[ERROR] Image token budget must be a positive integer." >&2; exit 2;; esac
+  [ "$image_tokens" -gt 0 ] || { echo "[ERROR] Image token budget must be positive." >&2; exit 2; }
+  vision_args=(--mmproj "$QWEN38_MMPROJ" --image-max-tokens "$image_tokens")
+  case "${QWEN38_MMPROJ_OFFLOAD:-0}" in
+    0) vision_args+=(--no-mmproj-offload);;
+    1) vision_args+=(--mmproj-offload);;
+    *) echo "[ERROR] QWEN38_MMPROJ_OFFLOAD must be 0 or 1." >&2; exit 2;;
+  esac
+fi
+
 exec "$BIN" \
   --model "$MODEL" \
   --alias "${QWEN38_SERVED_MODEL_NAME:-qwen38-27b-ud-q4-k-m}" \
@@ -41,4 +60,5 @@ exec "$BIN" \
   --cache-type-k "${QWEN38_CACHE_TYPE_K:-q8_0}" \
   --cache-type-v "${QWEN38_CACHE_TYPE_V:-q8_0}" \
   --log-colors off \
-  --metrics
+  --metrics \
+  "${vision_args[@]}"
