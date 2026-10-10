@@ -225,6 +225,22 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn(audio_path.name, asset_html)
         self.assertNotIn('data-brm-section="audio"', asset_html)
 
+    def test_dashboard_previews_do_not_fetch_original_media_before_click(self):
+        for kind, suffix in (("video", ".mp4"), ("image", ".png")):
+            path = self.output_dir / ("preview-fixture" + suffix)
+            path.write_bytes(b"fixture")
+            task = self.webui.Task("preview", "预览任务", "image-edit", {})
+            task.result = [str(path)]
+            task.status = self.webui.TaskStatus.DONE
+            with patch.object(self.webui, "_cached_preview_url", return_value="/compact.jpg"):
+                library = self.webui._asset_card_html({"path": path, "task": task, "kind": kind})
+                cards = self.webui._render_task_cards([task], {})
+            for html in (library, cards):
+                self.assertNotIn("<video", html)
+                self.assertIn('src="/compact.jpg"', html)
+                self.assertNotIn('src="' + self.webui._media_url(path) + '"', html)
+            self.assertIn(self.webui._media_url(path), library)
+
     def test_completed_asset_bundle_uses_only_valid_output_files(self):
         image_path = self.output_dir / "bundle-image.png"
         image_path.write_bytes(b"image-fixture")

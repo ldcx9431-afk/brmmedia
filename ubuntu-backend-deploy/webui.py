@@ -4133,8 +4133,9 @@ def _cache_key(path: Path) -> str:
 
 
 def _thumbnail_path(path: Path, kind: str) -> Path:
-    ext = ".png"
-    return THUMB_CACHE_DIR / f"{_cache_key(path)}-{kind}{ext}"
+    # Version the compact cache so existing full-size PNG frames aren't reused.
+    ext = ".png" if kind == "audio" else ".jpg"
+    return THUMB_CACHE_DIR / f"{_cache_key(path)}-{kind}-compact-v2{ext}"
 
 
 def _schedule_thumbnail(path: Path, kind: str) -> Path | None:
@@ -4162,18 +4163,30 @@ def _thumbnail_worker() -> None:
             if not ffmpeg or not _completed_output_path(path):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            if kind == "video":
+            if kind in {"video", "image"}:
                 command = [
-                    ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-ss", "00:00:00.300",
-                    "-i", str(path), "-frames:v", "1", "-vf", "scale=640:-2", str(target),
+                    ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+                ]
+                if kind == "video":
+                    command += ["-ss", "00:00:00.000"]
+                command += [
+                    "-i", str(path), "-frames:v", "1", "-vf",
+                    "scale=480:320:force_original_aspect_ratio=decrease",
+                    "-q:v", "5", "-threads", "1",
                 ]
             else:
                 command = [
                     ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", str(path),
                     "-filter_complex", "showwavespic=s=640x240:colors=0xE94B4B",
-                    "-frames:v", "1", str(target),
+                    "-frames:v", "1", "-threads", "1",
                 ]
-            subprocess.run(command, check=False, timeout=75)
+            temporary = target.with_name(target.stem + ".partial" + target.suffix)
+            try:
+                result = subprocess.run(command + [str(temporary)], check=False, timeout=75)
+                if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size:
+                    temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
         except (OSError, subprocess.TimeoutExpired):
             pass
         finally:
@@ -4287,6 +4300,8 @@ def _asset_records(done: list[Task]) -> list[dict[str, object]]:
                 continue
             seen.add(path)
             records.append({"path": path, "task": task, "kind": _media_kind(path)})
+            if len(records) >= DONE_GALLERY_MAX:
+                return records
     return records[:DONE_GALLERY_MAX]
 
 
@@ -4302,11 +4317,14 @@ def _asset_card_html(record: dict[str, object]) -> str:
     date_text = _fmt_ts(task_ts)
     preview = ""
     if kind == "image":
-        preview = f'<img loading="lazy" src="{url}" alt="{filename}">'
+        thumbnail = _cached_preview_url(path, "image")
+        preview = (f'<img loading="lazy" decoding="async" src="{thumbnail}" alt="{filename}">'
+                   if thumbnail else '<div class="brm-task-no-preview">图片预览准备中</div>')
     elif kind == "video":
         poster = _cached_preview_url(path, "video")
-        poster_attr = f' poster="{poster}"' if poster else ""
-        preview = f'<video muted preload="metadata" playsinline src="{url}"{poster_attr}></video><span class="brm-play-mark">播放</span>'
+        preview = (f'<img loading="lazy" decoding="async" src="{poster}" alt="{filename} 首帧">'
+                   if poster else '<div class="brm-task-no-preview">视频预览准备中</div>')
+        preview += '<span class="brm-play-mark">播放</span>'
     else:
         waveform = _cached_preview_url(path, "audio")
         preview = (
@@ -4363,11 +4381,13 @@ def _render_task_cards(tasks: list[Task], pending_positions: dict[str, int]) -> 
             kind = _media_kind(artifact)
             url = _media_url(artifact)
             if kind == "image":
-                preview = f'<img loading="lazy" src="{url}" alt="{escape(artifact.name)}">'
+                thumbnail = _cached_preview_url(artifact, "image")
+                preview = (f'<img loading="lazy" decoding="async" src="{thumbnail}" alt="{escape(artifact.name)}">'
+                           if thumbnail else '<div class="brm-task-no-preview">图片预览准备中</div>')
             elif kind == "video":
                 poster = _cached_preview_url(artifact, "video")
-                poster_attr = f' poster="{poster}"' if poster else ""
-                preview = f'<video muted preload="metadata" src="{url}"{poster_attr}></video>'
+                preview = (f'<img loading="lazy" decoding="async" src="{poster}" alt="{escape(artifact.name)} 首帧">'
+                           if poster else '<div class="brm-task-no-preview">视频预览准备中</div>')
             else:
                 waveform = _cached_preview_url(artifact, "audio")
                 preview = f'<img loading="lazy" src="{waveform}" alt="{escape(artifact.name)} 波形">' if waveform else '<div class="brm-task-no-preview">音频产物</div>'
