@@ -1,0 +1,12 @@
+[Unit]
+Description=Run BRMMedia health check every two minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=brmmedia-healthcheck.service
+
+[Install]
+WantedBy=timers.target

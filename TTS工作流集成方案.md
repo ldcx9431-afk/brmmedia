@@ -1,5 +1,11 @@
 # TTS（文字转语音 / 语音克隆）工作流集成方案
 
+> **历史选型与 Windows 集成记录（2026-06）：不可用于当前 BRMMedia 服务器。**
+> IndexTTS2 已进入当前工作台，但服务器实际部署、模型位置、GPU 使用和 API 访问规则以
+> `WSL_TEST_DEPLOY.md`、`API接口文档.md` 与
+> `runtime-locks/production-profile-2026-08-03.md` 为准。本文的 Windows 便携版路径、
+> 旧端点与“自动公开 API”描述仅供追溯，不可直接执行。
+
 > 在 yzylauncher 现有架构上新增"文字转语音 + 声音克隆"能力。
 > 推荐模型：**IndexTTS2**（B站）｜ 推荐集成路线：**ComfyUI 原生节点**
 > 编写日期：2026-06-15

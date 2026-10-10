@@ -16,6 +16,7 @@ venv/
 ubuntu-backend-deploy/.cache/
 ubuntu-backend-deploy/logs/
 ubuntu-backend-deploy/outputs/
+validation/
 llm-backend-deploy/.venv/
 llm-backend-deploy/.cache/
 llm-backend-deploy/logs/
@@ -24,6 +25,17 @@ llm-backend-deploy/models/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Credentials and machine-local deployment state
+.env
+.env.*
+!.env*.example
+*.pem
+*.key
+id_*
+.htpasswd*
+secrets/
+artifacts/
 
 # Large installers and scratch files
 VC_redist.x64.exe

@@ -1,0 +1,14 @@
+[Unit]
+Description=Import BRM ComfyUI models from D drive into WSL runtime storage
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=brm
+WorkingDirectory=/srv/brmmedia/app
+# rsync --append-verify in this script resumes safely after a stop or reboot.
+ExecStart=/mnt/d/brmmedia/source/import_comfy_models.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
