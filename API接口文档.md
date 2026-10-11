@@ -1,6 +1,16 @@
 # BRMMedia 局域网 API
 
-> **更新日期：2026-08-19**
+## Qwen Image 2.1 非商业研究扩展（2026-10-11）
+
+启用研究运行时后，能力接口公布 `qwen-image21`，通过现有 `POST /api/v1/tasks` 提交；查询和素材下载沿用现有 REST 接口，取消使用工作台已有的中断操作（不新增 REST 取消接口）。该模型仅限非商业研究/评估，不是 Qwen LLM 的图片理解接口。
+
+```json
+{"workflow":"qwen-image21","params":{"prompt":"一只穿宇航服的橘猫","width":1024,"height":1024,"steps":40,"seed":42}}
+```
+
+首版仅文生图、单张输出；基础模型 INT8（非 Turbo），默认1024×1024/40步。尺寸必须为32倍数、边长256–1536px、总像素不超过1,048,576；步数1–40，种子0–2^63-1。与其他媒体任务共享单队列，不新增公开端口。实际启用状态以能力接口为准；生产验收及研究许可证说明见 `ubuntu-backend-deploy/QWEN_IMAGE21_PRODUCTION.md`。
+
+> **更新日期：2026-10-11**
 > **当前生产快照：** MiniMax H3 / IndexTTS-2.5 / ACE-Step 1.5 均通过单媒体队列使用 A5000；Qwen 使用 Unsloth `Qwen3.8-27B-UD-Q4_K_M`，通过两张 A4000 运行。本文件不包含任何密码、Token、内网绝对路径或模型文件路径。
 >
 > 推荐业务系统调用稳定 REST API v1；原有 Gradio API 仅保留给既有脚本与工作台调试。Qwen 则使用 OpenAI 兼容 API。不要把任何回环端口、ComfyUI 内部 API 或 Gradio 私有端点当成稳定集成接口。

@@ -42,6 +42,7 @@ from pathlib import Path
 from urllib.parse import quote
 import gradio as gr
 import requests
+import qwen_image21_support as qwen_image21
 
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
@@ -248,7 +249,7 @@ def config_int(name, default=1, min_value=1, max_value=4):
 # must never overlap another ComfyUI workflow on that GPU.  The regular LTX
 # mode keeps the existing user-configurable range, while H3 makes the queue a
 # deliberate single-worker queue rather than merely a UI recommendation.
-MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED else 4
+MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1" else 4
 QUEUE_CONCURRENCY = config_int(
     "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
 )
@@ -2629,6 +2630,20 @@ def submit_workflow_1(prompt, size, batch):
     return submit("image_z_image_turbo", {"prompt": prompt, "size": size, "batch": batch})
 
 
+def api_submit_qwen_image21(prompt: str, width: int = 1024, height: int = 1024, steps: int = 40, seed: int = 0) -> dict:
+    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") != "1":
+        raise gr.Error("Qwen Image 2.1 研究运行时尚未启用")
+    args = qwen_image21.validate(prompt, width, height, steps, seed)
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(qwen_image21.BASE + "/system_stats", timeout=5)
+            response.raise_for_status()
+    except requests.RequestException as exc:
+        raise gr.Error("Qwen Image 2.1 研究运行时暂不可用，请稍后重试") from exc
+    return submit(qwen_image21.WORKFLOW, args)
+
+
 def submit_workflow_2(prompt, input_filename):
     # 工作流 JSON 的文件名(不含 .json)
     if not prompt or not input_filename:
@@ -3381,6 +3396,7 @@ def build_seedvr2_workflow(workflow_name: str, args: dict) -> dict:
 # 工作流登记表:工作流名 -> 构建函数。新增工作流时,在这里登记一行即可。
 # ---------------------------------------------------------------------------
 WORKFLOW_BUILDERS = {
+    qwen_image21.WORKFLOW: (lambda name, args: qwen_image21.build_workflow(args), "Qwen Image 2.1 文生图"),
     "image_z_image_turbo": (build_workflow_1, "文生图"),
     "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图生图 FLUX.2-klein"),
     "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
@@ -3675,6 +3691,14 @@ def run_seedvr2_video_task(task: Task) -> list[str]:
 
 def process_task(task: Task) -> None:
     """一次完整执行:构建工作流 -> 提交并等待 -> 解析并保存结果。供任务队列调用。"""
+    if task.workflow_name == qwen_image21.WORKFLOW:
+        task.result = qwen_image21.run_task(
+            task, OUTPUT_DIR, BASE,
+            lambda event: task_queue.update_execution(task, event),
+        )
+        return
+    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1":
+        qwen_image21.release_idle(qwen_image21.BASE)
     if task.workflow_name == "SeedVR2-图像/视频增强修复":
         model_variant = task.args.get("model_variant", SEEDVR2_MODEL_DEFAULT)
         if not model_installed(COMFY_ROOT, model_variant):
@@ -3930,6 +3954,7 @@ STATUS_ICONS = {
 # 任务阶段来自 ComfyUI WebSocket、IndexTTS 服务与队列本身。中文化展示在
 # 前端完成，持久化仍使用稳定的机器可读 stage 值，避免影响 REST 查询和恢复。
 STAGE_LABELS = {
+    "qwen_image21_sampling": "Qwen Image 2.1 研究生图",
     "queued": "等待队列",
     "recovering": "正在重新附着任务",
     "building_workflow": "正在构建工作流",
@@ -4714,7 +4739,7 @@ def clear_qwen_chat():
 BRM_NAV_JS = r"""
 (() => {
   const groups = {
-    "任务中心": "home", "文生图Z-Image": "image", "图生图FLUX.2-klein": "image",
+    "任务中心": "home", "文生图Z-Image": "image", "Qwen Image 2.1 文生图": "image", "图生图FLUX.2-klein": "image",
     "MiniMax H3 文生视频": "video", "MiniMax H3 图生视频": "video",
     "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
     "图像/视频增强修复 SeedVR2": "media",
@@ -5099,6 +5124,21 @@ def build_ui():
                     api_name="ui_submit_workflow_1",
                     api_visibility="private",
                 )
+
+            if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1":
+                with gr.Tab("Qwen Image 2.1 文生图"):
+                    gr.Markdown("## Qwen Image 2.1 · 非商业研究版\n基础模型 INT8，非 Turbo。单张输出，最大1MP；与其他媒体共享 A5000 单队列。")
+                    q21_prompt = gr.Textbox(label="提示词", lines=4, value="一只穿宇航服的橘猫，电影摄影，柔和光线")
+                    with gr.Row():
+                        q21_width = gr.Number(label="宽度（32的倍数）", value=1024, precision=0)
+                        q21_height = gr.Number(label="高度（32的倍数）", value=1024, precision=0)
+                        q21_steps = gr.Slider(label="采样步数", minimum=1, maximum=40, value=40, step=1)
+                        q21_seed = gr.Number(label="随机种子", value=0, precision=0)
+                    gr.Button("提交研究生图任务", variant="primary").click(
+                        fn=api_submit_qwen_image21,
+                        inputs=[q21_prompt, q21_width, q21_height, q21_steps, q21_seed],
+                        api_name="ui_submit_qwen_image21", api_visibility="private",
+                    )
 
             # ========== Tab 2 ==========
             with gr.Tab("图生图FLUX.2-klein"):
@@ -5736,6 +5776,7 @@ def build_ui():
         # and audio duration), so every documented workflow can be submitted
         # from a non-browser client.
         gr.api(api_submit_workflow_1, api_name="submit_workflow_1")
+        gr.api(api_submit_qwen_image21, api_name="submit_qwen_image21")
         gr.api(api_submit_workflow_2, api_name="submit_workflow_2")
         gr.api(api_submit_workflow_3, api_name="submit_workflow_3")
         gr.api(api_submit_workflow_4, api_name="submit_workflow_4")

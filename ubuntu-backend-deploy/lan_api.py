@@ -320,6 +320,15 @@ def _normal_text_to_image(params: dict[str, Any], assets: dict[str, AssetRecord]
     ]
 
 
+def _normal_qwen_image21(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    from qwen_image21_support import validate
+    try:
+        a = validate(params.get("prompt"), params.get("width", 1024), params.get("height", 1024), params.get("steps", 40), params.get("seed", 0))
+    except (TypeError, ValueError, OverflowError) as exc:
+        _fail(422, str(exc))
+    return [a[k] for k in ("prompt", "width", "height", "steps", "seed")]
+
+
 def _normal_image_edit(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     image = _asset(params, assets, "image_asset_id", "image")
     return [_trim_text(params.get("prompt"), "prompt"), image.filename]
@@ -500,6 +509,8 @@ def _normal_seedvr2_enhance(params: dict[str, Any], assets: dict[str, AssetRecor
 
 
 WORKFLOWS: dict[str, WorkflowSpec] = {
+    "qwen-image21": WorkflowSpec("submit_qwen_image21", "Qwen Image 2.1 非商业研究生图", {}, _normal_qwen_image21,
+        {"license": "qwen-research; non-commercial research/evaluation only", "max_pixels": 1048576, "batch": 1, "default_steps": 40, "steps": [1, 40], "size_multiple": 32}),
     "text-to-image": WorkflowSpec("submit_workflow_1", "Z-Image 文生图", {}, _normal_text_to_image),
     "image-edit": WorkflowSpec("submit_workflow_2", "FLUX.2-klein 图片编辑", {"image_asset_id": "image"}, _normal_image_edit),
     "text-to-video": WorkflowSpec(
@@ -646,6 +657,8 @@ def _active_voice_engine() -> str:
 def _active_workflows() -> dict[str, WorkflowSpec]:
     """Keep stable REST slugs while advertising the engine that can run now."""
     workflows = dict(WORKFLOWS)
+    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") != "1":
+        workflows.pop("qwen-image21", None)
     if _active_video_engine() != "h3":
         workflows["text-to-video"] = WorkflowSpec(
             "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
@@ -892,6 +905,16 @@ def submit_task(submission: TaskSubmission) -> dict[str, Any]:
     spec = _active_workflows().get(submission.workflow)
     if spec is None:
         _fail(422, "unknown workflow; use GET /api/v1/capabilities")
+    if submission.workflow == "qwen-image21":
+        from qwen_image21_support import BASE as qwen_image21_base
+        try:
+            session = requests.Session()
+            session.trust_env = False
+            with session:
+                response = session.get(qwen_image21_base + "/system_stats", timeout=5)
+                response.raise_for_status()
+        except requests.RequestException:
+            _fail(503, "Qwen Image 2.1 research runtime is unavailable; retry after recovery")
     if submission.workflow == "seedvr2-enhance" and not models_installed(COMFY_ROOT):
         _fail(503, "SeedVR2 model files are not installed yet")
     assets = _load_assets()

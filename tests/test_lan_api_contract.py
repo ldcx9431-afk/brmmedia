@@ -171,6 +171,18 @@ class LanApiContractTests(unittest.TestCase):
         )
         self.assertEqual(draft_args, ["fast composition", "768 × 1024", 3, "draft", "standard"])
 
+    def test_qwen_image21_research_gate_and_arguments(self) -> None:
+        with patch.dict(os.environ, {"BRM_QWEN_IMAGE21_ENABLED": "0"}):
+            self.assertNotIn("qwen-image21", self.api._active_workflows())
+        with patch.dict(os.environ, {"BRM_QWEN_IMAGE21_ENABLED": "1"}):
+            self.assertIn("qwen-image21", self.api._active_workflows())
+        self.assertEqual(self.api._normal_qwen_image21({"prompt": "research"}, {}), ["research",1024,1024,40,0])
+        with self.assertRaises(self.api.HTTPException) as caught:
+            self.api._normal_qwen_image21({"prompt": "research", "width":2048,"height":2048}, {})
+        self.assertEqual(caught.exception.status_code,422)
+
+    def test_h3_explicit_profiles_and_assets(self) -> None:
+
         text_args = self.api._normal_text_to_video(
             {"prompt": "morning city", "profile": "quality"}, {}
         )
