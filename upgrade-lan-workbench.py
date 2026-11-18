@@ -52,8 +52,6 @@ map $brm_workbench_realm $brm_workbench_edge {{
     off lan;
 }}
 '''
-    # Named Gradio automation routes continue to require Basic Auth. The
-    # browser uses queue/join and run for interactive and unqueued UI events.
     protected = '''    location ~ ^/(?:gradio_api/(?:api|call|proxy=|vibe-|profiling)|monitoring(?:/|$)) {
         proxy_pass http://127.0.0.1:9000;
         proxy_http_version 1.1;
@@ -64,8 +62,33 @@ map $brm_workbench_realm $brm_workbench_edge {{
         client_max_body_size 2G;
     }
 
+    location ~ ^/gradio_api/(?:run|queue/join|upload|component_server) {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-BRM-Workbench-Edge $brm_workbench_edge;
+        proxy_read_timeout 3700s;
+        proxy_buffering off;
+        client_max_body_size 2G;
+    }
+
+    location ~ ^/gradio_api/cancel$ {
+        auth_basic $brm_workbench_realm;
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-BRM-Workbench-Edge authenticated;
+        proxy_read_timeout 3700s;
+        proxy_buffering off;
+    }
+
 '''
-    return prefix + source.replace(anchor, protected + anchor.replace('        proxy_pass', '        auth_basic $brm_workbench_realm;\n        proxy_set_header X-BRM-Workbench-Edge $brm_workbench_edge;\n        proxy_buffering off;\n        proxy_pass'), 1)
+    replacement = anchor.replace(
+        'proxy_pass',
+        'proxy_set_header X-BRM-Workbench-Edge authenticated;\n'
+        '        proxy_buffering off;\n        proxy_pass',
+    )
+    return prefix + source.replace(anchor, protected + replacement, 1)
 
 
 if __name__ == '__main__':
@@ -82,3 +105,4 @@ if __name__ == '__main__':
     args.output.mkdir(exist_ok=True)
     (args.output / 'webui.py').write_text(webui, encoding='utf-8')
     (args.output / 'brmmedia').write_text(nginx, encoding='utf-8')
+
