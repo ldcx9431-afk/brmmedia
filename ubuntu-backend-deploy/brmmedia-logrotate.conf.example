@@ -1,0 +1,13 @@
+/srv/brmmedia/app/ubuntu-backend-deploy/logs/*.log
+/srv/brmmedia/app/ubuntu-backend-deploy/comfyui_runtime.log
+/srv/brmmedia/app/llm-backend-deploy/logs/*.log {
+    daily
+    rotate 14
+    maxsize 100M
+    missingok
+    notifempty
+    su brm brm
+    compress
+    delaycompress
+    copytruncate
+}

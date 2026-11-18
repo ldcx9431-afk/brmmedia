@@ -1,0 +1,4 @@
+# The LAN API is a separate systemd process and does not inherit the
+# COMFYUI_ROOT exported by start_backend.sh. Keep its ComfyUI paths aligned.
+[Service]
+Environment=COMFYUI_ROOT=/srv/brmmedia/ComfyUI-h3-v032-canary

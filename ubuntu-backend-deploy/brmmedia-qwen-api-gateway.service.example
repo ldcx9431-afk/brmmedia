@@ -1,0 +1,19 @@
+[Unit]
+Description=BRMMedia Qwen Bearer API key gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/srv/brmmedia/app/ubuntu-backend-deploy
+EnvironmentFile=-/etc/brmmedia/qwen-api-gateway.env
+ExecStart=/srv/brmmedia/app/ubuntu-backend-deploy/.venv/bin/python -m uvicorn qwen_api_gateway:app --host 127.0.0.1 --port 9300 --proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

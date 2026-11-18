@@ -1,0 +1,3 @@
+# Permit the BRMMedia Gradio account to add a Basic Auth user only through the
+# constrained helper. The helper accepts no arguments and reads secrets on stdin.
+brm ALL=(root) NOPASSWD: /usr/local/sbin/brmmedia-add-lan-user

@@ -2,6 +2,8 @@
 Description=Bao Rong Wan Xiang Gradio and ComfyUI backend
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=2min
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -9,7 +11,8 @@ User=YOUR_USER
 WorkingDirectory=/opt/baorongwanxiang/ubuntu-backend-deploy
 ExecStart=/opt/baorongwanxiang/ubuntu-backend-deploy/start_backend.sh
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+TimeoutStopSec=60
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
