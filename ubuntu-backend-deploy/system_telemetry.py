@@ -28,7 +28,9 @@ CORE_SERVICE_SPECS: tuple[tuple[str, str, int, str], ...] = (
     ("strata", "Strata LLM", 8002, "http://127.0.0.1:8002/health"),
     ("zonos3", "ZONOS3-Mini", 1919, "http://127.0.0.1:1919/v2/health"),
     ("comfyui", "ComfyUI", 8188, "http://127.0.0.1:8188/system_stats"),
+    ("qwen_image21", "Qwen-Image-2.1", 8190, "http://127.0.0.1:8190/system_stats"),
     ("lan_api", "LAN API", 9100, "http://127.0.0.1:9100/api/v1/health"),
+    ("indextts25", "IndexTTS-2.5", 9205, "http://127.0.0.1:9205/health"),
     ("qwen_gateway", "Qwen 网关", 9300, "http://127.0.0.1:9300/health"),
 )
 
@@ -201,7 +203,106 @@ def _parse_int(value: str) -> int | None:
     return int(round(parsed)) if parsed is not None else None
 
 
+_nvml_lock = threading.Lock()
+_nvml_initialized = False
+
+
+def _format_gpu_entry(
+    idx: int,
+    raw_name: str,
+    util_pct: float | None,
+    vram_used: int | None,
+    vram_total: int | None,
+    temp_c: float | None,
+    power_w: float | None,
+    a4000_counter: int,
+) -> tuple[dict[str, Any], int]:
+    upper_name = raw_name.upper()
+    if idx == 0 and "A5000" in upper_name:
+        display_name = "GPU0 · RTX A5000 (媒体主力)"
+        role = "media"
+    elif "A4000" in upper_name:
+        a4000_counter += 1
+        display_name = f"GPU{idx} · RTX A4000 #{a4000_counter} (LLM并发)"
+        role = "llm"
+    else:
+        short_name = raw_name.replace("NVIDIA ", "").strip()
+        display_name = f"GPU{idx} · {short_name}"
+        role = "gpu"
+    vram_pct = (
+        round(vram_used * 100.0 / vram_total, 1)
+        if vram_used is not None and vram_total and vram_total > 0
+        else None
+    )
+    entry = {
+        "index": idx,
+        "name": raw_name,
+        "display_name": display_name,
+        "role": role,
+        "util_pct": util_pct,
+        "vram_used_mib": vram_used,
+        "vram_total_mib": vram_total,
+        "vram_pct": vram_pct,
+        "temp_c": temp_c,
+        "power_w": power_w,
+    }
+    return entry, a4000_counter
+
+
+def _collect_gpu_stats_pynvml() -> list[dict[str, Any]] | None:
+    global _nvml_initialized
+    try:
+        import pynvml  # type: ignore
+    except ImportError:
+        return None
+    with _nvml_lock:
+        try:
+            if not _nvml_initialized:
+                pynvml.nvmlInit()
+                _nvml_initialized = True
+            count = int(pynvml.nvmlDeviceGetCount())
+            gpus: list[dict[str, Any]] = []
+            a4000_counter = 0
+            for idx in range(count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+                raw_name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(raw_name, bytes):
+                    raw_name = raw_name.decode("utf-8", errors="replace")
+                raw_name = str(raw_name).strip()
+                try:
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    vram_used = int(mem.used // (1024 * 1024))
+                    vram_total = int(mem.total // (1024 * 1024))
+                except Exception:
+                    vram_used, vram_total = None, None
+                try:
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    util_pct = float(util.gpu)
+                except Exception:
+                    util_pct = None
+                try:
+                    temp_c = float(pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))
+                except Exception:
+                    temp_c = None
+                try:
+                    power_w = round(float(pynvml.nvmlDeviceGetPowerUsage(handle)) / 1000.0, 2)
+                except Exception:
+                    power_w = None
+                entry, a4000_counter = _format_gpu_entry(
+                    idx, raw_name, util_pct, vram_used, vram_total, temp_c, power_w, a4000_counter
+                )
+                gpus.append(entry)
+            return gpus if gpus else None
+        except Exception:
+            _nvml_initialized = False
+            return None
+
+
 def collect_gpu_stats() -> list[dict[str, Any]]:
+    nvml_gpus = _collect_gpu_stats_pynvml()
+    if nvml_gpus is not None:
+        return nvml_gpus
+
     nvidia_smi = shutil.which("nvidia-smi") or "/usr/lib/wsl/lib/nvidia-smi"
     try:
         smi = subprocess.run(
@@ -233,39 +334,17 @@ def collect_gpu_stats() -> list[dict[str, Any]]:
         if idx is None:
             idx = len(gpus)
         raw_name = parts[1]
-        upper_name = raw_name.upper()
-        if idx == 0 and "A5000" in upper_name:
-            display_name = "GPU0 · RTX A5000 (媒体主力)"
-            role = "media"
-        elif "A4000" in upper_name:
-            a4000_counter += 1
-            display_name = f"GPU{idx} · RTX A4000 #{a4000_counter} (LLM并发)"
-            role = "llm"
-        else:
-            short_name = raw_name.replace("NVIDIA ", "").strip()
-            display_name = f"GPU{idx} · {short_name}"
-            role = "gpu"
-
-        util_pct = _parse_float(parts[2])
-        vram_used = _parse_int(parts[3])
-        vram_total = _parse_int(parts[4])
-        vram_pct = (
-            round(vram_used * 100.0 / vram_total, 1)
-            if vram_used is not None and vram_total and vram_total > 0
-            else None
+        entry, a4000_counter = _format_gpu_entry(
+            idx,
+            raw_name,
+            _parse_float(parts[2]),
+            _parse_int(parts[3]),
+            _parse_int(parts[4]),
+            _parse_float(parts[5]),
+            _parse_float(parts[6]),
+            a4000_counter,
         )
-        gpus.append({
-            "index": idx,
-            "name": raw_name,
-            "display_name": display_name,
-            "role": role,
-            "util_pct": util_pct,
-            "vram_used_mib": vram_used,
-            "vram_total_mib": vram_total,
-            "vram_pct": vram_pct,
-            "temp_c": _parse_float(parts[5]),
-            "power_w": _parse_float(parts[6]),
-        })
+        gpus.append(entry)
     return gpus
 
 

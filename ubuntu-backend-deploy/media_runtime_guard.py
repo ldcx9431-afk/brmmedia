@@ -21,6 +21,77 @@ _light_file_lease = None
 _light_count = 0
 _light_releasing = False
 
+_model_group_lock = threading.Lock()
+_last_model_groups: dict[str, str] = {}
+
+SAFE_KEEP_VRAM_MIB = max(
+    4096,
+    int(os.environ.get("BRM_KEEP_MODEL_MAX_VRAM_MIB", str(22 * 1024))),
+)
+
+
+def workflow_model_group(workflow_name: str, args: dict | None = None) -> str:
+    """Map a workflow name and optional parameters to a coarse VRAM model group."""
+    name = str(workflow_name or "").strip()
+    lower = name.lower()
+    params = args if isinstance(args, dict) else {}
+    if not lower:
+        return "unknown"
+    if "zonos3" in lower:
+        return "zonos3"
+    if "indextts" in lower or lower == "voice-clone":
+        return "indextts25"
+    if lower == "tts-语音克隆":
+        return "indextts2"
+    if "qwen3_tts" in lower or "qwen3-tts" in lower or "qwen3-voice" in lower:
+        return "qwen3_tts"
+    if "qwenimage21" in lower or "qwen-image21" in lower or "qwen_image21" in lower:
+        return "qwen21"
+    if "minimaxh3image" in lower or "h3-image" in lower or "h3_image" in lower:
+        return "h3_image"
+    if "flux3" in lower:
+        return "flux3"
+    if "flux2" in lower or lower == "image-edit":
+        return "flux2"
+    if "z_image" in lower or "z-image" in lower or lower == "text-to-image":
+        return "z_image"
+    if "seedvr2" in lower:
+        variant = str(params.get("model_variant") or "7b").strip().lower()
+        return "seedvr2_3b" if variant == "3b" else "seedvr2_7b"
+    if "ltx" in lower or "first-last-frame" in lower or "talking-head" in lower or "talking-avatar" in lower:
+        return "ltx23"
+    if "minimaxh3" in lower or lower in {"text-to-video", "image-to-video"}:
+        return "h3"
+    if "音乐生成" in lower or "music" in lower or "acestep" in lower:
+        model = str(params.get("model") or "turbo").strip().lower()
+        return "acestep_base" if "base" in model else "acestep_turbo"
+    return lower
+
+
+def get_last_model_group(base: str) -> str | None:
+    key = str(base or "").rstrip("/")
+    with _model_group_lock:
+        return _last_model_groups.get(key)
+
+
+def set_last_model_group(base: str, model_group: str | None) -> None:
+    key = str(base or "").rstrip("/")
+    if not key:
+        return
+    with _model_group_lock:
+        if model_group:
+            _last_model_groups[key] = str(model_group)
+        else:
+            _last_model_groups.pop(key, None)
+
+
+def clear_last_model_group(base: str | None = None) -> None:
+    with _model_group_lock:
+        if base is None:
+            _last_model_groups.clear()
+        else:
+            _last_model_groups.pop(str(base).rstrip("/"), None)
+
 
 @contextmanager
 def _file_lease():
@@ -98,7 +169,7 @@ def voice_lease(main_base, cancel_event):
 
 
 @contextmanager
-def light_lease(main_base, cancel_event=None, max_vram_mib: int = 14336):
+def light_lease(main_base, cancel_event=None, max_vram_mib: int = 14336, model_group: str | None = None):
     """Shared process-wide GPU0 lease for pipelined light/medium ComfyUI tasks.
 
     Holds the exclusive inter-process ``media-gpu.lock`` across the active batch
@@ -116,7 +187,7 @@ def light_lease(main_base, cancel_event=None, max_vram_mib: int = 14336):
                 try:
                     bases = runtime_bases(main_base)
                     if len(bases) > 1:
-                        handover(main_base)
+                        handover(main_base, model_group=model_group)
                     else:
                         with requests.Session() as s:
                             s.trust_env = False
@@ -126,18 +197,29 @@ def light_lease(main_base, cancel_event=None, max_vram_mib: int = 14336):
                             rows = q.get('queue_running', []) + q.get('queue_pending', [])
                             if rows:
                                 raise RuntimeError('媒体运行时仍有其他任务，拒绝争抢A5000')
-                            if gpu_used_mib() > max_vram_mib:
+                            last_group = get_last_model_group(bases[0])
+                            same_group = bool(model_group and last_group == model_group)
+                            group_switched = bool(model_group and last_group and last_group != model_group)
+                            effective_max = max(max_vram_mib, SAFE_KEEP_VRAM_MIB) if same_group else max_vram_mib
+                            if group_switched or gpu_used_mib() > effective_max:
                                 s.post(
                                     main_base.rstrip('/') + '/free',
                                     json={'unload_models': True, 'free_memory': True},
                                     timeout=20,
                                 ).raise_for_status()
+                                clear_last_model_group(bases[0])
+                        if model_group:
+                            set_last_model_group(bases[0], model_group)
                 except BaseException:
                     file_lease.__exit__(None, None, None)
                     raise
                 _light_file_lease = file_lease
                 break
             if not _light_releasing and _light_count >= 1:
+                if model_group:
+                    bases = runtime_bases(main_base)
+                    if len(bases) == 1:
+                        set_last_model_group(bases[0], model_group)
                 break
             _light_condition.wait(timeout=0.5)
         _light_count += 1
@@ -154,7 +236,10 @@ def light_lease(main_base, cancel_event=None, max_vram_mib: int = 14336):
         if last:
             task_failed = sys.exc_info()[0] is not None
             try:
-                release_all(main_base)
+                if model_group is None:
+                    release_all(main_base)
+                else:
+                    release_all(main_base, model_group=model_group, force_free=task_failed)
             except Exception:
                 if not task_failed:
                     raise
@@ -176,17 +261,34 @@ def runtime_bases(main_base):
     return list(dict.fromkeys(base.rstrip('/') for base in bases))
 
 
+def _gpu_used_mib_pynvml() -> int | None:
+    try:
+        import pynvml  # type: ignore
+
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return int(info.used // (1024 * 1024))
+    except Exception:
+        return None
+
+
 def gpu_used_mib():
+    nvml_used = _gpu_used_mib_pynvml()
+    if nvml_used is not None:
+        return nvml_used
     executable = shutil.which('nvidia-smi') or '/usr/lib/wsl/lib/nvidia-smi'
     out = subprocess.check_output([executable, '--id=0', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], text=True, timeout=10)
     return int(out.strip())
 
 
-def handover(main_base, target=None, owned_prompt=''):
+def handover(main_base, target=None, owned_prompt='', model_group: str | None = None, max_vram_mib: int | None = None):
+    bases = runtime_bases(main_base)
+    effective_max_vram = SAFE_KEEP_VRAM_MIB if max_vram_mib is None else int(max_vram_mib)
     with requests.Session() as s:
         s.trust_env = False
         idle = []
-        for base in runtime_bases(main_base):
+        for base in bases:
             r = s.get(base + '/queue', timeout=10)
             r.raise_for_status()
             q = r.json()
@@ -196,17 +298,47 @@ def handover(main_base, target=None, owned_prompt=''):
                     continue
                 raise RuntimeError('媒体运行时仍有其他任务，拒绝争抢A5000')
             idle.append(base)
+        if (
+            len(bases) == 1
+            and model_group
+            and not owned_prompt
+            and get_last_model_group(bases[0]) == model_group
+            and gpu_used_mib() <= effective_max_vram
+        ):
+            set_last_model_group(bases[0], model_group)
+            return
         for base in idle:
             if owned_prompt and base == target:
                 continue
             s.post(base + '/free', json={'unload_models': True, 'free_memory': True}, timeout=20).raise_for_status()
+            clear_last_model_group(base)
         if not owned_prompt:
             deadline = time.monotonic() + 60
             while gpu_used_mib() > 2560:
                 if time.monotonic() >= deadline:
                     raise RuntimeError('A5000缓存未能安全释放，已阻止后续任务')
                 time.sleep(0.5)
+        if model_group and len(bases) == 1:
+            set_last_model_group(bases[0], model_group)
 
 
-def release_all(main_base):
+def release_all(main_base, model_group: str | None = None, max_vram_mib: int | None = None, force_free: bool = False):
+    bases = runtime_bases(main_base)
+    effective_max_vram = SAFE_KEEP_VRAM_MIB if max_vram_mib is None else int(max_vram_mib)
+    if (
+        not force_free
+        and model_group
+        and len(bases) == 1
+        and get_last_model_group(bases[0]) == model_group
+    ):
+        with requests.Session() as s:
+            s.trust_env = False
+            r = s.get(bases[0] + '/queue', timeout=10)
+            r.raise_for_status()
+            q = r.json()
+            rows = q.get('queue_running', []) + q.get('queue_pending', [])
+            if rows:
+                raise RuntimeError('媒体运行时仍有其他任务，拒绝争抢A5000')
+        if gpu_used_mib() <= effective_max_vram:
+            return
     handover(main_base)

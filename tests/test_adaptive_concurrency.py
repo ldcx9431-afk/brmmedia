@@ -243,17 +243,26 @@ class AdaptiveTaskQueueBehaviorTests(unittest.TestCase):
         light_running = self.webui.Task("l1", "l1", "image_z_image_turbo", {}, submit_ts=now)
         heavy_waiting = self.webui.Task("v1", "v1", "MiniMaxH3-文生视频", {}, submit_ts=now + 1)
         light_behind = self.webui.Task("l2", "l2", "image_z_image_turbo", {}, submit_ts=now + 2)
+        light_aged_behind = self.webui.Task("l3", "l3", "image_z_image_turbo", {}, submit_ts=now + 3)
         with q._lock:
             q._running[light_running.id] = light_running
-            q._pending.extend([heavy_waiting, light_behind])
-            # Anti-starvation: light_behind must NOT jump ahead of waiting heavy_waiting
+            q._pending.extend([heavy_waiting, light_behind, light_aged_behind])
+            # 1) When heavy_waiting has NOT exceeded starvation_age_seconds (60s),
+            # HOL blocking is broken: light_behind backfills remaining light slot while heavy_waiting stays queued.
+            backfilled = q._pop_next_task_locked()
+            self.assertIs(backfilled, light_behind)
+            q._running[light_behind.id] = light_behind
+
+            # 2) Once heavy_waiting ages past starvation_age_seconds (60s), backfill stops to prevent starvation.
+            heavy_waiting.submit_ts = now - 65.0
             self.assertIsNone(q._pop_next_task_locked())
-            # Once light_running completes, heavy_waiting starts exclusively
+
+            # 3) Once running light tasks drain, heavy_waiting starts exclusively.
             q._running.clear()
             popped = q._pop_next_task_locked()
             self.assertIs(popped, heavy_waiting)
             q._running[heavy_waiting.id] = heavy_waiting
-            # While heavy_waiting runs, light_behind cannot start
+            # While heavy_waiting runs, light_aged_behind cannot start.
             self.assertIsNone(q._pop_next_task_locked())
 
     def test_fault_injection_in_queue_throttles_light_gpu_to_1(self):

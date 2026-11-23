@@ -210,10 +210,16 @@ class LanApiContractTests(unittest.TestCase):
         nginx = NGINX.read_text(encoding="utf-8")
         service = SERVICE.read_text(encoding="utf-8")
         self.assertIn("location /api/", nginx)
-        self.assertIn("proxy_pass http://127.0.0.1:9100", nginx)
+        self.assertTrue(
+            "proxy_pass http://127.0.0.1:9100" in nginx
+            or ("server 127.0.0.1:9100;" in nginx and "proxy_pass http://brmmedia_lan_api" in nginx)
+        )
         self.assertIn("client_max_body_size 2100M", nginx)
         self.assertIn("location /comfyui/", nginx)
-        self.assertIn("proxy_pass http://127.0.0.1:8188/", nginx)
+        self.assertTrue(
+            "proxy_pass http://127.0.0.1:8188/" in nginx
+            or ("server 127.0.0.1:8188;" in nginx and "proxy_pass http://brmmedia_comfyui/" in nginx)
+        )
         self.assertIn('proxy_set_header Upgrade $http_upgrade', nginx)
         self.assertIn("--host 127.0.0.1 --port 9100", service)
 

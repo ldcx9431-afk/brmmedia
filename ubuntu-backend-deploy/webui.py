@@ -38,6 +38,7 @@ import logging
 from functools import partial
 from datetime import datetime
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
@@ -51,15 +52,18 @@ import flux2_fast_support as flux2_fast
 import flux3_image_support as flux3_image
 import qwen3_tts_support as qwen3_tts
 import voice_presets_support as voice_presets
+import zonos3_support
 import media_runtime_guard
 import system_telemetry
 import adaptive_concurrency
+import comfyui_server
 
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
     start_comfyui, stop_comfyui, is_alive, run_workflow,
     get_view_file, interrupt, BASE, COMFY_ROOT, WORKFLOW_DIR, upload_image, audio_duration, TASK_TIMEOUT, H3_TASK_TIMEOUT,
 )
+_ORIG_GET_VIEW_FILE = get_view_file
 from lan_user_management import add_lan_user
 from seedvr2_support import (
     MAX_OUTPUT_EDGE,
@@ -321,6 +325,7 @@ class Task:
     retry_recipe: dict = field(default_factory=dict)
     stage_seconds: dict[str, float] = field(default_factory=dict)
     stage_clock: float = field(default=0.0, repr=False)
+    gpu_active: bool = field(default=True, repr=False)
     # 每个任务独立的取消信号。不能复用队列生命周期的 stop 事件，否则一次
     # 用户中断会让 worker 退出并影响之后的新任务。
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -352,6 +357,27 @@ class TaskQueue:
             initial_workers = max(initial_workers, concurrency_controller.worker_pool_size())
         self._max_workers = initial_workers
         self._parallel_workflows = parallel_workflows
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()      # 有新任务时唤醒 worker,实现立即执行
+        self._workers: dict[int, threading.Thread] = {}
+        self._retire_worker_ids: set[int] = set()
+        self._next_worker_id = 1
+        self._last_gpu_model_group: str | None = None
+        self._sticky_streak: int = 0
+        self._state_version: int = 0
+        self._history_io_lock = threading.Lock()
+        self._history_save_seq: int = 0
+        self._history_written_seq: int = 0
+        self._history_dirty: bool = False
+        self._last_history_save_mono: float = 0.0
+        try:
+            self._history_save_interval: float = max(
+                5.0, float(os.environ.get("BRM_HISTORY_SAVE_INTERVAL_SECONDS", "5.0") or 5.0)
+            )
+        except (TypeError, ValueError):
+            self._history_save_interval = 5.0
+        self._history_flush_timer: threading.Timer | None = None
         restored = self._load_history()
         self._pending: deque[Task] = deque(sorted(
             (task for task in restored if task.status == TaskStatus.PENDING),
@@ -361,12 +387,6 @@ class TaskQueue:
         self._done: list[Task] = [
             task for task in restored if task.status != TaskStatus.PENDING
         ]
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._wake = threading.Event()      # 有新任务时唤醒 worker,实现立即执行
-        self._workers: dict[int, threading.Thread] = {}
-        self._retire_worker_ids: set[int] = set()
-        self._next_worker_id = 1
 
     @staticmethod
     def _record_from_task(task: Task) -> dict:
@@ -520,20 +540,82 @@ class TaskQueue:
         # history already reached its display limit.
         return active + terminal[:self._max_done]
 
-    def _save_history(self, tasks: "list[Task] | None" = None) -> None:
-        """原子保存已结束任务；写入失败不会影响正在运行的生成任务。"""
+    def _write_history_records(self, records: list[dict], seq: int) -> None:
+        with self._history_io_lock:
+            if seq < self._history_written_seq:
+                return
+            payload = {"version": 2, "tasks": records}
+            try:
+                TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = TASK_HISTORY_PATH.with_name(f".{TASK_HISTORY_PATH.name}.{os.getpid()}.tmp")
+                temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                temp_path.replace(TASK_HISTORY_PATH)
+                self._history_written_seq = seq
+            except OSError as exc:
+                print(f"[Queue] 保存任务历史失败: {exc}")
+
+    def _schedule_history_flush_locked(self, delay: float) -> None:
+        if self._history_flush_timer is not None:
+            return
+
+        def _flush():
+            with self._lock:
+                self._history_flush_timer = None
+                if not self._history_dirty or self._stop.is_set():
+                    return
+                records = self._snapshot_records_locked()
+                self._history_dirty = False
+                self._last_history_save_mono = time.monotonic()
+                self._history_save_seq += 1
+                seq = self._history_save_seq
+            self._write_history_records(records, seq)
+
+        timer = threading.Timer(max(0.05, delay), _flush)
+        timer.daemon = True
+        self._history_flush_timer = timer
+        timer.start()
+
+    def _snapshot_records_locked(self, tasks: "list[Task] | None" = None) -> list[dict]:
         if tasks is None:
             active = list(getattr(self, "_pending", [])) + list(getattr(self, "_running", {}).values())
             tasks = active + self._done
-        records = [self._record_from_task(task) for task in tasks]
-        payload = {"version": 2, "tasks": records}
-        try:
-            TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = TASK_HISTORY_PATH.with_name(f".{TASK_HISTORY_PATH.name}.{os.getpid()}.tmp")
-            temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            temp_path.replace(TASK_HISTORY_PATH)
-        except OSError as exc:
-            print(f"[Queue] 保存任务历史失败: {exc}")
+        return [self._record_from_task(task) for task in tasks]
+
+    def _save_history(self, tasks: "list[Task] | None" = None, *, async_write: bool = False) -> None:
+        """原子保存已结束任务；支持步进进度异步刷盘以消除锁内 HDD 阻塞。"""
+        records = self._snapshot_records_locked(tasks)
+        self._history_dirty = False
+        self._last_history_save_mono = time.monotonic()
+        self._history_save_seq += 1
+        seq = self._history_save_seq
+        timer = self._history_flush_timer
+        if timer is not None:
+            timer.cancel()
+            self._history_flush_timer = None
+        if async_write:
+            threading.Thread(
+                target=self._write_history_records,
+                args=(records, seq),
+                name="brm-history-flush",
+                daemon=True,
+            ).start()
+            return
+        self._write_history_records(records, seq)
+
+    @property
+    def state_version(self) -> int:
+        with self._lock:
+            return self._state_version
+
+    def active_prompt_ids(self) -> set[str]:
+        with self._lock:
+            return {t.prompt_id for t in self._running.values() if t.prompt_id}
+
+    def release_gpu_slot(self, task: Task) -> None:
+        with self._lock:
+            task.gpu_active = False
+            self._state_version += 1
+        self._wake.set()
 
     def enqueue(self, task: Task) -> int:
         """把任务追加到队尾并返回提交时的排队位置。"""
@@ -542,6 +624,7 @@ class TaskQueue:
             task.stage = "queued"
             self._pending.append(task)
             position = len(self._pending)
+            self._state_version += 1
             self._save_history()
         self._wake.set()
         return position
@@ -564,6 +647,7 @@ class TaskQueue:
                 self._done.insert(0, task)
             del self._done[self._max_done:]
             if cancelled:
+                self._state_version += 1
                 self._save_history()
             return len(cancelled)
 
@@ -590,6 +674,7 @@ class TaskQueue:
                     task.error = "用户请求取消排队任务"
                     self._done.insert(0, task)
                     del self._done[self._max_done:]
+                    self._state_version += 1
                     self._save_history()
                     return {"task_id": task_id, "state": "cancelled"}
             if task_id in self._running:
@@ -680,13 +765,23 @@ class TaskQueue:
         task.stage = stage
 
     def update_execution(self, task: Task, event: dict) -> None:
-        """Apply and durably store a ComfyUI lifecycle/progress event."""
+        """Apply a ComfyUI lifecycle/progress event, throttling non-critical disk writes."""
         now = time.time()
+        now_mono = time.monotonic()
         with self._lock:
+            critical_change = False
             if "prompt_id" in event:
-                task.prompt_id = str(event.get("prompt_id") or "")
+                new_pid = str(event.get("prompt_id") or "")
+                if new_pid != task.prompt_id and (new_pid or task.prompt_id):
+                    # Immediate flush when first acquiring prompt_id (recovery guarantee).
+                    if not task.prompt_id and new_pid:
+                        critical_change = True
+                task.prompt_id = new_pid
             if event.get("stage"):
-                self._record_stage(task, str(event["stage"]))
+                new_stage = str(event["stage"])
+                if new_stage != task.stage:
+                    critical_change = True
+                self._record_stage(task, new_stage)
             if "node_id" in event:
                 task.node_id = event.get("node_id")
             if "current_step" in event:
@@ -696,7 +791,16 @@ class TaskQueue:
             if "progress" in event and event.get("progress") is not None:
                 task.progress = float(event["progress"])
             task.last_progress_ts = now
-            self._save_history()
+            self._state_version += 1
+            if critical_change:
+                self._save_history(async_write=False)
+            else:
+                self._history_dirty = True
+                elapsed = now_mono - self._last_history_save_mono
+                if elapsed >= self._history_save_interval:
+                    self._save_history(async_write=True)
+                else:
+                    self._schedule_history_flush_locked(self._history_save_interval - elapsed)
 
     @property
     def stop_event(self) -> threading.Event:
@@ -771,7 +875,12 @@ class TaskQueue:
                     task.stage = "recovering" if task.recovered else "building_workflow"
                     task.start_ts = time.time()
                     task.stage_clock = time.monotonic()
+                    task.gpu_active = (
+                        adaptive_concurrency.classify_workflow(task.workflow_name).tier
+                        != adaptive_concurrency.TIER_VOICE_CPU
+                    )
                     self._running[task.id] = task
+                    self._state_version += 1
                     self._save_history()
                     if self._pending:
                         self._wake.set()
@@ -795,8 +904,20 @@ class TaskQueue:
                     status, stage, error = TaskStatus.ERROR, "failed", str(exc)
                     print(f"[Queue] 任务「{task.name}」失败: {exc}")
             finally:
+                if self._concurrency_controller is not None:
+                    duration_s = (time.time() - task.start_ts) if task.start_ts else None
+                    self._concurrency_controller.record_task_outcome(
+                        task.workflow_name,
+                        success=(status == TaskStatus.DONE),
+                        duration_s=duration_s,
+                        error=error,
+                        cancelled=(status == TaskStatus.CANCELLED),
+                    )
+                if status == TaskStatus.DONE and isinstance(task.result, list):
+                    _adjust_cached_output_asset_count(len(task.result))
                 with self._lock:
                     task.done_ts = time.time()
+                    task.gpu_active = False
                     self._record_stage(task, stage)
                     task.status, task.error = status, error
                     if status == TaskStatus.DONE:
@@ -805,6 +926,7 @@ class TaskQueue:
                     self._done.insert(0, task)
                     # 只保留最近的若干条,避免列表与界面表格无限膨胀。
                     del self._done[self._max_done:]
+                    self._state_version += 1
                     self._save_history()
                     self._wake.set()
 
@@ -822,7 +944,7 @@ class TaskQueue:
         )
 
     def _pop_next_task_locked(self, snapshot: dict | None = None) -> Task | None:
-        """Select next admissible task using weight tiers, hardware limits, and anti-starvation."""
+        """Select next admissible task using model affinity, aging, cost budget, and HOL backfill."""
         if not self._pending:
             return None
         if self._concurrency_controller is None:
@@ -840,6 +962,9 @@ class TaskQueue:
         voice_limit = int(limits.get(adaptive_concurrency.TIER_VOICE_CPU, 1))
         image_light_limit = int(limits.get(adaptive_concurrency.TIER_IMAGE_LIGHT, 1))
         audio_gpu_limit = int(limits.get(adaptive_concurrency.TIER_AUDIO_GPU, 1))
+        cfg = self._concurrency_controller.config()
+        starvation_age = float(snapshot.get("starvation_age_seconds") or cfg.starvation_age_seconds or 60.0)
+        sticky_max = max(1, int(snapshot.get("sticky_streak_max") or getattr(cfg, "sticky_streak_max", 4) or 4))
 
         running_tasks = list(self._running.values())
         running_voice_cpu = [
@@ -848,7 +973,8 @@ class TaskQueue:
         ]
         running_gpu = [
             t for t in running_tasks
-            if adaptive_concurrency.classify_workflow(t.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+            if t.gpu_active
+            and adaptive_concurrency.classify_workflow(t.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
         ]
         running_gpu_exclusive = any(
             adaptive_concurrency.classify_workflow(t.workflow_name).exclusive
@@ -863,26 +989,75 @@ class TaskQueue:
                     voice_candidate = pending_task
                     break
 
-        # GPU lane: inspect oldest pending GPU task first to prevent heavy-task starvation.
+        # GPU lane: model-affinity batching + aging anti-starvation + light backfill (HOL breaking).
         gpu_candidate = None
         if not running_gpu_exclusive:
-            head_gpu = next(
-                (
-                    pending_task for pending_task in self._pending
-                    if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
-                ),
-                None,
-            )
-            if head_gpu is not None:
-                profile = adaptive_concurrency.classify_workflow(head_gpu.workflow_name)
-                if profile.exclusive or not profile.shares_comfy_light_lease:
-                    if len(running_gpu) == 0:
-                        gpu_candidate = head_gpu
-                elif all(adaptive_concurrency.classify_workflow(t.workflow_name).shares_comfy_light_lease for t in running_gpu):
-                    tier_limit = audio_gpu_limit if profile.tier == adaptive_concurrency.TIER_AUDIO_GPU else image_light_limit
+            pending_gpu = [
+                pending_task for pending_task in self._pending
+                if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+            ]
+            if pending_gpu:
+                head_gpu = pending_gpu[0]
+                now_ts = time.time()
+                head_age = max(0.0, now_ts - float(head_gpu.submit_ts or now_ts))
+                head_aged_out = head_age >= starvation_age
+                running_specs = [(t.workflow_name, t.args) for t in running_gpu]
+                safety_margin = int(snapshot.get("vram_safety_margin_mib") or getattr(cfg, "vram_safety_margin_mib", 2048) or 2048)
+
+                def _can_fit_gpu(cand: Task) -> bool:
+                    prof = adaptive_concurrency.classify_workflow(cand.workflow_name)
+                    if prof.exclusive or not prof.shares_comfy_light_lease:
+                        return len(running_gpu) == 0
+                    if not all(adaptive_concurrency.classify_workflow(t.workflow_name).shares_comfy_light_lease for t in running_gpu):
+                        return False
+                    tier_limit = audio_gpu_limit if prof.tier == adaptive_concurrency.TIER_AUDIO_GPU else image_light_limit
                     effective_limit = min(image_light_limit, tier_limit)
-                    if len(running_gpu) < effective_limit:
+                    if len(running_gpu) >= effective_limit:
+                        return False
+                    return adaptive_concurrency.can_admit_gpu_task(
+                        cand.workflow_name,
+                        cand.args,
+                        running_specs,
+                        snapshot,
+                        safety_margin_mib=safety_margin,
+                    )
+
+                def _affinity_pick(candidates: list[Task]) -> Task | None:
+                    if not head_aged_out and self._last_gpu_model_group and self._sticky_streak < sticky_max:
+                        for cand in candidates:
+                            if (
+                                media_runtime_guard.workflow_model_group(cand.workflow_name, cand.args)
+                                == self._last_gpu_model_group
+                                and _can_fit_gpu(cand)
+                            ):
+                                return cand
+                    for cand in candidates:
+                        if _can_fit_gpu(cand):
+                            return cand
+                    return None
+
+                if _can_fit_gpu(head_gpu):
+                    if not head_aged_out and self._last_gpu_model_group and self._sticky_streak < sticky_max:
+                        if len(running_gpu) == 0:
+                            gpu_candidate = _affinity_pick(pending_gpu)
+                        else:
+                            light_pool = [
+                                cand for cand in pending_gpu
+                                if (p := adaptive_concurrency.classify_workflow(cand.workflow_name)).shares_comfy_light_lease
+                                and not p.exclusive
+                            ]
+                            gpu_candidate = _affinity_pick(light_pool) or head_gpu
+                    else:
                         gpu_candidate = head_gpu
+                elif not head_aged_out:
+                    # Head GPU task (typically exclusive) cannot start while light tasks run.
+                    # Allow subsequent light tasks to backfill remaining light slots until aged out.
+                    backfill_pool = [
+                        cand for cand in pending_gpu[1:]
+                        if (p := adaptive_concurrency.classify_workflow(cand.workflow_name)).shares_comfy_light_lease
+                        and not p.exclusive
+                    ]
+                    gpu_candidate = _affinity_pick(backfill_pool)
 
         chosen = None
         if voice_candidate is not None and gpu_candidate is not None:
@@ -894,6 +1069,13 @@ class TaskQueue:
 
         if chosen is not None:
             self._pending.remove(chosen)
+            if adaptive_concurrency.classify_workflow(chosen.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU:
+                chosen_group = media_runtime_guard.workflow_model_group(chosen.workflow_name, chosen.args)
+                if chosen_group == self._last_gpu_model_group:
+                    self._sticky_streak += 1
+                else:
+                    self._last_gpu_model_group = chosen_group
+                    self._sticky_streak = 1
         return chosen
 
 
@@ -2528,13 +2710,139 @@ VIDEO_EXTS   = {".mp4", ".webm", ".mov", ".mkv", ".avi"}   # .gif 已在 IMAGE_E
 AUDIO_EXTS   = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}
 GALLERY_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
-# ACE-Step 的下拉选项必须反映实际存在的 DiT 权重。已下线 sft，仅保留 turbo 与 base，
-# 默认优先 turbo 8 步极速生成，base 作为高品质备选。
+# ACE-Step 的下拉选项必须反映实际存在的 DiT 权重。已下线 sft，仅保留 base 与 turbo，
+# 并支持接入 ComfyUI-v039 原生 YuE2-3B 符号+音频双阶段音乐模型。
 ACE_STEP_MODEL_FILENAMES = {
-    "turbo": "acestep/acestep_v1.5_xl_turbo_bf16.safetensors",
     "base": "acestep/acestep_v1.5_xl_base_bf16.safetensors",
+    "turbo": "acestep/acestep_v1.5_xl_turbo_bf16.safetensors",
 }
-ACE_STEP_MODEL_PREFERENCE = ("turbo", "base")
+ACE_STEP_ALT_FILENAMES = {
+    "base": ("acestep/acestep_v1.5_xl_base_bf16.safetensors", "acestep_v1.5_xl_base_bf16.safetensors"),
+    "turbo": ("acestep/acestep_v1.5_xl_turbo_bf16.safetensors", "acestep_v1.5_xl_turbo_bf16.safetensors"),
+}
+ACE_STEP_MODEL_PREFERENCE = ("base", "turbo")
+YUE2_CHECKPOINT_CANDIDATES = (
+    "yue2_3b_int8_convrot.safetensors",
+    "yue2_3b_bf16.safetensors",
+    "yue2_3b_fp8.safetensors",
+)
+MUSIC_MODEL_LABELS = {
+    "base": "ACE-Step 1.5 XL Base（50步 · 强歌词人声与曲风遵循 · 推荐带歌词）",
+    "turbo": "ACE-Step 1.5 XL Turbo（8步 · 极速纯音乐/旋律小样）",
+    "yue2": "YuE2-3B（符号ABC+音频融合 · 长歌人声/编曲）",
+}
+
+_MUSIC_VOCAL_KEYWORDS = (
+    "vocal", "vocals", "voice", "singer", "singing", "acapella", "duet", "choir", "rap",
+    "人声", "女声", "男声", "合唱", "对唱", "童声", "演唱", "歌唱",
+)
+_MUSIC_ZH_TAG_MAP = (
+    (("女声", "女唱", "女歌手", "女音"), "female vocal, clear female singing voice"),
+    (("男声", "男唱", "男歌手", "男音"), "male vocal, clear male singing voice"),
+    (("合唱", "对唱", "男女对唱"), "duet vocals, vocal harmony"),
+    (("童声", "儿童"), "children vocal, bright singing voice"),
+    (("流行",), "pop, mandopop"),
+    (("抒情", "慢歌", "伤感", "感伤", "悲伤", "深情", "温柔", "温暖"), "ballad, emotional, warm, melodic"),
+    (("摇滚",), "rock, electric guitar, drums"),
+    (("说唱", "饶舌", "嘻哈"), "rap, hip-hop, rhythmic vocal"),
+    (("古风", "国风"), "chinese traditional, gufeng"),
+    (("民谣",), "folk, acoustic guitar"),
+    (("电子", "电音", "舞曲"), "electronic, synth"),
+    (("爵士",), "jazz"),
+    (("蓝调", "r&b"), "r&b, soulful"),
+    (("欢快", "轻快", "快乐", "活泼"), "upbeat, cheerful"),
+    (("史诗", "宏大", "电影", "影视"), "cinematic, orchestral"),
+    (("钢琴",), "piano"),
+    (("吉他",), "guitar"),
+    (("弦乐", "小提琴", "大提琴"), "strings"),
+    (("古筝",), "guzheng"),
+    (("笛", "箫"), "flute"),
+    (("鼓", "节奏"), "drums"),
+)
+_LYRICS_STRUCTURE_RE = re.compile(
+    r"\[(?:verse|chorus|intro|outro|bridge|pre-chorus|hook|inst|instrumental|主歌|副歌|前奏|间奏|尾奏)[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def normalize_music_tags_and_lyrics(
+    tags: str, lyrics: str = "", language: str = "zh"
+) -> tuple[str, str, str, bool]:
+    """Normalize music tags, lyrics structure, and language so vocal songs actually sing."""
+    raw_tags = re.sub(r"[\r\n]+", ", ", str(tags or "")).strip(" ,")
+    raw_lyrics = str(lyrics or "").replace("\r\n", "\n").strip()
+    lang = str(language or "").strip().lower()
+
+    is_instrumental = (not raw_lyrics) or raw_lyrics.lower() in {
+        "[inst]", "[instrumental]", "inst", "instrumental", "纯音乐", "无歌词",
+    }
+    if is_instrumental:
+        norm_lang = lang if lang and lang != "auto" else "zh"
+        return raw_tags, "", norm_lang, True
+
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", raw_lyrics))
+    kana_count = len(re.findall(r"[\u3040-\u30ff]", raw_lyrics))
+    hangul_count = len(re.findall(r"[\uac00-\ud7af]", raw_lyrics))
+    if lang in {"", "auto", "unknown"} or (lang == "en" and cjk_count >= 2):
+        if kana_count >= 2:
+            norm_lang = "ja"
+        elif hangul_count >= 2:
+            norm_lang = "ko"
+        elif cjk_count >= 1:
+            norm_lang = "zh"
+        else:
+            norm_lang = "en"
+    else:
+        norm_lang = lang
+
+    lowered_tags = raw_tags.lower()
+    mapped_parts: list[str] = []
+    for keywords, en_tag in _MUSIC_ZH_TAG_MAP:
+        if any(kw in lowered_tags for kw in keywords):
+            for piece in (p.strip() for p in en_tag.split(",")):
+                if piece and piece.lower() not in lowered_tags and piece not in mapped_parts:
+                    mapped_parts.append(piece)
+
+    combined_check = f"{lowered_tags} {' '.join(mapped_parts).lower()}"
+    if not any(kw in combined_check for kw in _MUSIC_VOCAL_KEYWORDS):
+        for piece in ("vocal song", "clear singing voice", "expressive vocals"):
+            if piece not in mapped_parts:
+                mapped_parts.insert(0, piece)
+
+    if mapped_parts:
+        norm_tags = ", ".join(mapped_parts) + (f", {raw_tags}" if raw_tags else "")
+    else:
+        norm_tags = raw_tags
+
+    if _LYRICS_STRUCTURE_RE.search(raw_lyrics):
+        norm_lyrics = raw_lyrics
+    else:
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", raw_lyrics) if p.strip()]
+        if len(paragraphs) == 1:
+            lines = [ln.strip() for ln in paragraphs[0].splitlines() if ln.strip()]
+            if len(lines) == 1 and len(lines[0]) > 24:
+                split_lines = [s.strip() for s in re.split(r"(?<=[。！？.!?;；])\s*", lines[0]) if s.strip()]
+                if len(split_lines) >= 2:
+                    lines = split_lines
+            if len(lines) >= 4:
+                mid = len(lines) // 2
+                norm_lyrics = "[Verse 1]\n" + "\n".join(lines[:mid]) + "\n\n[Chorus]\n" + "\n".join(lines[mid:])
+            elif len(lines) >= 2:
+                norm_lyrics = "[Verse 1]\n" + lines[0] + "\n\n[Chorus]\n" + "\n".join(lines[1:])
+            else:
+                norm_lyrics = "[Verse 1]\n" + lines[0]
+        elif len(paragraphs) == 2:
+            norm_lyrics = f"[Verse 1]\n{paragraphs[0]}\n\n[Chorus]\n{paragraphs[1]}"
+        else:
+            tags_cycle = ["[Verse 1]", "[Chorus]", "[Verse 2]", "[Chorus]", "[Bridge]", "[Chorus]"]
+            blocks = []
+            for idx, para in enumerate(paragraphs):
+                sec = tags_cycle[idx] if idx < len(tags_cycle) else f"[Verse {idx}]"
+                blocks.append(f"{sec}\n{para}")
+            norm_lyrics = "\n\n".join(blocks)
+
+    return norm_tags, norm_lyrics, norm_lang, False
+
 
 # 中文名称面向工作台用户，值保持为 ACE-Step 更稳定识别的英文标签。
 # “自定义”不会覆盖现有输入，用户选中预设后仍可继续手工增删标签。
@@ -2561,38 +2869,95 @@ def apply_music_style_preset(preset: str):
     return tags if tags else gr.skip()
 
 
+def _comfy_model_search_roots() -> list[Path]:
+    comfy_root = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expanduser()
+    roots = [comfy_root / "models"]
+    fallback = Path("/srv/brmmedia/ComfyUI/models")
+    if str(comfy_root).startswith("/srv/brmmedia") and fallback != roots[0] and fallback.is_dir():
+        roots.append(fallback)
+    return roots
+
+
+def resolve_acestep_unet_name(model: str) -> str:
+    """Resolve the installed relative unet_name for an ACE-Step variant."""
+    candidates = ACE_STEP_ALT_FILENAMES.get(model, ())
+    for mroot in _comfy_model_search_roots():
+        for subdir in ("diffusion_models", "unet"):
+            for rel in candidates:
+                if (mroot / subdir / rel).is_file():
+                    return rel
+    return ACE_STEP_MODEL_FILENAMES[model]
+
+
 def installed_acestep_models() -> list[str]:
     """Return only ACE-Step model variants installed in ComfyUI's model root."""
-    comfy_root = Path(os.environ.get("COMFYUI_ROOT", BASE_DIR / "ComfyUI")).expanduser()
-    model_root = comfy_root / "models" / "diffusion_models"
-    return [
-        model for model in ACE_STEP_MODEL_PREFERENCE
-        if (model_root / ACE_STEP_MODEL_FILENAMES[model]).is_file()
-    ]
+    installed = []
+    for model in ACE_STEP_MODEL_PREFERENCE:
+        candidates = ACE_STEP_ALT_FILENAMES[model]
+        found = any(
+            (mroot / subdir / rel).is_file()
+            for mroot in _comfy_model_search_roots()
+            for subdir in ("diffusion_models", "unet")
+            for rel in candidates
+        )
+        if found:
+            installed.append(model)
+    return installed
 
 
-def default_acestep_model(installed: list[str] | None = None) -> str:
+def installed_yue2_checkpoints(*, include_staging: bool = False) -> list[str]:
+    """Return installed YuE2 checkpoint filenames in ComfyUI checkpoints dir."""
+    found: list[str] = []
+    for mroot in _comfy_model_search_roots():
+        ckpt_dir = mroot / "checkpoints"
+        if not ckpt_dir.is_dir():
+            continue
+        for cand in YUE2_CHECKPOINT_CANDIDATES:
+            p = ckpt_dir / cand
+            if p.is_file() and (include_staging or not (ckpt_dir / f"{cand}.aria2").exists()) and cand not in found:
+                found.append(cand)
+        for p in sorted(ckpt_dir.glob("*yue2*.safetensors")):
+            if p.is_file() and (include_staging or not (ckpt_dir / f"{p.name}.aria2").exists()) and p.name not in found:
+                found.append(p.name)
+    return found
+
+
+def installed_music_models(*, include_staging: bool = True) -> list[str]:
+    """Return all installed music models across ACE-Step 1.5 and YuE2-3B."""
+    models = installed_acestep_models()
+    if installed_yue2_checkpoints(include_staging=include_staging):
+        models.append("yue2")
+    return models
+
+
+def default_acestep_model(installed: list[str] | None = None, *, has_lyrics: bool = True) -> str:
     """Choose quality first without ever submitting a model that is absent."""
-    installed = installed if installed is not None else installed_acestep_models()
+    installed = installed if installed is not None else installed_music_models()
     if not installed:
-        raise gr.Error("未检测到 ACE-Step DiT 权重，请先部署模型。")
+        raise gr.Error("未检测到 ACE-Step / YuE2 音乐权重，请先部署模型。")
+    order = ("base", "yue2", "turbo") if has_lyrics else ("turbo", "base", "yue2")
+    for candidate in order:
+        if candidate in installed:
+            return candidate
     return installed[0]
 
 
 def require_installed_acestep_model(model: str) -> str:
-    """Reject unavailable model choices before a task reaches ComfyUI; map retired SFT to Turbo."""
-    installed = installed_acestep_models()
+    """Reject unavailable model choices before a task reaches ComfyUI; map aliases cleanly."""
+    installed = installed_music_models()
     normalized = str(model or "").strip().lower()
     if normalized in {"sft", "ace-step-sft"}:
-        normalized = "turbo" if "turbo" in installed else (installed[0] if installed else "turbo")
+        normalized = "base" if "base" in installed else ("turbo" if "turbo" in installed else (installed[0] if installed else "turbo"))
     elif normalized == "ace-step-turbo":
         normalized = "turbo"
     elif normalized == "ace-step-base":
         normalized = "base"
+    elif normalized in {"yue2", "yue2-3b", "yue2-3b-music"}:
+        normalized = "yue2"
     if normalized not in installed:
         readable = "、".join(installed) if installed else "无"
         raise gr.Error(
-            f"ACE-Step 模型“{model}”未安装，当前可用：{readable}。"
+            f"音乐模型“{model}”未安装，当前可用：{readable}。"
             "请在部署对应权重后重启后端，或选择可用模型。"
         )
     return normalized
@@ -2841,6 +3206,20 @@ def h3_profile_default_seconds(profile: str) -> int:
     return H3_PROFILES.get(str(profile), H3_PROFILES["preview"])["default_seconds"]
 
 
+def _resolve_local_comfy_artifact(filename: str, subfolder: str = "", folder_type: str = "output") -> Path | None:
+    if folder_type not in {"output", "temp", "input"}:
+        return None
+    try:
+        root = (COMFY_ROOT / folder_type).resolve()
+        candidate = (root / str(subfolder or "") / str(filename or "")).resolve()
+        candidate.relative_to(root)
+        if candidate.is_file():
+            return candidate
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def extract_result(
     outputs: dict, task: Task, *, destination_dir: Path | str | None = None,
     filename_prefix: str | None = None,
@@ -2862,19 +3241,39 @@ def extract_result(
 
     multiple = len(items) > 1
     saved = []
+    stream_fn = getattr(comfyui_server, "stream_view_to_file", None)
     for item in items:
-        try:
-            raw = get_view_file(item["filename"],
-                                item.get("subfolder", ""),
-                                item.get("type", "output"))
-        except Exception as e:
-            print(f"[App] 取产物失败: {e}")
-            continue
         ext = Path(item["filename"]).suffix             # 沿用原文件后缀,区分图/音/视频
         suffix = f"_{len(saved) + 1}" if multiple else ""
         prefix = filename_prefix or task.name
         out_path = destination / f"{prefix}{suffix}{ext}"
-        out_path.write_bytes(raw)
+        local_src = _resolve_local_comfy_artifact(
+            item["filename"],
+            item.get("subfolder", ""),
+            item.get("type", "output"),
+        )
+        try:
+            if local_src is not None:
+                with local_src.open("rb") as src_fh, out_path.open("wb") as dst_fh:
+                    shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
+            elif get_view_file is _ORIG_GET_VIEW_FILE and callable(stream_fn):
+                stream_fn(
+                    item["filename"],
+                    out_path,
+                    item.get("subfolder", ""),
+                    item.get("type", "output"),
+                )
+            else:
+                raw = get_view_file(
+                    item["filename"],
+                    item.get("subfolder", ""),
+                    item.get("type", "output"),
+                )
+                out_path.write_bytes(raw)
+        except Exception as e:
+            out_path.unlink(missing_ok=True)
+            print(f"[App] 取产物失败: {e}")
+            continue
         saved.append(str(out_path))
     return saved
 
@@ -2892,12 +3291,11 @@ def _indextts25_reference_path(filename: str) -> Path:
     return candidate
 
 
-def run_indextts25(task: Task) -> list[str]:
+def run_indextts25(task: Task, *, gpu_guard=None, on_gpu_done=None) -> list[str]:
     """Invoke the isolated loopback IndexTTS-2.5 service and produce MP3.
 
-    The service is deliberately outside ComfyUI's Python 3.12 process.  This
-    prevents IndexTTS-2.5's Python 3.11/Torch runtime from changing media
-    workflows, while TaskQueue keeps the existing single-A5000 serialization.
+    GPU ownership (``gpu_guard``) is released immediately after receiving the WAV
+    so CPU-bound FFmpeg MP3 transcoding does not block GPU0 tasks.
     """
     prompt = str(task.args.get("prompt", "")).strip()
     language = str(task.args.get("language", "zh")).strip().lower()
@@ -2912,39 +3310,46 @@ def run_indextts25(task: Task) -> list[str]:
     if not prompt:
         raise RuntimeError("IndexTTS-2.5 合成文本不能为空")
     reference = _indextts25_reference_path(task.args.get("ref_audio", ""))
-    task_queue.update_execution(task, {"stage": "checking_indextts25"})
-    try:
-        health = requests.get(f"{INDEXTTS25_SERVICE_URL}/health", timeout=(5, 10))
-    except requests.RequestException as exc:
-        raise RuntimeError("IndexTTS-2.5 候选服务不可用，未回退到旧版。请联系管理员检查服务状态。") from exc
-    if health.status_code != 200:
-        raise RuntimeError(f"IndexTTS-2.5 健康检查失败（HTTP {health.status_code}）")
-    try:
-        health_payload = health.json()
-    except ValueError as exc:
-        raise RuntimeError("IndexTTS-2.5 健康检查返回了无效内容") from exc
-    if not health_payload.get("ok"):
-        detail = health_payload.get("detail") or health_payload.get("error") or "候选服务未就绪"
-        raise RuntimeError(f"IndexTTS-2.5 候选服务未就绪：{detail}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     wav_path = OUTPUT_DIR / f".{task.id}.indextts25.wav"
     mp3_path = OUTPUT_DIR / f"{task.name}.mp3"
-    task_queue.update_execution(task, {"stage": "synthesizing_indextts25"})
+    guard_ctx = gpu_guard() if callable(gpu_guard) else (gpu_guard if gpu_guard is not None else nullcontext())
     try:
-        with reference.open("rb") as audio_file:
-            response = requests.post(
-                f"{INDEXTTS25_SERVICE_URL}/v1/voice-clone",
-                data={"text": prompt, "language": language, "speed": f"{speed:.3f}"},
-                files={"reference_audio": (reference.name, audio_file, "application/octet-stream")},
-                timeout=(10, INDEXTTS25_TIMEOUT_SECONDS),
-            )
-        if response.status_code != 200:
-            detail = response.text[:500].replace("\n", " ")
-            raise RuntimeError(f"IndexTTS-2.5 合成失败（HTTP {response.status_code}）：{detail}")
-        if len(response.content) > INDEXTTS25_MAX_OUTPUT_BYTES:
-            raise RuntimeError("IndexTTS-2.5 返回音频过大，已拒绝保存")
-        wav_path.write_bytes(response.content)
+        with guard_ctx:
+            task_queue.update_execution(task, {"stage": "checking_indextts25"})
+            try:
+                health = requests.get(f"{INDEXTTS25_SERVICE_URL}/health", timeout=(5, 10))
+            except requests.RequestException as exc:
+                raise RuntimeError("IndexTTS-2.5 候选服务不可用，未回退到旧版。请联系管理员检查服务状态。") from exc
+            if health.status_code != 200:
+                raise RuntimeError(f"IndexTTS-2.5 健康检查失败（HTTP {health.status_code}）")
+            try:
+                health_payload = health.json()
+            except ValueError as exc:
+                raise RuntimeError("IndexTTS-2.5 健康检查返回了无效内容") from exc
+            if not health_payload.get("ok"):
+                detail = health_payload.get("detail") or health_payload.get("error") or "候选服务未就绪"
+                raise RuntimeError(f"IndexTTS-2.5 候选服务未就绪：{detail}")
+
+            task_queue.update_execution(task, {"stage": "synthesizing_indextts25"})
+            with reference.open("rb") as audio_file:
+                response = requests.post(
+                    f"{INDEXTTS25_SERVICE_URL}/v1/voice-clone",
+                    data={"text": prompt, "language": language, "speed": f"{speed:.3f}"},
+                    files={"reference_audio": (reference.name, audio_file, "application/octet-stream")},
+                    timeout=(10, INDEXTTS25_TIMEOUT_SECONDS),
+                )
+            if response.status_code != 200:
+                detail = response.text[:500].replace("\n", " ")
+                raise RuntimeError(f"IndexTTS-2.5 合成失败（HTTP {response.status_code}）：{detail}")
+            if len(response.content) > INDEXTTS25_MAX_OUTPUT_BYTES:
+                raise RuntimeError("IndexTTS-2.5 返回音频过大，已拒绝保存")
+            wav_path.write_bytes(response.content)
+
+        if callable(on_gpu_done):
+            on_gpu_done()
+
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError("未安装 ffmpeg，无法将 IndexTTS-2.5 WAV 转换为 MP3")
@@ -2973,6 +3378,11 @@ def _normalise_zonos3_language(language: str) -> str:
     if code not in ZONOS3_LANGUAGES:
         raise RuntimeError(f"ZONOS3-Mini 不支持的语音语言：{language}")
     return ZONOS3_LANGUAGES[code]
+
+
+_zonos3_cross_gate = adaptive_concurrency.CrossProcessSlotGate(
+    lambda: int(concurrency_controller.evaluate()["limits"][adaptive_concurrency.TIER_VOICE_CPU])
+)
 
 
 def run_zonos3(task: Task) -> list[str]:
@@ -3010,44 +3420,64 @@ def run_zonos3(task: Task) -> list[str]:
             raise RuntimeError("ZONOS3-Mini 参考音频不能超过 16 MiB")
         payload["speaker_audio_base64"] = base64.b64encode(audio_bytes).decode("ascii")
 
-    task_queue.update_execution(task, {"stage": "checking_zonos3"})
-    with requests.Session() as session:
-        session.trust_env = False
-        try:
-            health = session.get(f"{ZONOS3_SERVICE_URL}/v2/health", timeout=(5, 10))
-        except requests.RequestException as exc:
-            raise RuntimeError("ZONOS3-Mini 服务暂不可用，请检查 brmmedia-zonos3-mini 服务状态") from exc
-        if health.status_code != 200:
-            raise RuntimeError(f"ZONOS3-Mini 健康检查失败（HTTP {health.status_code}）")
+    if not _zonos3_cross_gate.acquire(cancel_check=task.cancel_event.is_set):
+        raise RuntimeError("ZONOS3-Mini 语音任务已取消")
+    try:
+        task_queue.update_execution(task, {"stage": "checking_zonos3"})
+        with requests.Session() as session:
+            session.trust_env = False
+            try:
+                health = session.get(f"{ZONOS3_SERVICE_URL}/v2/health", timeout=(5, 10))
+            except requests.RequestException as exc:
+                raise RuntimeError("ZONOS3-Mini 服务暂不可用，请检查 brmmedia-zonos3-mini 服务状态") from exc
+            if health.status_code != 200:
+                raise RuntimeError(f"ZONOS3-Mini 健康检查失败（HTTP {health.status_code}）")
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        wav_path = OUTPUT_DIR / f"{task.name}.wav"
-        tmp_path = OUTPUT_DIR / f".{task.name}.{os.getpid()}.wav.tmp"
-        task_queue.update_execution(task, {"stage": "synthesizing_zonos3"})
-        try:
-            response = session.post(
-                f"{ZONOS3_SERVICE_URL}/v2/generate",
-                json=payload,
-                timeout=(10, ZONOS3_TIMEOUT_SECONDS),
-            )
-            if response.status_code != 200:
-                detail = response.text[:500].replace("\n", " ")
-                raise RuntimeError(f"ZONOS3-Mini 合成失败（HTTP {response.status_code}）：{detail}")
-            content = response.content
-            if not content.startswith(b"RIFF") or content[8:12] != b"WAVE":
-                raise RuntimeError("ZONOS3-Mini 返回了无效 WAV 数据")
-            if task.cancel_event.is_set():
-                raise RuntimeError("ZONOS3-Mini 语音任务已取消")
-            tmp_path.write_bytes(content)
-            tmp_path.replace(wav_path)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            wav_path = OUTPUT_DIR / f"{task.name}.wav"
+            tmp_path = OUTPUT_DIR / f".{task.name}.{os.getpid()}.wav.tmp"
+            task_queue.update_execution(task, {"stage": "synthesizing_zonos3"})
+
+            def _post_chunk(chunk_payload: dict) -> bytes:
+                with requests.Session() as chunk_session:
+                    chunk_session.trust_env = False
+                    response = chunk_session.post(
+                        f"{ZONOS3_SERVICE_URL}/v2/generate",
+                        json=chunk_payload,
+                        timeout=(10, ZONOS3_TIMEOUT_SECONDS),
+                    )
+                if response.status_code != 200:
+                    detail = response.text[:500].replace("\n", " ")
+                    raise RuntimeError(f"ZONOS3-Mini 合成失败（HTTP {response.status_code}）：{detail}")
+                return response.content
+
+            try:
+                content, meta = zonos3_support.synthesize_zonos3_wav(
+                    payload,
+                    service_url=ZONOS3_SERVICE_URL,
+                    timeout_seconds=ZONOS3_TIMEOUT_SECONDS,
+                    gate=_zonos3_cross_gate,
+                    cancel_check=task.cancel_event.is_set,
+                    post_fn=_post_chunk,
+                )
+                if not content.startswith(b"RIFF") or content[8:12] != b"WAVE":
+                    raise RuntimeError("ZONOS3-Mini 返回了无效 WAV 数据")
+                if task.cancel_event.is_set():
+                    raise RuntimeError("ZONOS3-Mini 语音任务已取消")
+                tmp_path.write_bytes(content)
+                tmp_path.replace(wav_path)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+    finally:
+        _zonos3_cross_gate.release()
 
     task.args.update({
         "engine": "ZONOS3-Mini",
         "language": zonos_lang,
         "speaker_mode": "embedding",
         "output_format": "WAV (44.1kHz)",
+        "chunks": int(meta.get("chunks", 1)),
+        "chunk_workers": int(meta.get("workers", 1)),
     })
     return [str(wav_path)]
 
@@ -3352,19 +3782,72 @@ def submit_workflow_7(prompt, ref_audio, temperature=0.8, language="zh", speed=1
     })
 
 
-def submit_workflow_8(tags, lyrics, duration=30.0, bpm=120, language="zh", model=None):
-    # 音乐生成(ACE-Step 1.5)。
-    if not tags or not tags.strip():
+def submit_workflow_8(
+    tags,
+    lyrics="",
+    duration=30.0,
+    bpm=120,
+    language="zh",
+    model=None,
+    steps=None,
+    cfg=None,
+    abc_planning=True,
+    yue2_mode="full",
+):
+    # 音乐生成(ACE-Step 1.5 XL / YuE2-3B)。
+    if not tags or not str(tags).strip():
         raise gr.Error("请输入音乐风格标签(tags)")
-    model = require_installed_acestep_model(str(model or default_acestep_model()))
-    return submit("音乐生成", {
-        "tags": tags,
-        "lyrics": lyrics,
+    norm_tags, norm_lyrics, norm_lang, is_instrumental = normalize_music_tags_and_lyrics(
+        tags, lyrics, language
+    )
+    raw_model = str(model or "").strip().lower()
+    if raw_model in {"", "auto"}:
+        resolved_model = default_acestep_model(has_lyrics=not is_instrumental)
+    else:
+        resolved_model = require_installed_acestep_model(raw_model)
+    payload = {
+        "tags": norm_tags,
+        "lyrics": norm_lyrics,
+        "raw_tags": str(tags).strip(),
         "duration": duration,
         "bpm": bpm,
-        "language": language,
-        "model": model,
-    })
+        "language": norm_lang,
+        "model": resolved_model,
+        "is_instrumental": is_instrumental,
+        "abc_planning": bool(abc_planning),
+        "yue2_mode": str(yue2_mode or "full").strip().lower() or "full",
+    }
+    if steps is not None and int(steps) > 0:
+        payload["steps"] = int(steps)
+    if cfg is not None and float(cfg) > 0:
+        payload["cfg"] = float(cfg)
+    return submit("音乐生成", payload)
+
+
+def ui_submit_workflow_8(
+    tags,
+    lyrics,
+    duration=30.0,
+    bpm=120,
+    language="zh",
+    model=None,
+    steps=0,
+    cfg=0.0,
+    abc_planning=True,
+    yue2_mode="full",
+):
+    return submit_workflow_8(
+        tags,
+        lyrics,
+        duration=duration,
+        bpm=bpm,
+        language=language,
+        model=model,
+        steps=steps,
+        cfg=cfg,
+        abc_planning=abc_planning,
+        yue2_mode=yue2_mode,
+    )
 
 
 def on_seedvr2_video_upload(filepath):
@@ -3582,6 +4065,27 @@ def api_submit_workflow_8(
     tags: str, lyrics: str, duration: float, bpm: int, language: str, model: str
 ) -> dict:
     return submit_workflow_8(tags, lyrics, duration, bpm, language, model)
+
+
+def api_submit_yue2_music(
+    tags: str,
+    lyrics: str = "",
+    duration: float = 120.0,
+    mode: str = "full",
+    abc_planning: bool = True,
+    steps: int = 32,
+) -> dict:
+    return submit_workflow_8(
+        tags,
+        lyrics,
+        duration=duration,
+        bpm=120,
+        language="zh",
+        model="yue2",
+        steps=steps,
+        abc_planning=abc_planning,
+        yue2_mode=mode,
+    )
 
 
 def api_submit_seedvr2_enhance(
@@ -3811,45 +4315,154 @@ def build_workflow_7(workflow_name: str, args: dict) -> dict:
     return wf
 
 
+def build_yue2_music_workflow(args: dict) -> dict:
+    """Build ComfyUI API workflow for YuE2-3B (CheckpointLoaderSimple + YuE2GenerateABC/Music)."""
+    checkpoints = installed_yue2_checkpoints()
+    if not checkpoints:
+        raise gr.Error("未检测到 YuE2-3B Checkpoint 权重，请先完成部署。")
+    ckpt_name = checkpoints[0]
+    norm_tags, norm_lyrics, _, _ = normalize_music_tags_and_lyrics(
+        args.get("tags", ""), args.get("lyrics", ""), args.get("language", "zh")
+    )
+    seed = random.randint(1, 2**32 - 1)
+    mode = str(args.get("yue2_mode") or "full").strip().lower()
+    if mode not in {"full", "melody"}:
+        mode = "full"
+    abc_planning = bool(args.get("abc_planning", True))
+    max_duration = max(10.0, min(float(args.get("duration") or 120.0), 360.0))
+    raw_steps = args.get("steps")
+    use_steps = max(16, min(int(raw_steps), 64)) if raw_steps and int(raw_steps) > 0 else 32
+    raw_cfg = args.get("cfg")
+    use_cfg = max(1.0, min(float(raw_cfg), 5.0)) if raw_cfg and float(raw_cfg) > 0 else 1.0
+
+    wf: dict = {
+        "15": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": ckpt_name},
+        },
+        "25": {
+            "class_type": "YuE2GenerateMusic",
+            "inputs": {
+                "clip": ["15", 1],
+                "style": norm_tags,
+                "lyrics": norm_lyrics,
+                "abc": ["24", 0] if abc_planning else "",
+                "seed": seed,
+                "mode": mode,
+                "max_duration": max_duration,
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 100,
+                "repetition_penalty": 1.2,
+                "cfg_scale": 1.0 if abc_planning else 1.01,
+            },
+        },
+        "18": {
+            "class_type": "ConditioningZeroOut",
+            "inputs": {"conditioning": ["25", 0]},
+        },
+        "5": {
+            "class_type": "EmptyYuE2LatentAudio",
+            "inputs": {"seconds": ["25", 1], "batch_size": 1},
+        },
+        "8": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["15", 0],
+                "positive": ["25", 0],
+                "negative": ["18", 0],
+                "latent_image": ["5", 0],
+                "seed": seed,
+                "steps": use_steps,
+                "cfg": use_cfg,
+                "sampler_name": "dpm_2",
+                "scheduler": "sgm_uniform",
+                "denoise": 1.0,
+            },
+        },
+        "9": {
+            "class_type": "VAEDecodeAudio",
+            "inputs": {"samples": ["8", 0], "vae": ["15", 2]},
+        },
+        "107": {
+            "class_type": "SaveAudioMP3",
+            "inputs": {"audio": ["9", 0], "filename_prefix": "YuE2_music", "quality": "320k"},
+        },
+    }
+    if abc_planning:
+        wf["24"] = {
+            "class_type": "YuE2GenerateABC",
+            "inputs": {
+                "clip": ["15", 1],
+                "style": norm_tags,
+                "lyrics": norm_lyrics,
+                "seed": seed,
+                "mode": mode,
+                "max_abc_tokens": 8192,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 30,
+                "repetition_penalty": 1.005,
+                "penalty_window": 100,
+            },
+        }
+    return wf
+
+
 def build_workflow_8(workflow_name: str, args: dict) -> dict:
     """
-    音乐生成工作流构建(ACE-Step 1.5)。
+    音乐生成工作流构建(ACE-Step 1.5 XL Base/Turbo + YuE2-3B)。
     工作流结构:
-      UNETLoader(turbo) -> ModelSamplingAuraFlow -> KSampler(8步,超快)
-      DualCLIPLoader(qwen0.6b+4b) -> TextEncodeAceStepAudio1.5(tags+lyrics)
+      ACE-Step: UNETLoader(base/turbo) -> ModelSamplingAuraFlow -> KSampler
+      DualCLIPLoader(qwen0.6b+4b) -> TextEncodeAceStepAudio1.5(tags+lyrics+lang+cfg_scale)
       -> ConditioningZeroOut(negative)
       EmptyAceStep1.5LatentAudio -> KSampler -> VAEDecodeAudio -> SaveAudioMP3
-    args:
-      tags:     音乐风格标签(如 "pop, upbeat, electronic")
-      lyrics:   歌词(可选,纯音乐留空)
-      duration: 时长秒(默认30)
-      bpm:      节拍(默认120)
-      language: 语言(默认zh)
-      model:    模型版本 turbo/base/sft（默认优先 base 高品质）
+      YuE2: CheckpointLoaderSimple -> YuE2GenerateABC -> YuE2GenerateMusic -> KSampler -> VAEDecodeAudio
     """
     import json
+
+    norm_tags, norm_lyrics, norm_lang, is_instrumental = normalize_music_tags_and_lyrics(
+        args.get("tags", ""), args.get("lyrics", ""), args.get("language", "zh")
+    )
+    raw_model = str(args.get("model") or "").strip().lower()
+    if raw_model in {"", "auto"}:
+        model = default_acestep_model(has_lyrics=not is_instrumental)
+    else:
+        model = require_installed_acestep_model(raw_model)
+
+    if model == "yue2":
+        return build_yue2_music_workflow(args)
+
     path = WORKFLOW_DIR / (workflow_name + ".json")
     if not path.exists():
         raise gr.Error(f"找不到工作流文件:{path}")
     wf = json.loads(path.read_text(encoding="utf-8"))
 
-    # 选择模型版本(turbo/base/sft),对应不同的采样参数
-    model = require_installed_acestep_model(str(args.get("model") or default_acestep_model()))
-    wf["104"]["inputs"]["unet_name"] = ACE_STEP_MODEL_FILENAMES[model]
+    # 选择模型版本(base/turbo), 对应不同的采样参数与 LM 引导强度
+    wf["104"]["inputs"]["unet_name"] = resolve_acestep_unet_name(model)
+    raw_steps = args.get("steps")
+    raw_cfg = args.get("cfg")
     if model == "turbo":
-        wf["3"]["inputs"]["steps"] = 8        # turbo: 8步极速
-        wf["3"]["inputs"]["cfg"] = 1.0
+        use_steps = max(4, min(int(raw_steps), 20)) if raw_steps and int(raw_steps) > 0 else 8
+        use_cfg = max(1.0, min(float(raw_cfg), 4.0)) if raw_cfg and float(raw_cfg) > 0 else 1.0
+        lm_cfg_scale = 2.8 if not is_instrumental else 2.0
     else:
-        wf["3"]["inputs"]["steps"] = 50       # base/sft: 50步高质量
-        wf["3"]["inputs"]["cfg"] = 4.0
+        use_steps = max(20, min(int(raw_steps), 100)) if raw_steps and int(raw_steps) > 0 else 50
+        use_cfg = max(1.0, min(float(raw_cfg), 10.0)) if raw_cfg and float(raw_cfg) > 0 else 4.0
+        lm_cfg_scale = 2.5 if not is_instrumental else 2.0
 
-    # 文本编码: tags(风格) + lyrics(歌词)
-    wf["94"]["inputs"]["tags"] = args["tags"]
-    wf["94"]["inputs"]["lyrics"] = args.get("lyrics", "")
+    wf["3"]["inputs"]["steps"] = use_steps
+    wf["3"]["inputs"]["cfg"] = use_cfg
+
+    # 文本编码: 规范化后的声乐 tags + 结构化 lyrics + 自动识别 language
+    wf["94"]["inputs"]["tags"] = norm_tags
+    wf["94"]["inputs"]["lyrics"] = norm_lyrics
     wf["94"]["inputs"]["bpm"] = int(args.get("bpm", 120))
-    wf["94"]["inputs"]["language"] = args.get("language", "zh")
+    wf["94"]["inputs"]["language"] = norm_lang
     duration = float(args.get("duration", 30.0))
     wf["94"]["inputs"]["duration"] = duration
+    wf["94"]["inputs"]["generate_audio_codes"] = True
+    wf["94"]["inputs"]["cfg_scale"] = lm_cfg_scale
     wf["94"]["inputs"]["seed"] = random.randint(1, 1000000)
 
     # latent 时长 = 生成时长
@@ -3857,6 +4470,7 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
 
     # KSampler seed(独立于文本编码的seed)
     wf["3"]["inputs"]["seed"] = random.randint(1, 1000000)
+    wf["107"]["inputs"]["filename_prefix"] = f"ACE-Step_{model}"
     return wf
 
 
@@ -4105,8 +4719,8 @@ def _seedvr2_video_segments(source: Path, info: dict, temp_dir: Path, task: Task
     return segments
 
 
-def run_seedvr2_video_task(task: Task) -> list[str]:
-    """Process a video one segment at a time, then mux the original audio."""
+def run_seedvr2_video_task(task: Task, *, gpu_guard_factory=None, on_gpu_done=None) -> list[str]:
+    """Process a video one segment at a time, holding GPU0 only during inference."""
     if task.prompt_id:
         # Task history intentionally does not persist source filenames or
         # temporary segments. Never re-run only the tail of a partially lost job.
@@ -4138,83 +4752,89 @@ def run_seedvr2_video_task(task: Task) -> list[str]:
     try:
         with tempfile.TemporaryDirectory(prefix=f".seedvr2-{task.id}-", dir=OUTPUT_DIR) as temporary:
             temp_dir = Path(temporary)
+            # Pre-slicing runs purely on CPU before acquiring GPU0 lock.
             segments = _seedvr2_video_segments(source, info, temp_dir, task, deadline)
             segment_outputs: list[Path] = []
             task.args["segments"] = len(segments)
-            for index, segment in enumerate(segments, start=1):
-                if task.cancel_event.is_set():
-                    raise RuntimeError("用户请求中断")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("SeedVR2 视频任务超过 12 小时处理上限")
-                uploaded_name = str(task.args["video_filename"])
-                uploaded_by_worker = False
-                if segment != source:
-                    upload_timeout = max(120, min(900, int(segment.stat().st_size / (10 * 1024 * 1024) * 60)))
-                    uploaded_name = upload_image(segment, timeout=upload_timeout)
-                    uploaded_by_worker = True
-                task_queue.update_execution(task, {
-                    "prompt_id": "",
-                    "stage": f"processing_video_segment_{index}_of_{len(segments)}",
-                    "current_step": index - 1,
-                    "total_steps": len(segments),
-                    "progress": (index - 1) / len(segments),
-                })
-                args = {
-                    **task.args, "mode": "video", "video_filename": uploaded_name,
-                    "scale_by": scale_by,
-                }
-                workflow = build_seedvr2_video_workflow(task.workflow_name, args)
-
-                def submitted(prompt_id: str) -> None:
-                    task_queue.update_execution(task, {"prompt_id": prompt_id})
-
-                def progress(event: dict) -> None:
-                    event = dict(event)
-                    if event.get("node_id") in SEEDVR2_STAGE_BY_NODE:
-                        event["stage"] = SEEDVR2_STAGE_BY_NODE[event["node_id"]]
-                    if event.get("progress") is not None:
-                        event["progress"] = (
-                            index - 1 + float(event["progress"])
-                        ) / len(segments)
-                    task_queue.update_execution(task, event)
-
-                outputs = None
-                try:
-                    remaining = max(1, int(deadline - time.monotonic()))
-                    outputs = run_workflow(
-                        workflow,
-                        timeout=remaining,
-                        submit_timeout=min(remaining, 600),
-                        stop_event=task.cancel_event,
-                        on_submitted=submitted,
-                        on_progress=progress,
-                    )
-                    part_dir = temp_dir / f"result_{index:04d}"
-                    saved = extract_result(
-                        outputs, task, destination_dir=part_dir,
-                        filename_prefix=f"part_{index:04d}",
-                    )
-                    videos = [Path(path) for path in saved if Path(path).suffix.lower() in VIDEO_EXTS]
-                    if len(videos) != 1 or videos[0].stat().st_size <= 0:
-                        raise RuntimeError("SeedVR2 分段没有生成有效 MP4 视频")
-                    segment_outputs.append(videos[0])
-                finally:
-                    if outputs is not None:
-                        _cleanup_seedvr2_comfy_outputs(outputs)
-                    if uploaded_by_worker:
-                        try:
-                            resolve_comfy_input(COMFY_ROOT, uploaded_name).unlink(missing_ok=True)
-                        except (OSError, ValueError):
-                            pass
+            gpu_ctx = gpu_guard_factory() if callable(gpu_guard_factory) else nullcontext()
+            with gpu_ctx:
+                for index, segment in enumerate(segments, start=1):
+                    if task.cancel_event.is_set():
+                        raise RuntimeError("用户请求中断")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("SeedVR2 视频任务超过 12 小时处理上限")
+                    uploaded_name = str(task.args["video_filename"])
+                    uploaded_by_worker = False
                     if segment != source:
-                        segment.unlink(missing_ok=True)
-                task_queue.update_execution(task, {
-                    "prompt_id": "",
-                    "stage": f"video_segment_{index}_of_{len(segments)}_complete",
-                    "current_step": index,
-                    "total_steps": len(segments),
-                    "progress": index / len(segments),
-                })
+                        upload_timeout = max(120, min(900, int(segment.stat().st_size / (10 * 1024 * 1024) * 60)))
+                        uploaded_name = upload_image(segment, timeout=upload_timeout)
+                        uploaded_by_worker = True
+                    task_queue.update_execution(task, {
+                        "prompt_id": "",
+                        "stage": f"processing_video_segment_{index}_of_{len(segments)}",
+                        "current_step": index - 1,
+                        "total_steps": len(segments),
+                        "progress": (index - 1) / len(segments),
+                    })
+                    args = {
+                        **task.args, "mode": "video", "video_filename": uploaded_name,
+                        "scale_by": scale_by,
+                    }
+                    workflow = build_seedvr2_video_workflow(task.workflow_name, args)
+
+                    def submitted(prompt_id: str) -> None:
+                        task_queue.update_execution(task, {"prompt_id": prompt_id})
+
+                    def progress(event: dict) -> None:
+                        event = dict(event)
+                        if event.get("node_id") in SEEDVR2_STAGE_BY_NODE:
+                            event["stage"] = SEEDVR2_STAGE_BY_NODE[event["node_id"]]
+                        if event.get("progress") is not None:
+                            event["progress"] = (
+                                index - 1 + float(event["progress"])
+                            ) / len(segments)
+                        task_queue.update_execution(task, event)
+
+                    outputs = None
+                    try:
+                        remaining = max(1, int(deadline - time.monotonic()))
+                        outputs = run_workflow(
+                            workflow,
+                            timeout=remaining,
+                            submit_timeout=min(remaining, 600),
+                            stop_event=task.cancel_event,
+                            on_submitted=submitted,
+                            on_progress=progress,
+                        )
+                        part_dir = temp_dir / f"result_{index:04d}"
+                        saved = extract_result(
+                            outputs, task, destination_dir=part_dir,
+                            filename_prefix=f"part_{index:04d}",
+                        )
+                        videos = [Path(path) for path in saved if Path(path).suffix.lower() in VIDEO_EXTS]
+                        if len(videos) != 1 or videos[0].stat().st_size <= 0:
+                            raise RuntimeError("SeedVR2 分段没有生成有效 MP4 视频")
+                        segment_outputs.append(videos[0])
+                    finally:
+                        if outputs is not None:
+                            _cleanup_seedvr2_comfy_outputs(outputs)
+                        if uploaded_by_worker:
+                            try:
+                                resolve_comfy_input(COMFY_ROOT, uploaded_name).unlink(missing_ok=True)
+                            except (OSError, ValueError):
+                                pass
+                        if segment != source:
+                            segment.unlink(missing_ok=True)
+                    task_queue.update_execution(task, {
+                        "prompt_id": "",
+                        "stage": f"video_segment_{index}_of_{len(segments)}_complete",
+                        "current_step": index,
+                        "total_steps": len(segments),
+                        "progress": index / len(segments),
+                    })
+
+            if callable(on_gpu_done):
+                on_gpu_done()
 
             if not segment_outputs:
                 raise RuntimeError("SeedVR2 没有生成可合并的视频片段")
@@ -4287,9 +4907,62 @@ def _adaptive_config_from_yzy() -> adaptive_concurrency.AdaptiveConfig:
     return adaptive_concurrency.load_adaptive_config(yzy_config)
 
 
+def _probe_comfy_queue_fast() -> dict:
+    if os.environ.get("BRM_ADAPTIVE_EXTERNAL_QUEUE_PROBE", "1") == "0":
+        return {"_available": False}
+    if not callable(getattr(comfyui_server, "get_queue", None)):
+        return {"_available": False}
+    session_cls = getattr(requests, "Session", None)
+    if not callable(session_cls):
+        return {"_available": False}
+    try:
+        with session_cls() as s:
+            s.trust_env = False
+            r = s.get(BASE.rstrip("/") + "/queue", timeout=0.4)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict):
+                    data["_available"] = True
+                    return data
+    except Exception:
+        pass
+    return {"_available": False}
+
+
 concurrency_controller = adaptive_concurrency.AdaptiveConcurrencyController(
-    config_provider=_adaptive_config_from_yzy
+    config_provider=_adaptive_config_from_yzy,
+    comfy_queue_fn=_probe_comfy_queue_fast,
+    known_prompt_ids_fn=lambda: task_queue.active_prompt_ids() if "task_queue" in globals() else set(),
 )
+
+
+def _make_exclusive_gpu_guard(task: Task, target_base: str, model_group: str):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _guard():
+        with media_runtime_guard.lease():
+            task_queue.update_execution(task, {"stage": "runtime_handover"})
+            media_runtime_guard.handover(
+                BASE,
+                target=target_base,
+                owned_prompt=task.prompt_id or "",
+                model_group=model_group,
+            )
+            task_queue.update_execution(
+                task, {"stage": "recovering" if task.prompt_id else "building_workflow"}
+            )
+            try:
+                yield
+            finally:
+                task_failed = sys.exc_info()[0] is not None
+                media_runtime_guard.release_all(
+                    BASE,
+                    model_group=model_group,
+                    force_free=task_failed,
+                )
+
+    return _guard
 
 
 def process_task(task: Task) -> None:
@@ -4297,6 +4970,41 @@ def process_task(task: Task) -> None:
         # ZONOS3-Mini runs on CPU (:1919) and consumes zero A5000 VRAM.
         return _process_task_impl(task)
     profile = adaptive_concurrency.classify_workflow(task.workflow_name)
+    model_group = media_runtime_guard.workflow_model_group(task.workflow_name, task.args)
+    needs_guard = h3_image.runtime_ready() or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1"
+
+    if task.workflow_name == "IndexTTS-2.5-语音克隆":
+        if (
+            VOICE_PARALLEL_ENABLED
+            and task.workflow_name in VOICE_PARALLEL_WORKFLOWS
+            and not profile.shares_comfy_light_lease
+        ):
+            guard_factory = lambda: media_runtime_guard.voice_lease(BASE, task.cancel_event)
+        elif needs_guard:
+            guard_factory = _make_exclusive_gpu_guard(task, BASE, model_group)
+        else:
+            guard_factory = nullcontext
+        task.result = run_indextts25(
+            task,
+            gpu_guard=guard_factory,
+            on_gpu_done=lambda: task_queue.release_gpu_slot(task),
+        )
+        task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
+        return
+
+    if task.workflow_name == "SeedVR2-图像/视频增强修复" and task.args.get("mode") == "video":
+        model_variant = task.args.get("model_variant", SEEDVR2_MODEL_DEFAULT)
+        if not model_installed(COMFY_ROOT, model_variant):
+            raise RuntimeError(f"SeedVR2 {model_variant} 权重或共享 VAE 不存在，请检查模型部署状态")
+        guard_factory = _make_exclusive_gpu_guard(task, BASE, model_group) if needs_guard else nullcontext
+        task.result = run_seedvr2_video_task(
+            task,
+            gpu_guard_factory=guard_factory,
+            on_gpu_done=lambda: task_queue.release_gpu_slot(task),
+        )
+        task_queue.update_execution(task, {"stage": "completed", "progress": 1.0})
+        return
+
     if (
         VOICE_PARALLEL_ENABLED
         and task.workflow_name in VOICE_PARALLEL_WORKFLOWS
@@ -4316,7 +5024,6 @@ def process_task(task: Task) -> None:
         task.result = h3_image.run_task(task, OUTPUT_DIR, BASE, lambda event: task_queue.update_execution(task, event))
         task_queue.update_execution(task, {"stage": "completed", "progress": 1.0, "current_step": 6, "total_steps": 6})
         return
-    needs_guard = h3_image.runtime_ready() or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1"
     if not needs_guard and task.workflow_name != qwen3_tts.WORKFLOW:
         return _process_task_impl(task)
     if (
@@ -4324,21 +5031,15 @@ def process_task(task: Task) -> None:
         and not profile.exclusive
         and profile.shares_comfy_light_lease
     ):
-        with media_runtime_guard.light_lease(BASE, task.cancel_event):
+        with media_runtime_guard.light_lease(BASE, task.cancel_event, model_group=model_group):
             task_queue.update_execution(
                 task,
                 {"stage": "recovering" if task.prompt_id else "building_workflow"},
             )
             return _process_task_impl(task)
     target = qwen_image21.BASE if task.workflow_name in qwen_image21.WORKFLOWS else BASE
-    with media_runtime_guard.lease():
-        task_queue.update_execution(task, {"stage": "runtime_handover"})
-        media_runtime_guard.handover(BASE, target=target, owned_prompt=task.prompt_id or '')
-        task_queue.update_execution(task, {"stage": "recovering" if task.prompt_id else "building_workflow"})
-        try:
-            return _process_task_impl(task)
-        finally:
-            media_runtime_guard.release_all(BASE)
+    with _make_exclusive_gpu_guard(task, target, model_group)():
+        return _process_task_impl(task)
 
 
 def _process_task_impl(task: Task) -> None:
@@ -4541,8 +5242,15 @@ RETRY_FIELDS = {
 }
 
 
-def submit(wfname, args):
+def submit(wfname, args, auto_enhance: bool = False):
     """入队并返回供 LAN API/自动化跟踪的安全任务标识。"""
+    args = dict(args or {})
+    enhance = bool(args.pop("auto_enhance", False)) or bool(auto_enhance)
+    if enhance and wfname != ZONOS3_WORKFLOW and "TTS" not in str(wfname) and "IndexTTS" not in str(wfname):
+        if isinstance(args.get("prompt"), str) and args["prompt"].strip():
+            args["prompt"] = llm_runtime.enhance_prompt(args["prompt"], workflow=str(wfname))
+        elif wfname == "音乐生成" and isinstance(args.get("tags"), str) and args["tags"].strip():
+            args["tags"] = llm_runtime.enhance_prompt(args["tags"], workflow=str(wfname), max_length=2000)
     try:
         usage = shutil.disk_usage(OUTPUT_DIR)
         free_percent = usage.free * 100 / usage.total
@@ -4973,16 +5681,29 @@ def _task_status_class(status: TaskStatus) -> str:
     }.get(status, "is-queued")
 
 
-_asset_count_cache: tuple[float, int | None] = (0.0, None)
+_asset_count_cache: tuple[float, int | None, str] = (0.0, None, "")
 _asset_count_lock = threading.Lock()
+_ASSET_COUNT_CALIBRATE_SECONDS = max(
+    30.0, float(os.environ.get("BRM_ASSET_COUNT_CALIBRATE_SECONDS", "300.0") or 300.0)
+)
+
+
+def _adjust_cached_output_asset_count(delta: int) -> None:
+    global _asset_count_cache
+    out_key = str(OUTPUT_DIR)
+    with _asset_count_lock:
+        cached_at, cached_val, cached_dir = _asset_count_cache
+        if cached_val is not None and cached_dir == out_key:
+            _asset_count_cache = (cached_at, max(0, cached_val + int(delta)), cached_dir)
 
 
 def _cached_output_asset_count() -> int | None:
     global _asset_count_cache
     now = time.monotonic()
+    out_key = str(OUTPUT_DIR)
     with _asset_count_lock:
-        cached_at, cached_val = _asset_count_cache
-        if cached_val is not None and now - cached_at < 15.0:
+        cached_at, cached_val, cached_dir = _asset_count_cache
+        if cached_val is not None and cached_dir == out_key and (now - cached_at) < _ASSET_COUNT_CALIBRATE_SECONDS:
             return cached_val
     try:
         count = sum(
@@ -4993,7 +5714,7 @@ def _cached_output_asset_count() -> int | None:
     except OSError:
         return None
     with _asset_count_lock:
-        _asset_count_cache = (now, count)
+        _asset_count_cache = (now, count, out_key)
     return count
 
 
@@ -5143,7 +5864,9 @@ def api_delete_asset(task_id: str, filename: str, confirmed: bool = False) -> di
                 if isinstance(t.result, list):
                     # Resolution without strict=True also matches the just-deleted file.
                     t.result = [p for p in t.result if Path(p).resolve() != path]
+            task_queue._state_version += 1
             task_queue._save_history()
+            _adjust_cached_output_asset_count(-1)
         except OSError:
             return {"error": "delete_failed"}
         # Cached ZIP exports contain copies: invalidate them, not other originals.
@@ -5496,83 +6219,106 @@ def _build_completed_assets_bundle_locked():
 
 def _build_dashboard_snapshot():
     """Render the shared task state plus the homepage's real dashboard data."""
+    global _dashboard_static_cache
+    cur_ver = task_queue.state_version
     pending, running, done = task_queue.snapshot()
-
-    def note(t: Task) -> str:
-        if t.status == TaskStatus.CANCELLED:
-            return t.error or "用户请求中断"
-        if t.status == TaskStatus.TIMEOUT:
-            return t.error or "等待超时，已请求中断 ComfyUI"
-        if t.status == TaskStatus.ERROR:
-            return t.error
-        if t.status == TaskStatus.DONE and isinstance(t.result, list):
-            return f"产出 {len(t.result)} 个文件"
-        return ""
-
-    def cost(t: Task) -> str:
-        # 只有已完成的任务显示耗时,其余一律用短横代替。
-        if t.status in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.TIMEOUT, TaskStatus.ERROR) and t.start_ts and t.done_ts:
-            return _fmt_duration(t.done_ts - t.start_ts)
-        return "-"
-
-    # 汇总处理中 / 排队中 / 已完成的所有任务,按提交时间倒序(最新的在最前面)。
-    all_tasks = list(pending) + list(running) + list(done)
-    all_tasks.sort(key=lambda t: t.submit_ts, reverse=True)
-
-    pending_positions = {task.id: index for index, task in enumerate(pending, start=1)}
-    rows = [
-        "| 任务名称 | 状态 | 实时进度 | 提交时间 | 耗时 | 备注 |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
-    for t in all_tasks[:12]:
-        icon = STATUS_ICONS.get(t.status, "")
-        rows.append(
-            f"| {_md_cell(t.name)} "
-            f"| {icon} {t.status.value} "
-            f"| {_md_cell(_task_progress_text(t, pending_positions.get(t.id)))} "
-            f"| {_fmt_ts(t.submit_ts)} "
-            f"| {cost(t)} "
-            f"| {_md_cell(note(t))} |"
-        )
-    if len(rows) == 2:      # 只有表头,说明暂无任务
-        rows.append("| 暂无任务 |  |  |  |  |  |")
-    table_md = "\n".join(rows)
-
-    ok = sum(1 for t in done if t.status == TaskStatus.DONE)
-    cancelled = sum(1 for t in done if t.status == TaskStatus.CANCELLED)
-    timed_out = sum(1 for t in done if t.status == TaskStatus.TIMEOUT)
-    err = sum(1 for t in done if t.status == TaskStatus.ERROR)
     backend = "在线" if is_alive() else "离线"
-    summary = _render_queue_summary(
-        backend=backend,
-        pending=len(pending),
-        running=len(running),
-        completed=ok,
-        cancelled=cancelled,
-        timed_out=timed_out,
-        failed=err,
-    )
+    cache_key = (id(task_queue), cur_ver, backend, QUEUE_CONCURRENCY, str(OUTPUT_DIR))
+    cached_static = _dashboard_static_cache
 
-    dashboard_tasks = all_tasks
-    asset_records = _asset_records(done)
+    if cached_static is not None and cached_static[0] == cache_key and not running:
+        _, summary, cards_html, table_md, assets_html = cached_static
+    else:
+        def note(t: Task) -> str:
+            if t.status == TaskStatus.CANCELLED:
+                return t.error or "用户请求中断"
+            if t.status == TaskStatus.TIMEOUT:
+                return t.error or "等待超时，已请求中断 ComfyUI"
+            if t.status == TaskStatus.ERROR:
+                return t.error
+            if t.status == TaskStatus.DONE and isinstance(t.result, list):
+                return f"产出 {len(t.result)} 个文件"
+            return ""
+
+        def cost(t: Task) -> str:
+            # 只有已完成的任务显示耗时,其余一律用短横代替。
+            if t.status in (TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.TIMEOUT, TaskStatus.ERROR) and t.start_ts and t.done_ts:
+                return _fmt_duration(t.done_ts - t.start_ts)
+            return "-"
+
+        # 汇总处理中 / 排队中 / 已完成的所有任务,按提交时间倒序(最新的在最前面)。
+        all_tasks = list(pending) + list(running) + list(done)
+        all_tasks.sort(key=lambda t: t.submit_ts, reverse=True)
+
+        pending_positions = {task.id: index for index, task in enumerate(pending, start=1)}
+        rows = [
+            "| 任务名称 | 状态 | 实时进度 | 提交时间 | 耗时 | 备注 |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for t in all_tasks[:12]:
+            icon = STATUS_ICONS.get(t.status, "")
+            rows.append(
+                f"| {_md_cell(t.name)} "
+                f"| {icon} {t.status.value} "
+                f"| {_md_cell(_task_progress_text(t, pending_positions.get(t.id)))} "
+                f"| {_fmt_ts(t.submit_ts)} "
+                f"| {cost(t)} "
+                f"| {_md_cell(note(t))} |"
+            )
+        if len(rows) == 2:      # 只有表头,说明暂无任务
+            rows.append("| 暂无任务 |  |  |  |  |  |")
+        table_md = "\n".join(rows)
+
+        ok = sum(1 for t in done if t.status == TaskStatus.DONE)
+        cancelled = sum(1 for t in done if t.status == TaskStatus.CANCELLED)
+        timed_out = sum(1 for t in done if t.status == TaskStatus.TIMEOUT)
+        err = sum(1 for t in done if t.status == TaskStatus.ERROR)
+        summary = _render_queue_summary(
+            backend=backend,
+            pending=len(pending),
+            running=len(running),
+            completed=ok,
+            cancelled=cancelled,
+            timed_out=timed_out,
+            failed=err,
+        )
+        cards_html = _render_task_cards(all_tasks, pending_positions)
+        assets_html = _render_dashboard_assets(_asset_records(done))
+        _dashboard_static_cache = (cache_key, summary, cards_html, table_md, assets_html)
+
     system_stats = _real_system_status(done, running)
     return (
         summary,
         gr.update(value=_render_live_progress(running), visible=bool(running)),
-        _render_task_cards(dashboard_tasks, pending_positions),
+        cards_html,
         _render_system_status(system_stats),
         table_md,
-        _render_dashboard_assets(asset_records),
+        assets_html,
     )
 
 
 _dashboard_cache_lock = threading.Lock()
 _dashboard_cache = None
 _dashboard_cache_started = False
+_dashboard_static_cache = None  # (cache_key, summary, cards_html, table_md, assets_html)
 
 
-def _refresh_dashboard_cache():
-    global _dashboard_cache
+def _refresh_dashboard_cache(*, force: bool = True):
+    global _dashboard_cache, _dashboard_static_cache
+    if not force:
+        with _dashboard_cache_lock:
+            has_cache = _dashboard_cache is not None
+        if has_cache:
+            _, running, _ = task_queue.snapshot()
+            cur_ver = task_queue.state_version
+            cached = _dashboard_static_cache
+            last_ver = cached[0][1] if (cached is not None and cached[0][0] == id(task_queue)) else -1
+            if not running and cur_ver == last_ver:
+                # Telemetry refreshes on a slower cadence when idle; skip full HTML rebuilds every 1.5s.
+                with _system_status_lock:
+                    sys_cached_at = _system_status_cache[0]
+                if (time.monotonic() - sys_cached_at) < 4.5:
+                    return
     snapshot = _build_dashboard_snapshot()
     with _dashboard_cache_lock:
         _dashboard_cache = snapshot
@@ -5586,7 +6332,7 @@ def start_dashboard_cache_worker():
             return
         _dashboard_cache_started = True
     try:
-        _refresh_dashboard_cache()
+        _refresh_dashboard_cache(force=True)
     except Exception:
         logging.exception('Initial dashboard snapshot failed; background collector will retry')
 
@@ -5594,7 +6340,7 @@ def start_dashboard_cache_worker():
         while True:
             started = time.monotonic()
             try:
-                _refresh_dashboard_cache()
+                _refresh_dashboard_cache(force=False)
             except Exception:
                 logging.exception('Dashboard refresh failed; retaining last completed snapshot')
             time.sleep(max(0.25, 1.5 - (time.monotonic() - started)))
@@ -6026,11 +6772,11 @@ BRM_NAV_JS = r"""
     "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
     "首尾帧视频LTX2.3": "video", "数字人-语音驱动LTX2.3": "video",
     "图像/视频增强修复 SeedVR2": "media",
-    "语音克隆 & TTS": "audio", "音乐生成ACE-Step 1.5": "audio",
+    "语音克隆 & TTS": "audio", "音乐生成 YuE2-3B": "audio", "音乐生成ACE-Step 1.5": "audio",
     "Qwen 大模型": "tools"
   };
   const firstTabs = { image:"Qwen Image 2.1 文生图", video:"MiniMax H3 文生视频", media:"图像/视频增强修复 SeedVR2", audio:"语音克隆 & TTS", tools:"Qwen 大模型", home:"任务中心" };
-  const fallbackTabs = { image:"文生图Z-Image", video:"文生视频 LTX2.3", audio:"音乐生成ACE-Step 1.5" };
+  const fallbackTabs = { image:"文生图Z-Image", video:"文生视频 LTX2.3", audio:"音乐生成 YuE2-3B" };
   const auxiliarySections = new Set(["home", "assets", "history", "settings", "keys"]);
   const boot = () => {
     const root = document.querySelector("#workflow-tabs"); const nav = document.querySelector("#primary-nav");
@@ -7020,14 +7766,91 @@ def build_ui():
             # ========== Tab 7 ==========
             with gr.Tab("语音克隆 & TTS"):
                 build_voice_clone_panel()
+            with gr.Tab("音乐生成 YuE2-3B"):
+                gr.Markdown(
+                    "## 音乐生成 · YuE2-3B（符号 ABC 乐谱规划 + 词曲唱一体生成）\n"
+                    "专为带歌词人声歌曲与结构化编曲打造：先由 **YuE2 ABC 乐谱规划器** 生成旋律与和弦，再由 **YuE2 3B 音频扩散模型** 合成完整歌曲（支持中英日韩等多语种，无需手写 `[Verse]`/`[Chorus]`，系统自动结构化分段并强化人声）。",
+                    elem_classes=["workflow-heading"],
+                )
+                with gr.Row(equal_height=True):
+                    with gr.Column(scale=1):
+                        yue2_style_preset = gr.Dropdown(
+                            label="常用风格预设",
+                            choices=list(MUSIC_STYLE_PRESETS),
+                            value="自定义（保留当前标签）",
+                            info="选择后自动填充下方风格标签，仍可继续手工修改。",
+                            filterable=True,
+                        )
+                        yue2_tags = gr.Textbox(
+                            label="音乐风格标签",
+                            autofocus=True,
+                            value="mandopop, pop, warm female vocal, piano, strings",
+                            placeholder="例如: 流行抒情，温暖女声，钢琴与弦乐伴奏（支持中英文，带歌词自动强化人声演唱）",
+                            lines=3,
+                            max_lines=5,
+                        )
+                        yue2_lyrics = gr.Textbox(
+                            label="歌词",
+                            placeholder="直接输入中文或外文歌词（无需手写 [Verse]/[Chorus]，系统自动结构化分段；纯音乐填 [inst]）",
+                            lines=8,
+                            max_lines=12,
+                        )
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            yue2_duration = gr.Number(value=60, label="最大时长(秒)", minimum=10, maximum=360, precision=1)
+                            yue2_bpm = gr.Number(value=120, label="BPM", minimum=10, maximum=300, precision=0)
+                        with gr.Row():
+                            yue2_language = gr.Dropdown(
+                                label="语言",
+                                choices=["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"],
+                                value="zh",
+                            )
+                            yue2_mode_sel = gr.Dropdown(
+                                label="YuE2 编曲规划模式",
+                                choices=[("完整旋律+和弦编曲 (full · 推荐)", "full"), ("仅主旋律引导 (melody)", "melody")],
+                                value="full",
+                            )
+                        with gr.Row():
+                            yue2_abc_chk = gr.Checkbox(
+                                label="启用 ABC 乐谱结构规划（推荐开启，旋律与人声咬字更稳）",
+                                value=True,
+                            )
+                        with gr.Row():
+                            yue2_steps = gr.Slider(
+                                label="采样步数",
+                                minimum=16, maximum=64, step=1, value=32,
+                            )
+                            yue2_cfg = gr.Slider(
+                                label="引导强度 CFG",
+                                minimum=1.0, maximum=5.0, step=0.5, value=1.0,
+                            )
+                        yue2_model_state = gr.State("yue2")
+                        yue2_submit_btn = gr.Button("提交 YuE2-3B 音乐生成", variant="primary")
+                yue2_style_preset.change(
+                    fn=apply_music_style_preset,
+                    inputs=yue2_style_preset,
+                    outputs=yue2_tags,
+                    show_progress="hidden",
+                    queue=False,
+                    api_visibility="private",
+                )
+                yue2_submit_btn.click(
+                    fn=ui_submit_workflow_8,
+                    inputs=[yue2_tags, yue2_lyrics, yue2_duration, yue2_bpm, yue2_language, yue2_model_state, yue2_steps, yue2_cfg, yue2_abc_chk, yue2_mode_sel],
+                    api_name="ui_submit_yue2_music",
+                    api_visibility="private",
+                )
             with gr.Tab("音乐生成ACE-Step 1.5"):
-                gr.Markdown("## 音乐生成 ACE-Step 1.5", elem_classes=["workflow-heading"])
+                gr.Markdown("## 音乐生成 · ACE-Step 1.5 XL（Base 50步强歌词人声 / Turbo 8步极速）", elem_classes=["workflow-heading"])
                 ace_step_models = installed_acestep_models()
                 if not ace_step_models:
                     gr.Markdown(
-                        "⚠️ 未检测到 ACE-Step DiT 权重，音乐生成暂不可用。"
+                        "⚠️ 未检测到 ACE-Step 音乐权重，音乐生成暂不可用。"
                         "请先完成模型部署后重启后端。"
                     )
+                model_choices = [
+                    (MUSIC_MODEL_LABELS.get(m, m), m) for m in ace_step_models
+                ]
                 with gr.Row(equal_height=True):
                     with gr.Column(scale=1):
                         music_style_preset8 = gr.Dropdown(
@@ -7041,14 +7864,14 @@ def build_ui():
                         tags8 = gr.Textbox(
                             label="音乐风格标签",
                             autofocus=True,
-                            value="pop, upbeat, electronic",
-                            placeholder="例如: pop, upbeat, electronic",
+                            value="mandopop, pop, warm female vocal, piano, strings",
+                            placeholder="例如: 流行抒情，温暖女声，钢琴与弦乐伴奏（支持中英文，带歌词时会自动强化声乐引导）",
                             lines=3,
                             max_lines=5,
                         )
                         lyrics8 = gr.Textbox(
                             label="歌词",
-                            placeholder="可留空,纯音乐直接不填",
+                            placeholder="填写歌词（无需手写 [Verse]/[Chorus]，系统将自动结构化分段；纯音乐留空或填 [inst]）",
                             lines=8,
                             max_lines=12,
                         )
@@ -7062,12 +7885,26 @@ def build_ui():
                                 choices=["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"],
                                 value="zh",
                             )
-                            model8 = gr.Dropdown(
-                                label="模型",
-                                choices=ace_step_models,
-                                value=default_acestep_model(ace_step_models) if ace_step_models else None,
-                                info="默认锁定 ACE-Step 1.5 XL Turbo（8步极速）；仅显示服务器已安装权重（turbo / base）。",
+                            model8 = gr.Radio(
+                                label="ACE-Step 1.5 XL 推理模式",
+                                choices=model_choices,
+                                value="base" if "base" in ace_step_models else (ace_step_models[0] if ace_step_models else None),
+                                info="带歌词人声歌曲默认 Base（50步·强歌词曲风遵循）；纯音乐旋律小样可选 Turbo（8步极速）。",
                             )
+                        with gr.Accordion("高级采样参数（可选）", open=False):
+                            with gr.Row():
+                                steps8 = gr.Slider(
+                                    label="采样步数 (0=自动)",
+                                    minimum=0, maximum=100, step=1, value=0,
+                                    info="0=自动：Base 50步 / Turbo 8步。",
+                                )
+                                cfg8 = gr.Slider(
+                                    label="引导强度 CFG (0=自动)",
+                                    minimum=0.0, maximum=10.0, step=0.5, value=0.0,
+                                    info="0=自动：Base 4.0（强遵循歌词风格）/ Turbo 1.0。",
+                                )
+                            abc_planning8 = gr.State(True)
+                            yue2_mode8 = gr.State("full")
                         submit_btn8 = gr.Button("提交", variant="primary")
                 music_style_preset8.change(
                     fn=apply_music_style_preset,
@@ -7078,8 +7915,8 @@ def build_ui():
                     api_visibility="private",
                 )
                 submit_btn8.click(
-                    fn=submit_workflow_8,
-                    inputs=[tags8, lyrics8, duration8, bpm8, language8, model8],
+                    fn=ui_submit_workflow_8,
+                    inputs=[tags8, lyrics8, duration8, bpm8, language8, model8, steps8, cfg8, abc_planning8, yue2_mode8],
                     api_name="ui_submit_workflow_8",
                     api_visibility="private",
                 )
@@ -7171,7 +8008,8 @@ def build_ui():
                         '<button type="button" data-brm-action="workflow" data-workflow="图生视频 LTX2.3">视频 · LTX 图生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="图像/视频增强修复 SeedVR2">媒体 · SeedVR2 超分修复</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 & TTS">音频 · 语音克隆 (ZONOS3-Mini)</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成 (ACE-Step Turbo)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成 YuE2-3B">音频 · 音乐生成 (YuE2-3B 新模型)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成 (ACE-Step 1.5)</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="Qwen 大模型">智能工具 · Strata / Qwen3.8</button>'
                         '</div></details>'
                     )
@@ -7315,6 +8153,7 @@ def build_ui():
         gr.api(api_submit_workflow_6, api_name="submit_workflow_6")
         gr.api(api_submit_workflow_7, api_name="submit_workflow_7")
         gr.api(api_submit_workflow_8, api_name="submit_workflow_8")
+        gr.api(api_submit_yue2_music, api_name="submit_yue2_music")
         gr.api(api_submit_seedvr2_enhance, api_name="submit_seedvr2_enhance")
         gr.api(api_task_status, api_name="task_status")
         gr.api(api_cancel_task, api_name="cancel_task")

@@ -132,9 +132,21 @@ def cancel_prompt(session, pid):
     r = session.post(BASE + '/interrupt', json={'prompt_id': pid}, timeout=10)
     r.raise_for_status()
 
+def _mark_model_group(base: str, model_group: str) -> None:
+    try:
+        import media_runtime_guard
+        media_runtime_guard.set_last_model_group(base, model_group)
+    except Exception:
+        pass
+
+
 def read_progress(ws, pid, progress):
-    """Drain pending events; persist only the newest matching progress."""
+    """Drain pending events; persist only the newest matching progress.
+
+    Returns True when ``execution_success`` for ``pid`` is observed.
+    """
     latest = None
+    succeeded = False
     for _ in range(256):
         try:
             message = ws.recv()
@@ -145,31 +157,59 @@ def read_progress(ws, pid, progress):
         try:
             event = json.loads(message)
             data = event.get('data', {})
-            if data.get('prompt_id', pid) == pid and event.get('type') == 'progress':
-                maximum = int(data.get('max', 0))
-                value = int(data.get('value', 0))
-                latest = {'stage': 'qwen_image21_sampling', 'current_step': value, 'total_steps': maximum, 'progress': value / maximum if maximum else 0}
+            if data.get('prompt_id', pid) == pid:
+                ev_type = event.get('type')
+                if ev_type == 'progress':
+                    maximum = int(data.get('max', 0))
+                    value = int(data.get('value', 0))
+                    latest = {'stage': 'qwen_image21_sampling', 'current_step': value, 'total_steps': maximum, 'progress': value / maximum if maximum else 0}
+                elif ev_type == 'execution_success':
+                    succeeded = True
         except (ValueError, TypeError, AttributeError):
             continue
     if latest is not None:
         progress(latest)
+    return succeeded
+
+
+def _download_view_to_path(session, base: str, img_params: dict, dest: Path) -> None:
+    r = session.get(base + '/view', params=img_params, timeout=60, stream=True)
+    r.raise_for_status()
+    iter_content = getattr(r, 'iter_content', None)
+    iterator = None
+    if callable(iter_content):
+        try:
+            iterator = iter(iter_content(chunk_size=1024 * 1024))
+        except TypeError:
+            iterator = None
+    with dest.open('wb') as fh:
+        if iterator is not None:
+            for chunk in iterator:
+                if chunk:
+                    fh.write(chunk)
+        else:
+            fh.write(r.content)
+
 
 def run_task(task, output_dir, main_base, progress, *, workflow_builder=build_workflow):
     if task.cancel_event.is_set():
         raise RuntimeError('Qwen Image 2.1 任务已取消')
-    if BASE != main_base.rstrip('/'):
+    single_instance = (BASE == main_base.rstrip('/'))
+    if not single_instance:
         release_idle(main_base)
     pid = getattr(task, 'prompt_id', '')
     if not pid:
-        release_idle(BASE)
+        if not single_instance:
+            release_idle(BASE)
         args = dict(task.args)
         if task.workflow_name == EDIT:
             args = validate_edit(**args)
-            if BASE != main_base.rstrip('/'):
+            if not single_instance:
                 from h3_image_support import transfer_input
                 with _session() as upload_session:
                     args['input_filename'] = transfer_input(upload_session, main_base, args['input_filename'], target_base=BASE)
         wf = workflow_builder(args)
+    _mark_model_group(BASE, 'qwen21')
     with _session() as s:
         client = uuid.uuid4().hex
         ws = None
@@ -219,9 +259,8 @@ def run_task(task, output_dir, main_base, progress, *, workflow_builder=build_wo
                     paths = []
                     for out in entry.get('outputs', {}).values():
                         for img in out.get('images', []):
-                            r = s.get(BASE + '/view', params=img, timeout=60); r.raise_for_status()
                             path = Path(output_dir) / (task.name + '-' + uuid.uuid4().hex[:8] + '.png')
-                            path.write_bytes(r.content)
+                            _download_view_to_path(s, BASE, img, path)
                             paths.append(str(path))
                     if not paths:
                         raise RuntimeError('Qwen Image 2.1 没有输出图片')
@@ -244,9 +283,10 @@ def run_task(task, output_dir, main_base, progress, *, workflow_builder=build_wo
                     cancel_prompt(s, pid)
                 except Exception:
                     logging.warning('Qwen Image 2.1 targeted cleanup failed; idle GPU guard remains enabled')
-            try:
-                release_idle(BASE)
-            except Exception:
-                if not failed:
-                    raise  # A successful task cannot conceal failed GPU handover.
-                logging.warning('Qwen Image 2.1 GPU release failed; preserving original task error')
+            if not single_instance:
+                try:
+                    release_idle(BASE)
+                except Exception:
+                    if not failed:
+                        raise  # A successful task cannot conceal failed GPU handover.
+                    logging.warning('Qwen Image 2.1 GPU release failed; preserving original task error')

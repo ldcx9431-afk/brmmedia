@@ -10,7 +10,11 @@ WorkingDirectory=/srv/brmmedia/strata/Strata
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
 Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
-ExecStart=/srv/brmmedia/strata/Strata/.venv/bin/python -m serve.server --engine strata --config /srv/brmmedia/strata/Strata/strata-iq2_xs.json --host 127.0.0.1 --port 8002
+Environment=TMPDIR=/var/tmp/brmmedia-strata
+Environment=HF_HOME=/var/lib/brmmedia-nvme1/cache/huggingface
+Environment=TORCH_HOME=/var/lib/brmmedia-nvme1/cache/torch
+# Engine args in strata-iq2_xs-engine-0159.json include: --aux-cpus auto
+ExecStart=/srv/brmmedia/strata/Strata/.venv/bin/python -m serve.server --engine strata --config /srv/brmmedia/strata/Strata/strata-iq2_xs-engine-0159.json --host 127.0.0.1 --port 8002
 Restart=on-failure
 RestartSec=15
 TimeoutStartSec=900

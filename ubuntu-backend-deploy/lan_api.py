@@ -30,10 +30,16 @@ from urllib.parse import quote
 import requests
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+try:
+    from fastapi.responses import Response as _FastAPIResponse
+except ImportError:  # pragma: no cover - minimal contract test stub
+    _FastAPIResponse = None
 from pydantic import BaseModel, Field
 
 import adaptive_concurrency
+import llm_runtime
 import system_telemetry
+import zonos3_support
 from comfyui_server import BASE as COMFY_BASE, COMFY_ROOT, audio_duration, upload_image
 from flux2_fast_support import SIZES as FLUX2_FAST_SIZES
 from flux3_image_support import SIZES as FLUX3_IMAGE_SIZES
@@ -84,10 +90,32 @@ _API_KEY_DB_LOCK = threading.Lock()
 _LOCAL_TASKS_LOCK = threading.Lock()
 _LOCAL_TASKS: dict[str, dict[str, Any]] = {}
 _CONCURRENCY_CONTROLLER = adaptive_concurrency.AdaptiveConcurrencyController()
-_ZONOS3_GATE = adaptive_concurrency.AdaptiveSlotGate(
+_ZONOS3_GATE = adaptive_concurrency.CrossProcessSlotGate(
     lambda: int(_CONCURRENCY_CONTROLLER.evaluate()["limits"][adaptive_concurrency.TIER_VOICE_CPU])
 )
 _MAX_LOCAL_TASKS = 500
+_HTTP_LOCAL = threading.local()
+_GRADIO_INFO_LOCK = threading.Lock()
+_GRADIO_PARAM_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
+_MUSIC_MODELS_LOCK = threading.Lock()
+_MUSIC_MODELS_CACHE: tuple[str, float, list[str]] = ("", 0.0, [])
+_ASSETS_CACHE_LOCK = threading.Lock()
+_ASSETS_CACHE: tuple[str, tuple[int, int] | None, dict[str, "AssetRecord"]] = ("", None, {})
+_DOTENV_CACHE_LOCK = threading.Lock()
+_DOTENV_CACHE: tuple[str, tuple[int, int] | None, dict[str, str]] = ("", None, {})
+
+
+def _http_session():
+    session_cls = getattr(requests, "Session", None)
+    if not callable(session_cls):
+        return requests
+    session = getattr(_HTTP_LOCAL, "session", None)
+    if session is None or getattr(_HTTP_LOCAL, "session_cls", None) is not session_cls:
+        session = session_cls()
+        session.trust_env = False
+        _HTTP_LOCAL.session = session
+        _HTTP_LOCAL.session_cls = session_cls
+    return session
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}
@@ -100,8 +128,8 @@ SIZE_VALUES = [
 ]
 LANGUAGE_VALUES = ["zh", "en", "ja", "ko", "fr", "de", "es", "ru", "unknown"]
 VOICE_CLONE_LANGUAGE_VALUES = ["zh", "en", "ja", "es", "ar"]
-# ACE-Step SFT is retired; prefer Turbo (8-step fast) and keep Base as quality fallback.
-MUSIC_MODEL_CANDIDATES = ["turbo", "base"]
+# ACE-Step SFT is retired; prefer Base (50-step strong vocal/lyric alignment) with Turbo (8-step fast) and YuE2-3B.
+MUSIC_MODEL_CANDIDATES = ["base", "turbo"]
 H3_PROFILE_VALUES = ["draft", "preview", "quality"]
 H3_ACCELERATION_VALUES = ["standard", "turbo_balanced", "turbo_fast"]
 H3_ACCELERATION_DETAILS = {
@@ -412,36 +440,86 @@ def _choice(value: Any, field: str, choices: list[str], default: str | None = No
 
 
 def _available_music_models() -> list[str]:
-    """Discover installed ACE-Step DiT variants from ComfyUI's live schema."""
+    """Discover installed ACE-Step DiT & YuE2-3B variants from ComfyUI's live schema (60s TTL cache)."""
+    global _MUSIC_MODELS_CACHE
+    base_key = COMFY_BASE.rstrip("/")
+    now = time.monotonic()
+    with _MUSIC_MODELS_LOCK:
+        c_base, c_ts, c_vals = _MUSIC_MODELS_CACHE
+        if c_base == base_key and c_vals and (now - c_ts) < 60.0:
+            return list(c_vals)
+    available: list[str] = []
     try:
-        payload = requests.get(f"{COMFY_BASE}/object_info/UNETLoader", timeout=5).json()
+        payload = _http_session().get(f"{base_key}/object_info/UNETLoader", timeout=5).json()
         values = payload["UNETLoader"]["input"]["required"]["unet_name"][0]
-        if not isinstance(values, list):
-            return []
+        if isinstance(values, list):
+            for model in MUSIC_MODEL_CANDIDATES:
+                candidates = (
+                    f"acestep/acestep_v1.5_xl_{model}_bf16.safetensors",
+                    f"acestep_v1.5_xl_{model}_bf16.safetensors",
+                )
+                if any(c in values for c in candidates):
+                    available.append(model)
     except (KeyError, TypeError, ValueError, requests.RequestException):
-        return []
-    available = []
-    for model in MUSIC_MODEL_CANDIDATES:
-        filename = f"acestep/acestep_v1.5_xl_{model}_bf16.safetensors"
-        if filename in values:
-            available.append(model)
+        pass
+    try:
+        ckpt_payload = _http_session().get(f"{base_key}/object_info/CheckpointLoaderSimple", timeout=5).json()
+        ckpts = ckpt_payload["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+        ckpt_dir = Path(COMFY_ROOT) / "models" / "checkpoints"
+        if isinstance(ckpts, list) and any(
+            "yue2" in str(c).lower() and not (ckpt_dir / f"{c}.aria2").exists()
+            for c in ckpts
+        ):
+            available.append("yue2")
+    except (KeyError, TypeError, ValueError, requests.RequestException):
+        pass
+    if available:
+        with _MUSIC_MODELS_LOCK:
+            _MUSIC_MODELS_CACHE = (base_key, time.monotonic(), list(available))
     return available
 
 
-def _default_music_model(available: list[str]) -> str:
+def _default_music_model(available: list[str], *, has_lyrics: bool = True) -> str:
     if not available:
-        _fail(503, "no ACE-Step music model is installed")
+        _fail(503, "no ACE-Step or YuE2 music model is installed")
+    order = ("base", "yue2", "turbo") if has_lyrics else ("turbo", "base", "yue2")
+    for cand in order:
+        if cand in available:
+            return cand
     return available[0]
 
 
 def _load_assets() -> dict[str, AssetRecord]:
+    global _ASSETS_CACHE
+    index_key = str(ASSET_INDEX_PATH)
+    try:
+        st = ASSET_INDEX_PATH.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except FileNotFoundError:
+        with _ASSETS_CACHE_LOCK:
+            _ASSETS_CACHE = ("", None, {})
+        return {}
+    except OSError:
+        return {}
+
+    now = time.time()
+    with _ASSETS_CACHE_LOCK:
+        c_path, c_sig, c_records = _ASSETS_CACHE
+        if c_path == index_key and c_sig == sig:
+            if not any(
+                not isinstance(rec.created_at, (int, float)) or (now - rec.created_at > ASSET_TTL_SECONDS)
+                for rec in c_records.values()
+            ):
+                return dict(c_records)
+
     try:
         payload = json.loads(ASSET_INDEX_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
+        with _ASSETS_CACHE_LOCK:
+            _ASSETS_CACHE = ("", None, {})
         return {}
     except (OSError, json.JSONDecodeError):
         return {}
-    now = time.time()
     records: dict[str, AssetRecord] = {}
     changed = False
     for raw in payload.get("assets", []):
@@ -456,15 +534,29 @@ def _load_assets() -> dict[str, AssetRecord]:
         records[record.asset_id] = record
     if changed:
         _save_assets(records)
+    else:
+        try:
+            st_after = ASSET_INDEX_PATH.stat()
+            with _ASSETS_CACHE_LOCK:
+                _ASSETS_CACHE = (index_key, (st_after.st_mtime_ns, st_after.st_size), dict(records))
+        except OSError:
+            pass
     return records
 
 
 def _save_assets(records: dict[str, AssetRecord]) -> None:
+    global _ASSETS_CACHE
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "assets": [record.__dict__ for record in records.values()]}
     temporary = ASSET_INDEX_PATH.with_name(f".{ASSET_INDEX_PATH.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(ASSET_INDEX_PATH)
+    try:
+        st = ASSET_INDEX_PATH.stat()
+        with _ASSETS_CACHE_LOCK:
+            _ASSETS_CACHE = (str(ASSET_INDEX_PATH), (st.st_mtime_ns, st.st_size), dict(records))
+    except OSError:
+        pass
 
 
 def _asset(params: dict[str, Any], assets: dict[str, AssetRecord], field: str, kind: str) -> AssetRecord:
@@ -715,30 +807,77 @@ def _normal_voice_clone(params: dict[str, Any], assets: dict[str, AssetRecord]) 
     ]
 
 
+def _detect_music_language(lyrics: str, requested_language: Any) -> str:
+    raw_lyrics = str(lyrics or "").strip()
+    lang = str(requested_language or "").strip().lower()
+    if raw_lyrics and raw_lyrics.lower() not in {"[inst]", "[instrumental]", "inst", "instrumental", "纯音乐", "无歌词"}:
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", raw_lyrics))
+        if lang in {"", "auto", "unknown"} or (lang == "en" and cjk_count >= 2):
+            if len(re.findall(r"[\u3040-\u30ff]", raw_lyrics)) >= 2:
+                return "ja"
+            if len(re.findall(r"[\uac00-\ud7af]", raw_lyrics)) >= 2:
+                return "ko"
+            if cjk_count >= 1:
+                return "zh"
+    return _choice(requested_language, "language", LANGUAGE_VALUES, "zh")
+
+
 def _normal_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     lyrics = params.get("lyrics", "")
     if lyrics is None:
         lyrics = ""
+    lyrics_str = _trim_text(lyrics, "lyrics", maximum=12000, required=False)
+    has_lyrics = bool(lyrics_str) and lyrics_str.lower() not in {
+        "[inst]", "[instrumental]", "inst", "instrumental", "纯音乐", "无歌词",
+    }
     available_models = _available_music_models()
     raw_model = params.get("model")
     if isinstance(raw_model, str):
         normalized_model = raw_model.strip().lower()
         alias_map = {
-            "sft": "turbo",
+            "sft": "base" if "base" in available_models else "turbo",
             "ace-step-sft": "turbo",
             "ace-step-turbo": "turbo",
             "ace-step-base": "base",
+            "yue2": "yue2",
+            "yue2-3b": "yue2",
+            "yue2-3b-music": "yue2",
+            "auto": _default_music_model(available_models, has_lyrics=has_lyrics),
+            "": _default_music_model(available_models, has_lyrics=has_lyrics),
         }
         if normalized_model in alias_map:
             mapped = alias_map[normalized_model]
-            raw_model = mapped if mapped in available_models else _default_music_model(available_models)
+            raw_model = mapped if mapped in available_models else _default_music_model(available_models, has_lyrics=has_lyrics)
+    tags_raw = params.get("tags") if params.get("tags") is not None else params.get("style")
     return [
-        _trim_text(params.get("tags"), "tags", maximum=2000),
-        _trim_text(lyrics, "lyrics", maximum=12000, required=False),
+        _trim_text(tags_raw, "tags", maximum=2000),
+        lyrics_str,
         _number(params.get("duration", 30), "duration", minimum=1, maximum=600),
         _number(params.get("bpm", 120), "bpm", minimum=30, maximum=300, integer=True),
-        _choice(params.get("language"), "language", LANGUAGE_VALUES, "zh"),
-        _choice(raw_model, "model", available_models, _default_music_model(available_models)),
+        _detect_music_language(lyrics_str, params.get("language")),
+        _choice(raw_model, "model", available_models, _default_music_model(available_models, has_lyrics=has_lyrics)),
+    ]
+
+
+def _normal_yue2_music(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    if "yue2" not in _available_music_models():
+        _fail(503, "YuE2-3B checkpoint is not installed yet")
+    tags_raw = params.get("tags") if params.get("tags") is not None else params.get("style")
+    lyrics = params.get("lyrics", "")
+    if lyrics is None:
+        lyrics = ""
+    lyrics_str = _trim_text(lyrics, "lyrics", maximum=12000, required=False)
+    duration_raw = params.get("duration") if params.get("duration") is not None else params.get("max_duration", 120)
+    mode = _choice(params.get("mode"), "mode", ["full", "melody"], "full")
+    abc_planning = bool(params.get("abc_planning", True))
+    steps = _number(params.get("steps", 32), "steps", minimum=16, maximum=64, integer=True)
+    return [
+        _trim_text(tags_raw, "tags", maximum=2000),
+        lyrics_str,
+        _number(duration_raw, "duration", minimum=10, maximum=360),
+        mode,
+        abc_planning,
+        steps,
     ]
 
 
@@ -902,10 +1041,17 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
     ),
     "music-generate": WorkflowSpec(
         "submit_workflow_8",
-        "ACE-Step 1.5 XL 音乐生成（默认 Turbo 8 步）",
+        "ACE-Step 1.5 XL / YuE2-3B 音乐生成（带歌词默认 Base 50步强遵循）",
         {},
         _normal_music,
-        {"default_model": "turbo", "supported_models": ["turbo", "base"], "retired_aliases": {"sft": "turbo"}},
+        {"default_model": "base", "supported_models": ["base", "turbo", "yue2"], "retired_aliases": {"sft": "turbo"}},
+    ),
+    "yue2-3b-music": WorkflowSpec(
+        "submit_yue2_music",
+        "YuE2-3B 符号ABC+音频融合音乐生成",
+        {},
+        _normal_yue2_music,
+        {"engine": "YuE2-3B", "modes": ["full", "melody"], "default_steps": 32},
     ),
     "seedvr2-enhance": WorkflowSpec(
         "submit_seedvr2_enhance", "SeedVR2 图像/视频增强修复", {},
@@ -971,22 +1117,43 @@ INDEXTTS2_WORKFLOW = WorkflowSpec(
 
 
 def _active_env_value(name: str, default: str) -> str:
-    """Read a backend engine toggle without caching its dotenv.
+    """Read a backend engine toggle with mtime-validated dotenv caching.
 
     The LAN API is started before H3 activation and remains running while the
-    activation script updates the candidate `.env`; reading per request keeps
-    capability discovery truthful throughout that transition.
+    activation script updates the candidate `.env`; checking ``st_mtime_ns``
+    preserves immediate visibility on `.env` updates while avoiding repeated disk reads.
     """
+    global _DOTENV_CACHE
     override = os.environ.get(name)
     if override:
         return override.strip().lower()
+    env_path = BASE_DIR / ".env"
+    env_key = str(env_path)
     try:
-        for line in (BASE_DIR / ".env").read_text(encoding="utf-8").splitlines():
-            if line.startswith(f"{name}="):
-                return line.split("=", 1)[1].strip().strip('"').lower()
+        st = env_path.stat()
+        sig = (st.st_mtime_ns, st.st_size)
     except OSError:
-        pass
-    return default
+        with _DOTENV_CACHE_LOCK:
+            if _DOTENV_CACHE[0] == env_key:
+                _DOTENV_CACHE = ("", None, {})
+        return default
+    with _DOTENV_CACHE_LOCK:
+        c_path, c_sig, c_map = _DOTENV_CACHE
+        if c_path == env_key and c_sig == sig:
+            return c_map.get(name, default)
+    parsed: dict[str, str] = {}
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            k, _, v = stripped.partition("=")
+            parsed[k.strip()] = v.strip().strip('"').lower()
+    except OSError:
+        return default
+    with _DOTENV_CACHE_LOCK:
+        _DOTENV_CACHE = (env_key, sig, parsed)
+    return parsed.get(name, default)
 
 
 def _active_video_engine() -> str:
@@ -1159,16 +1326,35 @@ def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
 
         try:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            session = requests.Session()
-            session.trust_env = False
-            with session:
-                response = session.post(
+
+            def _post_zonos3(chunk_payload: dict[str, Any]) -> bytes:
+                session_cls = getattr(requests, "Session", None)
+                if callable(session_cls):
+                    with session_cls() as session:
+                        session.trust_env = False
+                        response = session.post(
+                            f"{ZONOS3_BASE}/v2/generate",
+                            json=chunk_payload,
+                            timeout=(5, ZONOS3_TIMEOUT_SECONDS),
+                        )
+                        response.raise_for_status()
+                        return response.content
+                response = requests.post(
                     f"{ZONOS3_BASE}/v2/generate",
-                    json=payload,
+                    json=chunk_payload,
                     timeout=(5, ZONOS3_TIMEOUT_SECONDS),
                 )
                 response.raise_for_status()
-            content = response.content
+                return response.content
+
+            content, meta = zonos3_support.synthesize_zonos3_wav(
+                payload,
+                service_url=ZONOS3_BASE,
+                timeout_seconds=ZONOS3_TIMEOUT_SECONDS,
+                gate=_ZONOS3_GATE,
+                cancel_check=lambda: _is_local_task_cancelled(task_id),
+                post_fn=_post_zonos3,
+            )
             if not content.startswith(b"RIFF") or content[8:12] != b"WAVE":
                 raise ValueError("ZONOS3 returned an invalid WAV")
 
@@ -1181,6 +1367,10 @@ def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
                     rec["finished_at"] = done_at
                     rec["execution"]["stage"] = "interrupted"
                     return
+                if rec is not None and isinstance(rec.get("effective_settings"), dict):
+                    rec["effective_settings"]["chunked"] = bool(meta.get("chunked", False))
+                    rec["effective_settings"]["chunks"] = int(meta.get("chunks", 1))
+                    rec["effective_settings"]["chunk_workers"] = int(meta.get("workers", 1))
 
             filename = f"zonos3-{task_id}.wav"
             target = OUTPUT_DIR / filename
@@ -1324,29 +1514,65 @@ def _local_delete_artifact(task_id: str, filename: str) -> dict[str, Any] | None
         return {"deleted": filename, "task_id": task_id}
 
 
-def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
-    """Call the loopback-only Gradio API and wait for its SSE completion."""
+def _gradio_endpoint_params(endpoint: str, *, force_refresh: bool = False) -> list[str]:
+    base_key = GRADIO_BASE.rstrip("/")
+    with _GRADIO_INFO_LOCK:
+        cached = _GRADIO_PARAM_CACHE.get(base_key)
+        if not force_refresh and cached is not None and endpoint in cached[1]:
+            return list(cached[1][endpoint])
+    client = _http_session()
     try:
-        info = requests.get(f"{GRADIO_BASE}/gradio_api/info", timeout=10).json()
-        endpoint_info = info["named_endpoints"][f"/{endpoint}"]
-        parameters = endpoint_info["parameters"]
-        names = [parameter["parameter_name"] for parameter in parameters]
+        info = client.get(f"{base_key}/gradio_api/info", timeout=10).json()
+        named = info["named_endpoints"]
+        mapping: dict[str, list[str]] = {}
+        for ep_key, ep_info in named.items():
+            ep_name = ep_key.lstrip("/")
+            params = ep_info.get("parameters") or []
+            mapping[ep_name] = [parameter["parameter_name"] for parameter in params]
+        if endpoint not in mapping:
+            raise KeyError(endpoint)
     except (KeyError, TypeError, ValueError, requests.RequestException) as exc:
         raise RuntimeError(f"Gradio API metadata is unavailable: {exc}") from exc
+    with _GRADIO_INFO_LOCK:
+        _GRADIO_PARAM_CACHE[base_key] = (time.monotonic(), mapping)
+    return list(mapping[endpoint])
+
+
+def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
+    """Call the loopback-only Gradio API using cached metadata/Session and SSE."""
+    names = _gradio_endpoint_params(endpoint)
+    if len(names) != len(arguments):
+        names = _gradio_endpoint_params(endpoint, force_refresh=True)
     if len(names) != len(arguments):
         raise RuntimeError(f"Gradio endpoint {endpoint} changed its parameter contract")
+
+    client = _http_session()
+    base_key = GRADIO_BASE.rstrip("/")
     try:
-        accepted = requests.post(
-            f"{GRADIO_BASE}/gradio_api/call/v2/{endpoint}",
-            json=dict(zip(names, arguments)), timeout=15,
+        accepted = client.post(
+            f"{base_key}/gradio_api/call/v2/{endpoint}",
+            json=dict(zip(names, arguments)),
+            timeout=15,
         )
+        if getattr(accepted, "status_code", 200) in {400, 404, 422}:
+            # Schema may have changed after a backend restart; refresh once and retry.
+            names = _gradio_endpoint_params(endpoint, force_refresh=True)
+            if len(names) != len(arguments):
+                raise RuntimeError(f"Gradio endpoint {endpoint} changed its parameter contract")
+            accepted = client.post(
+                f"{base_key}/gradio_api/call/v2/{endpoint}",
+                json=dict(zip(names, arguments)),
+                timeout=15,
+            )
         accepted.raise_for_status()
         event_id = accepted.json().get("event_id")
         if not event_id:
             raise RuntimeError("Gradio did not return an event id")
-        with requests.get(
-            f"{GRADIO_BASE}/gradio_api/call/v2/{endpoint}/{event_id}",
-            headers={"Accept": "text/event-stream"}, stream=True, timeout=GRADIO_TIMEOUT_SECONDS,
+        with client.get(
+            f"{base_key}/gradio_api/call/v2/{endpoint}/{event_id}",
+            headers={"Accept": "text/event-stream"},
+            stream=True,
+            timeout=GRADIO_TIMEOUT_SECONDS,
         ) as stream:
             stream.raise_for_status()
             event = ""
@@ -1369,6 +1595,8 @@ def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
                     if event == "error":
                         raise RuntimeError(f"Gradio handler error: {data}")
     except (ValueError, requests.RequestException) as exc:
+        with _GRADIO_INFO_LOCK:
+            _GRADIO_PARAM_CACHE.pop(base_key, None)
         raise RuntimeError(f"Gradio API request failed: {exc}") from exc
     raise RuntimeError("Gradio SSE stream ended before completion")
 
@@ -1486,8 +1714,25 @@ def capabilities() -> dict[str, Any]:
                 {"id": "indextts25", "workflow": "voice-clone", "status": "active"},
             ],
             "music": [
-                {"id": "ace-step-turbo", "workflow": "music-generate", "model": "turbo", "status": "active", "recommended": True},
-                {"id": "yue2-3b-music", "workflow": "yue2-3b-music", "status": "planned"},
+                {
+                    "id": "ace-step-base",
+                    "workflow": "music-generate",
+                    "model": "base",
+                    "status": "active" if "base" in _available_music_models() else "planned",
+                    "recommended": True,
+                },
+                {
+                    "id": "ace-step-turbo",
+                    "workflow": "music-generate",
+                    "model": "turbo",
+                    "status": "active" if "turbo" in _available_music_models() else "planned",
+                },
+                {
+                    "id": "yue2-3b-music",
+                    "workflow": "yue2-3b-music",
+                    "model": "yue2",
+                    "status": "active" if "yue2" in _available_music_models() else "planned",
+                },
             ],
             "video": [
                 {"id": "minimax-h3" if active_engine == "h3" else "ltx23", "workflow": "text-to-video", "status": "active", "recommended": True},
@@ -1619,9 +1864,19 @@ def submit_task(submission: TaskSubmission) -> dict[str, Any]:
     resolved_workflow, resolved_params, routed_from = _resolve_workflow_and_params(
         submission.workflow, submission.params
     )
+    auto_enhance = bool(resolved_params.pop("auto_enhance", False))
     spec = _active_workflows().get(resolved_workflow)
     if spec is None:
         _fail(422, "unknown workflow; use GET /api/v1/capabilities")
+    if auto_enhance and resolved_workflow not in {"zonos3-voice-clone", "voice-clone", "qwen3-voice-clone"}:
+        if isinstance(resolved_params.get("prompt"), str) and resolved_params["prompt"].strip():
+            resolved_params["prompt"] = llm_runtime.enhance_prompt(
+                resolved_params["prompt"], workflow=resolved_workflow
+            )
+        elif resolved_workflow == "music-generate" and isinstance(resolved_params.get("tags"), str) and resolved_params["tags"].strip():
+            resolved_params["tags"] = llm_runtime.enhance_prompt(
+                resolved_params["tags"], workflow=resolved_workflow, max_length=2000
+            )
     if resolved_workflow in {"h3-image-text-to-image", "h3-image-edit"}:
         from h3_image_support import check_available
         try:
@@ -1631,11 +1886,8 @@ def submit_task(submission: TaskSubmission) -> dict[str, Any]:
     if resolved_workflow in {"qwen-image21", "qwen-image21-turbo", "qwen-image21-edit"}:
         from qwen_image21_support import BASE as qwen_image21_base
         try:
-            session = requests.Session()
-            session.trust_env = False
-            with session:
-                response = session.get(qwen_image21_base + "/system_stats", timeout=5)
-                response.raise_for_status()
+            response = _http_session().get(qwen_image21_base + "/system_stats", timeout=5)
+            response.raise_for_status()
         except requests.RequestException:
             _fail(503, "Qwen Image 2.1 research runtime is unavailable; retry after recovery")
     if resolved_workflow == "seedvr2-enhance" and not models_installed(COMFY_ROOT):
@@ -1702,10 +1954,42 @@ def get_task(task_id: str) -> dict[str, Any]:
     return status
 
 
-@app.get(f"{API_PREFIX}/tasks/{{task_id}}/artifacts/{{filename}}", tags=["artifacts"])
-def download_artifact(task_id: str, filename: str) -> FileResponse:
+def _should_use_x_accel(request: Request | None) -> tuple[bool, str]:
+    prefix = os.environ.get("BRM_LAN_API_X_ACCEL_PREFIX", "/internal-outputs").strip()
+    if not prefix:
+        return False, ""
+    toggle = os.environ.get("BRM_LAN_API_X_ACCEL_ENABLED", "").strip().lower()
+    if toggle in {"0", "false", "no", "off"}:
+        return False, ""
+    if toggle in {"1", "true", "yes", "on"}:
+        return True, prefix
+    if request is not None:
+        headers = {k.lower(): v for k, v in getattr(request, "headers", {}).items()}
+        if headers.get("x-forwarded-for") or headers.get("x-real-ip") or headers.get("x-accel-internal"):
+            return True, prefix
+    return False, ""
+
+
+@app.get(f"{API_PREFIX}/tasks/{{task_id}}/artifacts/{{filename}}", tags=["artifacts"], response_model=None)
+def download_artifact(task_id: str, filename: str, request: Request = None):
     path = _safe_artifact(task_id, filename)
-    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream", filename=path.name)
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    use_accel, prefix = _should_use_x_accel(request)
+    if use_accel and _FastAPIResponse is not None:
+        try:
+            rel = path.relative_to(OUTPUT_DIR.resolve())
+            accel_uri = f"{prefix.rstrip('/')}/{quote(rel.as_posix())}"
+            return _FastAPIResponse(
+                status_code=200,
+                headers={
+                    "X-Accel-Redirect": accel_uri,
+                    "Content-Type": media_type,
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.name)}",
+                },
+            )
+        except ValueError:
+            pass
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.delete(f"{API_PREFIX}/tasks/{{task_id}}/artifacts/{{filename}}", tags=["artifacts"])

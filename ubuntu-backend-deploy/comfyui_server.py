@@ -93,6 +93,21 @@ _process: subprocess.Popen | None = None
 _log_thread: threading.Thread | None = None
 _process_watch_thread: threading.Thread | None = None
 _stop_logging = threading.Event()
+_thread_local = threading.local()
+
+
+def _http_client():
+    """Return a per-thread pooled requests.Session, or stub module in minimal tests."""
+    session_cls = getattr(requests, "Session", None)
+    if not callable(session_cls):
+        return requests
+    session = getattr(_thread_local, "session", None)
+    if session is None or getattr(_thread_local, "session_cls", None) is not session_cls:
+        session = session_cls()
+        session.trust_env = False
+        _thread_local.session = session
+        _thread_local.session_cls = session_cls
+    return session
 
 
 def is_port_open(host: str = COMFY_HOST, port: int = COMFY_PORT, timeout: float = 1.0) -> bool:
@@ -105,7 +120,7 @@ def is_comfy_ready(host: str = COMFY_HOST, port: int = COMFY_PORT) -> bool:
     if not is_port_open(host, port):
         return False
     try:
-        r = requests.get(f"http://{host}:{port}/system_stats", timeout=2)
+        r = _http_client().get(f"http://{host}:{port}/system_stats", timeout=2)
         return r.status_code == 200
     except requests.RequestException:
         return False
@@ -120,7 +135,7 @@ def is_alive() -> bool:
 
 def queue_prompt(workflow: dict, timeout: int = SUBMIT_TIMEOUT) -> dict:
     payload = {"prompt": workflow, "client_id": CLIENT_ID}
-    r = requests.post(f"{BASE}/prompt", json=payload, timeout=max(30, int(timeout)))
+    r = _http_client().post(f"{BASE}/prompt", json=payload, timeout=max(30, int(timeout)))
     if r.status_code != 200:
         raise RuntimeError(f"ComfyUI submit failed ({r.status_code}): {r.text[:500]}")
     data = r.json()
@@ -130,14 +145,14 @@ def queue_prompt(workflow: dict, timeout: int = SUBMIT_TIMEOUT) -> dict:
 
 
 def get_history(prompt_id: str) -> dict:
-    r = requests.get(f"{BASE}/history/{prompt_id}", timeout=10)
+    r = _http_client().get(f"{BASE}/history/{prompt_id}", timeout=10)
     return r.json() if r.status_code == 200 else {}
 
 
 def get_queue() -> dict:
     """Return ComfyUI's live queue, or an empty, well-formed snapshot."""
     try:
-        response = requests.get(f"{BASE}/queue", timeout=10)
+        response = _http_client().get(f"{BASE}/queue", timeout=10)
         response.raise_for_status()
         payload = response.json()
         if isinstance(payload, dict):
@@ -164,7 +179,7 @@ def _queue_prompt_ids(queue: dict, key: str) -> set[str]:
 def delete_queued_prompt(prompt_id: str) -> tuple[bool, str]:
     """Delete one pending prompt without disturbing unrelated queue entries."""
     try:
-        response = requests.post(f"{BASE}/queue", json={"delete": [prompt_id]}, timeout=5)
+        response = _http_client().post(f"{BASE}/queue", json={"delete": [prompt_id]}, timeout=5)
         response.raise_for_status()
         return True, "已从 ComfyUI 队列删除目标 prompt。"
     except requests.RequestException as exc:
@@ -174,15 +189,46 @@ def delete_queued_prompt(prompt_id: str) -> tuple[bool, str]:
 def get_view_file(filename: str, subfolder: str = "", folder_type: str = "output") -> bytes:
     params = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url = f"{BASE}/view?" + urllib.parse.urlencode(params)
-    r = requests.get(url, timeout=60)
+    r = _http_client().get(url, timeout=60)
     r.raise_for_status()
     return r.content
+
+
+def stream_view_to_file(
+    filename: str,
+    destination: Path | str,
+    subfolder: str = "",
+    folder_type: str = "output",
+    chunk_size: int = 1024 * 1024,
+) -> Path:
+    """Stream an output artifact directly to disk to avoid buffering large payloads in RAM."""
+    params = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+    url = f"{BASE}/view?" + urllib.parse.urlencode(params)
+    dest_path = Path(destination)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    with _http_client().get(url, timeout=60, stream=True) as r:
+        r.raise_for_status()
+        iter_content = getattr(r, "iter_content", None)
+        iterator = None
+        if callable(iter_content):
+            try:
+                iterator = iter(iter_content(chunk_size=chunk_size))
+            except TypeError:
+                iterator = None
+        with open(dest_path, "wb") as fh:
+            if iterator is not None:
+                for chunk in iterator:
+                    if chunk:
+                        fh.write(chunk)
+            else:
+                fh.write(r.content)
+    return dest_path
 
 
 def interrupt() -> tuple[bool, str]:
     """Ask ComfyUI to interrupt and report whether it accepted the request."""
     try:
-        response = requests.post(f"{BASE}/interrupt", timeout=5)
+        response = _http_client().post(f"{BASE}/interrupt", timeout=5)
         response.raise_for_status()
         return True, "已发送 ComfyUI 中断信号。"
     except requests.RequestException as e:
@@ -351,6 +397,7 @@ def wait_for_outputs(
     deadline = time.monotonic() + timeout
     websocket_connection = _open_progress_websocket()
     next_history_poll = 0.0
+    ws_completed = False
     _notify(on_progress, stage="submitted", prompt_id=prompt_id, progress=0.0)
     while time.monotonic() < deadline:
         if stop_event is not None and stop_event.is_set():
@@ -365,7 +412,10 @@ def wait_for_outputs(
 
                 message = websocket_connection.recv()
                 if isinstance(message, str):
-                    _handle_ws_event(prompt_id, json.loads(message), on_progress)
+                    ws_status = _handle_ws_event(prompt_id, json.loads(message), on_progress)
+                    if ws_status == "success":
+                        ws_completed = True
+                        next_history_poll = 0.0
             except Exception as exc:
                 # Execution errors raised by the event translator must reach
                 # the task queue; transport/JSON errors simply enable polling.
@@ -393,7 +443,9 @@ def wait_for_outputs(
                 if entry.get("outputs"):
                     _notify(on_progress, stage="completed", progress=1.0, prompt_id=prompt_id)
                     return entry["outputs"]
-            next_history_poll = now + 1.5
+            next_history_poll = now + (
+                0.05 if ws_completed else (3.0 if websocket_connection is not None else 1.5)
+            )
         time.sleep(0.1 if websocket_connection is not None else 0.5)
     # A timeout used to leave the prompt running in ComfyUI.  That made the
     # UI show a failed task while the A5000 stayed occupied indefinitely.
