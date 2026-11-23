@@ -56,6 +56,8 @@ def _load_lan_api():
 
         get = _route
         post = _route
+        delete = _route
+        middleware = _route
 
     class HTTPException(Exception):
         def __init__(self, status_code, detail):
@@ -66,9 +68,13 @@ def _load_lan_api():
     class UploadFile:
         pass
 
+    class Request:
+        pass
+
     fastapi.FastAPI = FastAPI
     fastapi.File = lambda *args, **kwargs: None
     fastapi.HTTPException = HTTPException
+    fastapi.Request = Request
     fastapi.UploadFile = UploadFile
     sys.modules["fastapi"] = fastapi
 
@@ -114,6 +120,20 @@ def _load_lan_api():
 
 
 class LanApiContractTests(unittest.TestCase):
+    def test_single_artifact_delete_requires_confirmation_and_maps_failures(self):
+        tid='a'*32
+        with patch.object(self.api,'_gradio_call',return_value={'deleted':True}) as bridge:
+            with self.assertRaises(self.api.HTTPException) as error:
+                self.api.delete_artifact(tid,'one.png',{'confirmed':False})
+            self.assertEqual(error.exception.status_code,400)
+            bridge.assert_not_called()
+            self.assertTrue(self.api.delete_artifact(tid,'one.png',{'confirmed':True})['deleted'])
+            bridge.assert_called_once_with('delete_asset',[tid,'one.png',True])
+        for code,status in [('not_found',404),('asset_busy',409),('delete_failed',500)]:
+            with patch.object(self.api,'_gradio_call',return_value={'error':code}), self.assertRaises(self.api.HTTPException) as error:
+                self.api.delete_artifact(tid,'one.png',{'confirmed':True})
+            self.assertEqual(error.exception.status_code,status)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.api = _load_lan_api()
@@ -141,6 +161,38 @@ class LanApiContractTests(unittest.TestCase):
         }
         rendered = {"".join(value.value for value in route.values if isinstance(value, ast.Constant)) for route in routes}
         self.assertTrue(expected_suffixes.issubset(rendered))
+
+    def test_iteration_workflows_are_gated_and_validate_asset_kind(self):
+        with patch.dict(os.environ, {"BRM_FLUX2_FAST_ENABLED":"0", "BRM_QWEN3_TTS_ENABLED":"0"}):
+            self.assertNotIn("flux2-fast-edit", self.api._active_workflows())
+            self.assertNotIn("qwen3-voice-clone", self.api._active_workflows())
+        with patch.dict(os.environ, {"BRM_FLUX2_FAST_ENABLED":"1", "BRM_QWEN3_TTS_ENABLED":"1"}):
+            self.assertIn("flux2-fast-edit", self.api._active_workflows())
+            self.assertIn("qwen3-voice-clone", self.api._active_workflows())
+        image = self.api.AssetRecord(asset_id="a"*32,kind="image",filename="source.png",source_filename="source.png",size_bytes=1,sha256="b"*64,created_at=0)
+        audio = self.api.AssetRecord(asset_id="c"*32,kind="audio",filename="ref.wav",source_filename="ref.wav",size_bytes=1,sha256="d"*64,created_at=0)
+        assets={image.asset_id:image,audio.asset_id:audio}
+        self.assertEqual(self.api._normal_flux2_fast({"prompt":"蓝色茶壶","image_asset_id":image.asset_id,"width":1920,"height":1080},assets),["蓝色茶壶","source.png",1920,1080,42])
+        with patch('qwen3_tts_support.check_reference'):
+            self.assertEqual(self.api._normal_qwen3_tts({"text":"你好","ref_audio_asset_id":audio.asset_id},assets),["你好","ref.wav","zh",""])
+        for params, normalizer in [({"prompt":"蓝色","image_asset_id":audio.asset_id},self.api._normal_flux2_fast),({"text":"你好","ref_audio_asset_id":image.asset_id},self.api._normal_qwen3_tts),({"prompt":"蓝色","image_asset_id":image.asset_id,"width":4096},self.api._normal_flux2_fast),({"text":"长"*601,"ref_audio_asset_id":audio.asset_id},self.api._normal_qwen3_tts)]:
+            with self.assertRaises(self.api.HTTPException):normalizer(params,assets)
+
+    def test_flux3_flag_modes_and_reference_contract(self):
+        with patch.dict(os.environ,{"BRM_FLUX3_IMAGE_ENABLED":"0"}):
+            self.assertNotIn("flux3-text-to-image",self.api._active_workflows())
+            self.assertNotIn("flux3-image-edit",self.api._active_workflows())
+        with patch.dict(os.environ,{"BRM_FLUX3_IMAGE_ENABLED":"1"}):
+            active=self.api._active_workflows()
+            self.assertIn("flux3-text-to-image",active)
+            self.assertEqual(active["flux3-image-edit"].options["prompt_enhancement"],"official")
+        image=self.api.AssetRecord(asset_id="a"*32,kind="image",filename="source.png",source_filename="source.png",size_bytes=1,sha256="b"*64,created_at=0)
+        audio=self.api.AssetRecord(asset_id="c"*32,kind="audio",filename="ref.wav",source_filename="ref.wav",size_bytes=1,sha256="d"*64,created_at=0)
+        assets={image.asset_id:image,audio.asset_id:audio}
+        self.assertEqual(self.api._normal_flux3({"prompt":"中文"},assets),["中文",1024,1024,42])
+        self.assertEqual(self.api._normal_flux3({"prompt":"蓝色","width":1152,"height":864,"seed":7,"image_asset_id":image.asset_id},assets,True),["蓝色",1152,864,7,"source.png"])
+        for params in ({"prompt":"x"},{"prompt":"x","image_asset_id":audio.asset_id}):
+            with self.assertRaises(self.api.HTTPException):self.api._normal_flux3(params,assets,True)
 
     def test_api_keeps_paths_loopback_only_and_uses_opaque_assets(self) -> None:
         text = LAN_API.read_text(encoding="utf-8")
@@ -176,10 +228,28 @@ class LanApiContractTests(unittest.TestCase):
             self.assertNotIn("qwen-image21", self.api._active_workflows())
         with patch.dict(os.environ, {"BRM_QWEN_IMAGE21_ENABLED": "1"}):
             self.assertIn("qwen-image21", self.api._active_workflows())
-        self.assertEqual(self.api._normal_qwen_image21({"prompt": "research"}, {}), ["research",1024,1024,40,0])
-        with self.assertRaises(self.api.HTTPException) as caught:
-            self.api._normal_qwen_image21({"prompt": "research", "width":2048,"height":2048}, {})
-        self.assertEqual(caught.exception.status_code,422)
+        self.assertEqual(self.api._normal_qwen_image21({"prompt": "research"}, {}), ["research", 1024, 1024, 8, 0, True])
+        self.assertEqual(self.api._normal_qwen_image21({"prompt": "research", "steps": 40}, {}), ["research", 1024, 1024, 40, 0, False])
+        self.assertEqual(self.api._normal_qwen_image21({"prompt": "research", "turbo": False}, {}), ["research", 1024, 1024, 40, 0, False])
+        asset = self.api.AssetRecord(
+            asset_id="a" * 32, kind="image", filename="source.png",
+            source_filename="source.png", size_bytes=1, sha256="b" * 64, created_at=0,
+        )
+        self.assertEqual(
+            self.api._normal_qwen_image21_edit({"prompt": "edit", "image_asset_id": asset.asset_id}, {asset.asset_id: asset}),
+            ["edit", 1024, 1024, 8, 0, "source.png", True],
+        )
+        self.assertEqual(
+            self.api._normal_qwen_image21_edit({"prompt": "edit", "image_asset_id": asset.asset_id, "turbo": False}, {asset.asset_id: asset}),
+            ["edit", 1024, 1024, 40, 0, "source.png", False],
+        )
+        for bad in (
+            {"prompt": "research", "width": 2048, "height": 2048},
+            {"prompt": "research", "turbo": "yes"},
+        ):
+            with self.assertRaises(self.api.HTTPException) as caught:
+                self.api._normal_qwen_image21(bad, {})
+            self.assertEqual(caught.exception.status_code, 422)
 
     def test_h3_explicit_profiles_and_assets(self) -> None:
 
@@ -377,6 +447,15 @@ class LanApiContractTests(unittest.TestCase):
                 "state": "completed", "output_files": [filename]
             }
             self.assertEqual(self.api._safe_artifact("a" * 32, filename), artifact)
+
+    def test_experimental_speech_artifact_allows_chinese_parentheses(self):
+        filename="任务_Qwen3-TTS 语音克隆（实验）_demo.wav"
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve();artifact=root/filename;artifact.write_bytes(b"fixture")
+            with patch.object(self.api,"OUTPUT_DIR",root),patch.object(self.api,"_task_status",return_value={"state":"completed","output_files":[filename]}):
+                self.assertEqual(self.api._safe_artifact("a"*32,filename),artifact)
+                for bad in ("../"+filename,"sub/"+filename,"sub\\"+filename,"not-owned.wav"):
+                    with self.assertRaises(self.api.HTTPException):self.api._safe_artifact("a"*32,bad)
 
 
 if __name__ == "__main__":
