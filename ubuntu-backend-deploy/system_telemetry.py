@@ -28,7 +28,6 @@ CORE_SERVICE_SPECS: tuple[tuple[str, str, int, str], ...] = (
     ("strata", "Strata LLM", 8002, "http://127.0.0.1:8002/health"),
     ("zonos3", "ZONOS3-Mini", 1919, "http://127.0.0.1:1919/v2/health"),
     ("comfyui", "ComfyUI", 8188, "http://127.0.0.1:8188/system_stats"),
-    ("qwen_image21", "Qwen-Image-2.1", 8190, "http://127.0.0.1:8190/system_stats"),
     ("lan_api", "LAN API", 9100, "http://127.0.0.1:9100/api/v1/health"),
     ("indextts25", "IndexTTS-2.5", 9205, "http://127.0.0.1:9205/health"),
     ("breeze_tts2", "Breeze-TTS2", 9206, "http://127.0.0.1:9206/health"),

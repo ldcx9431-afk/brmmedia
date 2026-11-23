@@ -25,6 +25,7 @@ TIER_IMAGE_HEAVY = "image_heavy"
 TIER_IMAGE_LIGHT = "image_light"
 TIER_AUDIO_GPU = "audio_gpu"
 TIER_VOICE_CPU = "voice_cpu"
+TIER_VOICE_BREEZE = "voice_breeze"
 
 ALL_TIERS = (
     TIER_VIDEO_HEAVY,
@@ -32,6 +33,7 @@ ALL_TIERS = (
     TIER_IMAGE_LIGHT,
     TIER_AUDIO_GPU,
     TIER_VOICE_CPU,
+    TIER_VOICE_BREEZE,
 )
 
 
@@ -91,13 +93,16 @@ _WORKFLOW_PROFILES: dict[str, TaskProfile] = {
     "Qwen3-TTS-语音克隆": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
     "voice-clone": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
     "qwen3-voice-clone": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
-    # Pure CPU voice workflows (Zonos3-mini :1919, Breeze-TTS2 :9206): zero GPU0 VRAM, decoupled 1..4
+    # Pure CPU voice workflows:
+    # - Zonos3-mini (:1919): decoupled 1..4 slots on voice_cpu
+    # - Breeze-TTS2 (:9206, breeze-server --parallel 1): isolated 1-slot tier voice_breeze
+    #   so queued Breeze jobs never starve Zonos3's 4 concurrent slots.
     "Zonos3-语音克隆": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
     "zonos3-voice-clone": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
-    "Breeze-TTS2-语音克隆": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
-    "breeze-tts2-voice-clone": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
-    "breeze-tts2": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
-    "breezyvoice": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
+    "Breeze-TTS2-语音克隆": TaskProfile(TIER_VOICE_BREEZE, False, False, False, 10),
+    "breeze-tts2-voice-clone": TaskProfile(TIER_VOICE_BREEZE, False, False, False, 10),
+    "breeze-tts2": TaskProfile(TIER_VOICE_BREEZE, False, False, False, 10),
+    "breezyvoice": TaskProfile(TIER_VOICE_BREEZE, False, False, False, 10),
 }
 
 _DEFAULT_CONSERVATIVE_PROFILE = TaskProfile(TIER_IMAGE_HEAVY, True, True, False, 90)
@@ -112,7 +117,9 @@ def classify_workflow(workflow_name: str) -> TaskProfile:
     if direct is not None:
         return direct
     lower = name.lower()
-    if "zonos3" in lower or "breeze-tts2" in lower or "breeze_tts2" in lower or "breezyvoice" in lower:
+    if "breeze-tts2" in lower or "breeze_tts2" in lower or "breezyvoice" in lower:
+        return TaskProfile(TIER_VOICE_BREEZE, False, False, False, 10)
+    if "zonos3" in lower:
         return TaskProfile(TIER_VOICE_CPU, False, False, False, 10)
     if "minimaxh3image" in lower or "h3-image" in lower or "qwenimage21" in lower or "qwen-image21" in lower or "flux3" in lower:
         return TaskProfile(TIER_IMAGE_HEAVY, True, True, False, 90)
@@ -176,6 +183,7 @@ class AdaptiveConfig:
     light_gpu_max: int = 3
     audio_gpu_max: int = 2
     voice_cpu_max: int = 4
+    voice_breeze_max: int = 1
     gpu_vram_min_free_mib: int = 6144
     gpu_vram_warn_free_mib: int = 10240
     gpu_util_warn_pct: float = 85.0
@@ -222,6 +230,9 @@ def load_adaptive_config(
         light_gpu_max=_parse_int(pick("adaptive_light_gpu_max", "BRM_ADAPTIVE_LIGHT_GPU_MAX", 3), 3, 1, 4),
         audio_gpu_max=_parse_int(pick("adaptive_audio_gpu_max", "BRM_ADAPTIVE_AUDIO_GPU_MAX", 2), 2, 1, 3),
         voice_cpu_max=_parse_int(pick("adaptive_voice_cpu_max", "BRM_ADAPTIVE_VOICE_CPU_MAX", 4), 4, 1, 8),
+        voice_breeze_max=_parse_int(
+            pick("adaptive_voice_breeze_max", "BRM_ADAPTIVE_VOICE_BREEZE_MAX", 1), 1, 1, 4
+        ),
         gpu_vram_min_free_mib=_parse_int(
             pick("adaptive_gpu_vram_min_free_mib", "BRM_ADAPTIVE_GPU_VRAM_MIN_FREE_MIB", 6144), 6144, 512, 22528
         ),
@@ -350,7 +361,7 @@ def estimate_task_cost(workflow_name: str, params: dict[str, Any] | None = None)
     except (TypeError, ValueError):
         steps = None
 
-    if profile.tier == TIER_VOICE_CPU:
+    if profile.tier in {TIER_VOICE_CPU, TIER_VOICE_BREEZE}:
         text_len = len(str(args.get("text") or args.get("prompt") or ""))
         return {
             "tier": profile.tier,
@@ -471,6 +482,7 @@ def evaluate_concurrency(
         TIER_IMAGE_LIGHT: cfg.light_gpu_max,
         TIER_AUDIO_GPU: min(cfg.audio_gpu_max, cfg.light_gpu_max),
         TIER_VOICE_CPU: cfg.voice_cpu_max,
+        TIER_VOICE_BREEZE: cfg.voice_breeze_max,
     }
 
     gpu0 = _select_gpu0(gpus)
@@ -636,11 +648,13 @@ def evaluate_concurrency(
         TIER_IMAGE_LIGHT: max(1, light_gpu_limit),
         TIER_AUDIO_GPU: max(1, min(audio_gpu_limit, light_gpu_limit)),
         TIER_VOICE_CPU: max(1, voice_cpu_limit),
+        TIER_VOICE_BREEZE: max(1, min(cfg.voice_breeze_max, voice_cpu_limit)),
     }
     degraded = (
         limits[TIER_IMAGE_LIGHT] < configured_max[TIER_IMAGE_LIGHT]
         or limits[TIER_AUDIO_GPU] < configured_max[TIER_AUDIO_GPU]
         or limits[TIER_VOICE_CPU] < configured_max[TIER_VOICE_CPU]
+        or limits[TIER_VOICE_BREEZE] < configured_max[TIER_VOICE_BREEZE]
     )
     result = {
         "adaptive_enabled": True,
@@ -1001,7 +1015,7 @@ class AdaptiveConcurrencyController:
         cfg = self.config()
         if not cfg.enabled:
             return 1
-        return max(2, cfg.light_gpu_max + cfg.voice_cpu_max)
+        return max(2, cfg.light_gpu_max + cfg.voice_cpu_max + cfg.voice_breeze_max)
 
     def evaluate(
         self,

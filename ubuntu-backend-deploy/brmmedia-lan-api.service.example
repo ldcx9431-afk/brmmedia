@@ -2,6 +2,7 @@
 Description=BRMMedia LAN REST automation API
 After=network-online.target baorong-backend.service
 Wants=network-online.target
+RequiresMountsFor=/mnt/d/brmmedia/outputs
 
 [Service]
 Type=simple

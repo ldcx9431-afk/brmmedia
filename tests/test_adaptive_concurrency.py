@@ -20,6 +20,7 @@ if str(DEPLOY_DIR) not in sys.path:
 
 import adaptive_concurrency as ac
 import media_runtime_guard as guard
+import system_telemetry
 from test_lan_api_contract import _load_lan_api
 from test_task_queue import _load_webui
 
@@ -55,6 +56,13 @@ class AdaptiveConcurrencyPolicyTests(unittest.TestCase):
         self.assertFalse(zonos.exclusive)
         self.assertFalse(zonos.uses_gpu)
 
+        breeze = ac.classify_workflow("Breeze-TTS2-语音克隆")
+        self.assertEqual(breeze.tier, ac.TIER_VOICE_BREEZE)
+        self.assertFalse(breeze.exclusive)
+        self.assertFalse(breeze.uses_gpu)
+        self.assertEqual(ac.classify_workflow("breeze-tts2-voice-clone").tier, ac.TIER_VOICE_BREEZE)
+        self.assertEqual(ac.classify_workflow("breezyvoice").tier, ac.TIER_VOICE_BREEZE)
+
         unknown = ac.classify_workflow("unknown-experimental-model")
         self.assertTrue(unknown.exclusive)
 
@@ -74,6 +82,7 @@ class AdaptiveConcurrencyPolicyTests(unittest.TestCase):
         self.assertEqual(snap["limits"][ac.TIER_IMAGE_LIGHT], 3)
         self.assertEqual(snap["limits"][ac.TIER_AUDIO_GPU], 2)
         self.assertEqual(snap["limits"][ac.TIER_VOICE_CPU], 4)
+        self.assertEqual(snap["limits"][ac.TIER_VOICE_BREEZE], 1)
 
     def test_fault_injection_high_ram_pressure_degrades_all_to_1(self):
         snap = ac.evaluate_concurrency(
@@ -341,7 +350,133 @@ class AdaptiveTaskQueueBehaviorTests(unittest.TestCase):
         self.assertIn("concurrency", body["telemetry"])
         self.assertEqual(body["concurrency"]["limits"]["image_light"], 3)
         self.assertEqual(body["concurrency"]["limits"]["voice_cpu"], 4)
+        self.assertEqual(body["concurrency"]["limits"]["voice_breeze"], 1)
         self.assertEqual(body["concurrency"]["limits"]["video_heavy"], 1)
+
+    def test_system_telemetry_excludes_retired_8190_probe(self):
+        ports = [port for _, _, port, _ in system_telemetry.CORE_SERVICE_SPECS]
+        self.assertNotIn(8190, ports)
+        self.assertEqual(len(ports), 7)
+        fake_session = Mock()
+        fake_session.__enter__ = Mock(return_value=fake_session)
+        fake_session.__exit__ = Mock(return_value=False)
+        fake_session.get.return_value = Mock(status_code=200)
+        with patch.object(system_telemetry.requests, "Session", return_value=fake_session):
+            res = system_telemetry.collect_services_status()
+        self.assertEqual(res["total"], 7)
+        self.assertEqual(res["online"], 7)
+
+    def test_breeze_tts2_capped_at_1_and_does_not_block_or_starve_zonos3(self):
+        controller = ac.AdaptiveConcurrencyController(
+            probe_fn=lambda: HEALTHY_HW,
+            config_provider=lambda: ac.AdaptiveConfig(),
+            cache_ttl=0.0,
+        )
+        lock = threading.Lock()
+        active_breeze = 0
+        max_active_breeze = 0
+        active_zonos = 0
+        max_active_zonos = 0
+        overlap_breeze_and_zonos = False
+        overlap_zonos_full_and_breeze = False
+
+        breeze_started = threading.Event()
+        release_breeze = threading.Event()
+        zonos_full_started = threading.Event()
+        release_zonos = threading.Event()
+        done_count = 0
+        all_done = threading.Event()
+        target_total = 0
+
+        def processor(task):
+            nonlocal active_breeze, max_active_breeze, active_zonos, max_active_zonos
+            nonlocal overlap_breeze_and_zonos, overlap_zonos_full_and_breeze, done_count
+            tier = ac.classify_workflow(task.workflow_name).tier
+            with lock:
+                if tier == ac.TIER_VOICE_BREEZE:
+                    active_breeze += 1
+                    max_active_breeze = max(max_active_breeze, active_breeze)
+                    if active_zonos > 0:
+                        overlap_breeze_and_zonos = True
+                    if active_zonos == 4:
+                        overlap_zonos_full_and_breeze = True
+                elif tier == ac.TIER_VOICE_CPU:
+                    active_zonos += 1
+                    max_active_zonos = max(max_active_zonos, active_zonos)
+                    if active_breeze > 0:
+                        overlap_breeze_and_zonos = True
+                    if active_zonos == 4:
+                        zonos_full_started.set()
+            try:
+                if tier == ac.TIER_VOICE_BREEZE:
+                    breeze_started.set()
+                    release_breeze.wait(timeout=3.0)
+                elif task.args.get("hold"):
+                    release_zonos.wait(timeout=3.0)
+                else:
+                    time.sleep(0.08)
+            finally:
+                with lock:
+                    if tier == ac.TIER_VOICE_BREEZE:
+                        active_breeze -= 1
+                    elif tier == ac.TIER_VOICE_CPU:
+                        active_zonos -= 1
+                    done_count += 1
+                    if done_count >= target_total:
+                        all_done.set()
+
+        q = self.webui.TaskQueue(processor, max_done=20, concurrency_controller=controller)
+        q.start_workers()
+        try:
+            # Phase 1: 3 Breeze tasks queued -> strict cap 1; 3 Zonos3 tasks still run concurrently
+            target_total = 6
+            for i in range(3):
+                q.enqueue(self.webui.Task(f"bz-{i}", f"bz-{i}", self.webui.BREEZE_TTS2_WORKFLOW, {}))
+            self.assertTrue(breeze_started.wait(timeout=2.0))
+            for i in range(3):
+                q.enqueue(self.webui.Task(f"zn-{i}", f"zn-{i}", self.webui.ZONOS3_WORKFLOW, {}))
+            time.sleep(0.30)
+            self.assertEqual(max_active_breeze, 1)
+            self.assertGreaterEqual(max_active_zonos, 2)
+            self.assertTrue(overlap_breeze_and_zonos)
+            release_breeze.set()
+            self.assertTrue(all_done.wait(timeout=3.0))
+
+            # Phase 2: 4 Zonos3 tasks saturate voice_cpu=4 -> Breeze task still starts concurrently
+            all_done.clear()
+            breeze_started.clear()
+            release_breeze.clear()
+            done_count = 0
+            target_total = 5
+            for i in range(4):
+                q.enqueue(self.webui.Task(f"zn-hold-{i}", f"zn-hold-{i}", self.webui.ZONOS3_WORKFLOW, {"hold": True}))
+            self.assertTrue(zonos_full_started.wait(timeout=2.0))
+            q.enqueue(self.webui.Task("bz-concurrent", "bz-concurrent", self.webui.BREEZE_TTS2_WORKFLOW, {}))
+            self.assertTrue(breeze_started.wait(timeout=2.0))
+            self.assertTrue(overlap_zonos_full_and_breeze)
+            release_breeze.set()
+            release_zonos.set()
+            self.assertTrue(all_done.wait(timeout=3.0))
+            self.assertEqual(max_active_breeze, 1)
+        finally:
+            release_breeze.set()
+            release_zonos.set()
+            q.stop_event.set()
+
+    def test_run_breeze_tts2_uses_isolated_gate_not_zonos3_cross_gate(self):
+        task = self.webui.Task("bz-gate", "bz-gate", self.webui.BREEZE_TTS2_WORKFLOW, {"text": "你好世界"})
+        health_resp = Mock(status_code=200)
+        health_resp.json.return_value = {"ok": True}
+        fake_session = Mock()
+        fake_session.__enter__ = Mock(return_value=fake_session)
+        fake_session.__exit__ = Mock(return_value=False)
+        fake_session.get.return_value = health_resp
+        with patch.object(self.webui._zonos3_cross_gate, "acquire", side_effect=AssertionError("Breeze-TTS2 must not acquire _zonos3_cross_gate")), \
+             patch.object(self.webui.requests, "Session", return_value=fake_session, create=True), \
+             patch.object(self.webui.breeze_tts2_support, "synthesize_breeze_tts2_wav", return_value=(b"RIFF\x00\x00\x00\x00WAVEfmt ", {"chunks": 1, "workers": 1, "language": "zh"})):
+            out = self.webui.run_breeze_tts2(task)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(self.webui._breeze_tts2_gate.active_count(), 0)
 
     def test_light_lease_shares_lock_across_batch_and_releases_once(self):
         session = Mock()

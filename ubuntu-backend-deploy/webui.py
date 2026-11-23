@@ -887,8 +887,7 @@ class TaskQueue:
                     task.start_ts = time.time()
                     task.stage_clock = time.monotonic()
                     task.gpu_active = (
-                        adaptive_concurrency.classify_workflow(task.workflow_name).tier
-                        != adaptive_concurrency.TIER_VOICE_CPU
+                        adaptive_concurrency.classify_workflow(task.workflow_name).uses_gpu
                     )
                     self._running[task.id] = task
                     self._state_version += 1
@@ -980,6 +979,7 @@ class TaskQueue:
 
         limits = snapshot.get("limits") or {}
         voice_limit = int(limits.get(adaptive_concurrency.TIER_VOICE_CPU, 1))
+        breeze_limit = int(limits.get(adaptive_concurrency.TIER_VOICE_BREEZE, 1))
         image_light_limit = int(limits.get(adaptive_concurrency.TIER_IMAGE_LIGHT, 1))
         audio_gpu_limit = int(limits.get(adaptive_concurrency.TIER_AUDIO_GPU, 1))
         cfg = self._concurrency_controller.config()
@@ -991,17 +991,21 @@ class TaskQueue:
             t for t in running_tasks
             if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_CPU
         ]
+        running_voice_breeze = [
+            t for t in running_tasks
+            if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_BREEZE
+        ]
         running_gpu = [
             t for t in running_tasks
             if t.gpu_active
-            and adaptive_concurrency.classify_workflow(t.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+            and adaptive_concurrency.classify_workflow(t.workflow_name).uses_gpu
         ]
         running_gpu_exclusive = any(
             adaptive_concurrency.classify_workflow(t.workflow_name).exclusive
             for t in running_gpu
         )
 
-        # CPU voice lane (Zonos3-mini): decoupled from GPU0 queue.
+        # CPU voice lane (Zonos3-mini): decoupled from GPU0 queue and Breeze-TTS2.
         voice_candidate = None
         if len(running_voice_cpu) < voice_limit:
             for pending_task in self._pending:
@@ -1009,12 +1013,20 @@ class TaskQueue:
                     voice_candidate = pending_task
                     break
 
+        # Isolated Breeze-TTS2 CPU lane (breeze-server --parallel 1): decoupled from Zonos3 & GPU0.
+        breeze_candidate = None
+        if len(running_voice_breeze) < breeze_limit:
+            for pending_task in self._pending:
+                if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier == adaptive_concurrency.TIER_VOICE_BREEZE:
+                    breeze_candidate = pending_task
+                    break
+
         # GPU lane: model-affinity batching + aging anti-starvation + light backfill (HOL breaking).
         gpu_candidate = None
         if not running_gpu_exclusive:
             pending_gpu = [
                 pending_task for pending_task in self._pending
-                if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+                if adaptive_concurrency.classify_workflow(pending_task.workflow_name).uses_gpu
             ]
             if pending_gpu:
                 head_gpu = pending_gpu[0]
@@ -1079,17 +1091,12 @@ class TaskQueue:
                     ]
                     gpu_candidate = _affinity_pick(backfill_pool)
 
-        chosen = None
-        if voice_candidate is not None and gpu_candidate is not None:
-            chosen = gpu_candidate if gpu_candidate.submit_ts <= voice_candidate.submit_ts else voice_candidate
-        elif gpu_candidate is not None:
-            chosen = gpu_candidate
-        elif voice_candidate is not None:
-            chosen = voice_candidate
+        eligible_candidates = [c for c in (gpu_candidate, voice_candidate, breeze_candidate) if c is not None]
+        chosen = min(eligible_candidates, key=lambda c: c.submit_ts) if eligible_candidates else None
 
         if chosen is not None:
             self._pending.remove(chosen)
-            if adaptive_concurrency.classify_workflow(chosen.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU:
+            if adaptive_concurrency.classify_workflow(chosen.workflow_name).uses_gpu:
                 chosen_group = media_runtime_guard.workflow_model_group(chosen.workflow_name, chosen.args)
                 if chosen_group == self._last_gpu_model_group:
                     self._sticky_streak += 1
@@ -3521,6 +3528,11 @@ def run_zonos3(task: Task) -> list[str]:
     return [str(wav_path)]
 
 
+_breeze_tts2_gate = adaptive_concurrency.AdaptiveSlotGate(
+    lambda: int(concurrency_controller.evaluate()["limits"][adaptive_concurrency.TIER_VOICE_BREEZE])
+)
+
+
 def run_breeze_tts2(task: Task) -> list[str]:
     """Invoke the isolated CPU Breeze-TTS2 loopback service (:9206) and save WAV."""
     if task.cancel_event.is_set():
@@ -3563,7 +3575,7 @@ def run_breeze_tts2(task: Task) -> list[str]:
     reference_text = str(task.args.get("reference_text") or "").strip()
     instruction = str(task.args.get("instruction") or "").strip()
 
-    if not _zonos3_cross_gate.acquire(cancel_check=task.cancel_event.is_set):
+    if not _breeze_tts2_gate.acquire(cancel_check=task.cancel_event.is_set):
         raise RuntimeError("Breeze-TTS2 语音任务已取消")
     try:
         task_queue.update_execution(task, {"stage": "checking_breeze_tts2"})
@@ -3610,7 +3622,7 @@ def run_breeze_tts2(task: Task) -> list[str]:
         finally:
             tmp_path.unlink(missing_ok=True)
     finally:
-        _zonos3_cross_gate.release()
+        _breeze_tts2_gate.release()
 
     task.args.update({
         "engine": "Breeze-TTS2 最新优化版",
@@ -6037,6 +6049,10 @@ def _real_system_status(done: list[Task], running: list[Task]) -> dict[str, obje
         "voice_cpu": sum(
             1 for t in running
             if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_CPU
+        ),
+        "voice_breeze": sum(
+            1 for t in running
+            if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_BREEZE
         ),
         "pending_total": len(pending_tasks),
     })

@@ -2,6 +2,7 @@
 Description=Bao Rong Wan Xiang Gradio and ComfyUI backend
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/mnt/d/brmmedia/outputs
 StartLimitIntervalSec=2min
 StartLimitBurst=6
 
