@@ -259,6 +259,8 @@ print(json.dumps({"server_port": server_port}))
 sys.stdout.flush()
 time.sleep(1)
 yzy_config = load_config()
+if yzy_config.get("keep_model_max_vram_mib") is not None:
+    media_runtime_guard.set_safe_keep_vram_mib(yzy_config.get("keep_model_max_vram_mib"))
 fp16 = True if yzy_config.get("fp16") is None else yzy_config.get("fp16")
 def config_int(name, default=1, min_value=1, max_value=4):
     try:
@@ -1158,7 +1160,7 @@ footer {
     color: var(--brm-muted);
     font-size: 0.78rem;
 }
-#global-toolbar button {
+#global-toolbar button:not(.brm-brand-home) {
     min-height: 40px !important;
     border-color: #efd9d0 !important;
     border-radius: 9px !important;
@@ -1930,16 +1932,18 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 .brm-sys-bar.is-warn > i { background:linear-gradient(90deg,#d97706,#f59e0b); }
 .brm-sys-bar.is-hot > i { background:linear-gradient(90deg,#c83344,#ea5455); }
 .brm-sys-gpu { padding:5px 8px; border-radius:8px; background:rgba(255,255,255,.8); border:1px solid rgba(232,196,182,.55); display:flex; flex-direction:column; gap:2px; }
-.brm-sys-gpu-top { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:.72rem; }
-.brm-sys-gpu-top b { color:#24374a; font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.brm-sys-gpu-top span { color:#c24f2c; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; flex:0 0 auto; }
+.brm-sys-gpu-top { display:flex; flex-direction:column; align-items:flex-start; gap:1px; font-size:.72rem; }
+.brm-sys-gpu-top b { color:#24374a; font-weight:750; max-width:100%; white-space:normal; overflow-wrap:anywhere; line-height:1.3; }
+.brm-sys-gpu-top span { color:#c24f2c; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .brm-telemetry-details { border:1px dashed rgba(212,175,160,.65); border-radius:8px; padding:6px 8px; background:rgba(255,255,255,.72); margin-top:auto; }
 .brm-telemetry-details summary { cursor:pointer; font-size:.72rem; font-weight:750; color:#8b5f52; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:6px; user-select:none; }
 .brm-telemetry-details summary::-webkit-details-marker { display:none; }
 .brm-telemetry-details summary::after { content:"▾"; font-size:.76rem; color:#a46c5c; transition:transform .16s ease; }
 .brm-telemetry-details[open] summary::after { transform:rotate(180deg); }
 .brm-telemetry-details-body { display:flex; flex-direction:column; gap:6px; margin-top:7px; padding-top:7px; border-top:1px dashed rgba(212,175,160,.45); }
-.brm-sys-pills { display:flex; flex-wrap:wrap; gap:4px; margin-top:2px; }
+.brm-sys-pills { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px 6px; margin-top:2px; }
+.brm-sys-conc { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:4px; margin-top:2px; }
+.brm-sys-conc .brm-sys-cpill { display:inline-flex; padding:2px 7px; border-radius:6px; border:1px solid #f0d5c9; background:#fff7f2; color:#7a4a3d; font-size:.67rem; font-weight:700; white-space:nowrap; }
 .brm-sys-pill { display:inline-flex; align-items:center; gap:4px; padding:2px 6px; border-radius:6px; font-size:.67rem; font-weight:700; border:1px solid #d5e8dc; background:#f3fbf6; color:#157044; }
 .brm-sys-pill.is-off { border-color:#f0c6ca; background:#fff3f4; color:#b42c3b; }
 .brm-sys-pill i { width:5px; height:5px; border-radius:50%; background:currentColor; }
@@ -1989,7 +1993,7 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 .brm-asset-card { position:relative; min-width:0; overflow:hidden; border:1px solid #e0e8ee; border-radius:10px; background:#fff; box-shadow:0 2px 7px rgba(22,43,64,.04); }.brm-asset-card[hidden] { display:none; }
 .brm-asset-preview { position:relative; display:block; width:100%; height:92px; padding:0; overflow:hidden; border:0; background:#eff4f6; cursor:pointer; }.brm-asset-preview img,.brm-asset-preview video { display:block; width:100%; height:100%; object-fit:cover; }.brm-play-mark { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:5px 7px; border-radius:99px; background:rgba(12,29,43,.66); color:#fff; font-size:.7rem; }.brm-audio-pending { display:flex; width:100%; height:100%; align-items:center; justify-content:center; color:#708095; font-size:.72rem; }.brm-asset-meta { display:flex; align-items:center; justify-content:space-between; gap:4px; padding:6px 7px; color:#334a60; font-size:.7rem; }.brm-asset-meta span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.brm-asset-meta time { flex:0 0 auto; color:#8491a1; font-size:.65rem; }.brm-asset-download { position:absolute; right:7px; top:7px; padding:3px 5px; border-radius:5px; background:rgba(255,255,255,.88); color:#105e6c; font-size:.68rem; font-weight:800; text-decoration:none; }.brm-assets-empty { grid-column:1/-1; display:flex; align-items:center; justify-content:center; min-height:180px; border:1px dashed #cbd8e2; border-radius:10px; color:#708095; }
 .brm-asset-grid.is-list { display:block; height:448px; }.brm-asset-grid.is-list .brm-asset-card { display:flex; align-items:center; height:64px; margin-bottom:6px; }.brm-asset-grid.is-list .brm-asset-preview { flex:0 0 106px; height:64px; }.brm-asset-grid.is-list .brm-asset-meta { flex:1; font-size:.8rem; }.brm-asset-grid.is-list .brm-asset-download { position:static; margin-right:10px; }
-.brm-audio-dock { position:fixed; z-index:1900; left:50%; bottom:20px; width:min(700px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:11px 14px; border:1px solid #a9d5d8; border-radius:12px; background:#f9ffff; box-shadow:0 12px 32px rgba(14,45,58,.22); }.brm-audio-dock[hidden]{display:none!important}.brm-audio-dock>div{min-width:120px}.brm-audio-dock strong{display:block;color:#17465b;font-size:.82rem}.brm-audio-dock span{color:#718095;font-size:.7rem}.brm-audio-dock audio{flex:1;min-width:180px;height:34px}.brm-audio-dock a,.brm-audio-dock button{flex:0 0 auto;padding:7px 9px;border:1px solid #c9dce0;border-radius:8px;background:#fff;color:#0c6b76;font-size:.75rem;font-weight:750;text-decoration:none;cursor:pointer}
+.brm-audio-dock { position:fixed; z-index:1900; left:50%; bottom:20px; width:min(880px,calc(100vw - 32px)); max-width:min(880px,calc(100vw - 32px)); transform:translateX(-50%); display:flex; align-items:center; gap:12px; padding:11px 14px; border:1px solid #a9d5d8; border-radius:12px; background:#f9ffff; box-shadow:0 12px 32px rgba(14,45,58,.22); }.brm-audio-dock[hidden]{display:none!important}.brm-audio-dock>div{min-width:120px}.brm-audio-dock strong{display:block;color:#17465b;font-size:.82rem}.brm-audio-dock span{color:#718095;font-size:.7rem}.brm-audio-dock audio{flex:1;min-width:180px;height:34px}.brm-audio-dock a,.brm-audio-dock button{flex:0 0 auto;padding:7px 9px;border:1px solid #c9dce0;border-radius:8px;background:#fff;color:#0c6b76;font-size:.75rem;font-weight:750;text-decoration:none;cursor:pointer}
 .brm-dashboard-viewer { position:fixed; inset:0; z-index:2000; display:flex; align-items:center; justify-content:center; padding:54px 5vw; background:rgba(12,25,47,.86); }.brm-dashboard-viewer[hidden] { display:none !important; }.brm-dashboard-viewer .brm-viewer-inner { width:min(1200px,100%); height:100%; display:flex; flex-direction:column; gap:10px; }.brm-dashboard-viewer .brm-viewer-bar { display:flex; align-items:center; justify-content:space-between; color:#fff; }.brm-dashboard-viewer .brm-viewer-bar a,.brm-dashboard-viewer .brm-viewer-bar button { padding:8px 12px; border:0; border-radius:8px; background:#fff; color:#172b43; font-weight:750; text-decoration:none; cursor:pointer; }.brm-dashboard-viewer .brm-viewer-stage { min-height:0; flex:1; display:flex; align-items:center; justify-content:center; overflow:auto; }.brm-dashboard-viewer img,.brm-dashboard-viewer video { max-width:100%; max-height:100%; object-fit:contain; border-radius:10px; }
 @media (max-width:1200px) { .brm-task-card-grid{grid-template-columns:repeat(3,minmax(0,1fr));} .brm-asset-grid{grid-template-columns:repeat(5,minmax(0,1fr));} #dashboard-system-status{min-width:0;} }
 @media (max-width:720px) { #dashboard-command-bar,.brm-assets-header{align-items:flex-start;flex-direction:column}#asset-download-row{position:static!important;width:auto!important;align-self:flex-end!important;margin:0 0 8px auto!important}.brm-assets-control-row{align-items:stretch;flex-direction:column}.brm-task-card-grid{grid-template-columns:repeat(2,minmax(0,1fr));}.brm-asset-grid{grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:120px;height:432px}.brm-assets-tools{width:100%;overflow:auto}.brm-assets-tools input{min-width:150px}.brm-asset-filters{overflow:auto}.brm-audio-dock{flex-wrap:wrap}.brm-audio-dock audio{flex-basis:100%;}.brm-audio-dock>div{min-width:0}.brm-system-status{margin-top:10px} #dashboard-new-task-menu .brm-new-task-list{left:0;right:auto;width:min(390px,86vw);grid-template-columns:1fr;} }
@@ -2720,6 +2724,29 @@ html[data-brm-section="assets"] #dashboard-assets .brm-asset-library { display:n
 .brm-dashboard-viewer .brm-viewer-bar button { background:#f1f5f9 !important; color:#334155 !important; border-color:#cbd5e1 !important; }
 .brm-dashboard-viewer .brm-viewer-bar a:hover { background:#d94738 !important; }
 .brm-dashboard-viewer .brm-viewer-bar button:hover { background:#e2e8f0 !important; }
+/* ---- UI polish 20261123 ---- */
+.gradio-container label > span,
+.gradio-container span[data-testid="block-info"],
+.gradio-container .block-info { color:#523b37 !important; }
+@media (prefers-color-scheme: dark) {
+    .gradio-container label > span,
+    .gradio-container span[data-testid="block-info"],
+    .gradio-container .block-info { color:#523b37 !important; }
+}
+#brand-lockup .brm-brand-home {
+    background: transparent !important; border: 0 !important; border-radius: 0 !important;
+    box-shadow: none !important; height: auto !important; padding: 4px 0 !important;
+}
+button.secondary {
+    background:linear-gradient(180deg,#fffaf6,#fdeee6) !important;
+    border:1px solid #efc9b9 !important; color:#6a403a !important;
+    box-shadow:0 1px 2px rgba(120,60,40,.12) !important;
+}
+button.secondary:hover { background:#ffe9de !important; border-color:#e9a88f !important; color:var(--brm-primary-deep) !important; }
+.brm-audio-dock audio { min-width:280px !important; flex:1 1 300px !important; }
+.brm-audio-dock { gap:10px !important; flex-wrap:wrap; justify-content:flex-end; }
+.brm-audio-dock a, .brm-audio-dock button { min-height:34px; display:inline-flex; align-items:center; }
+#global-ops-row button { min-height:40px !important; }
 """
 
 
@@ -5428,43 +5455,141 @@ def _setting_int(value, default: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, value))
 
 
-def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_gallery_max=None):
-    """保存并立即应用工作台层面的全局设置。"""
+def _apply_adaptive_settings(updates: dict) -> None:
+    """Keep the nested adaptive_concurrency_settings block (if any) in sync so it cannot shadow flat keys."""
+    nested = yzy_config.get("adaptive_concurrency_settings")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        merged.update(updates)
+        updates["adaptive_concurrency_settings"] = merged
+
+
+def save_global_settings(
+    queue_concurrency=None, done_tasks_max=None, done_gallery_max=None,
+    adaptive_enabled=None, light_gpu_max=None, audio_gpu_max=None,
+    voice_cpu_max=None, voice_breeze_max=None, keep_vram_mib=None,
+):
+    """保存并立即热应用工作台全局设置（动态并发/显存保护/保留数量），无需重启。"""
     global QUEUE_CONCURRENCY, DONE_TASKS_MAX, DONE_GALLERY_MAX
 
     # 某些旧浏览器标签页在 Gradio 重连时可能发送一个没有表单值的陈旧事件。
     # 忽略它，避免无意义的错误日志或意外覆盖已保存的设置。
-    if queue_concurrency is None and done_tasks_max is None and done_gallery_max is None:
+    if all(v is None for v in (
+        queue_concurrency, done_tasks_max, done_gallery_max, adaptive_enabled,
+        light_gpu_max, audio_gpu_max, voice_cpu_max, voice_breeze_max, keep_vram_mib,
+    )):
         return "当前全局设置未变更。"
 
+    cur = concurrency_controller.config()
     concurrency = _setting_int(
         queue_concurrency, QUEUE_CONCURRENCY, 1, MAX_MEDIA_QUEUE_CONCURRENCY
     )
     task_limit = _setting_int(done_tasks_max, DONE_TASKS_MAX, 20, 500)
     gallery_limit = _setting_int(done_gallery_max, DONE_GALLERY_MAX, 24, 100)
+    adaptive_on = cur.enabled if adaptive_enabled is None else bool(adaptive_enabled)
+    light_max = _setting_int(light_gpu_max, cur.light_gpu_max, 1, 4)
+    audio_max = _setting_int(audio_gpu_max, cur.audio_gpu_max, 1, 3)
+    cpu_max = _setting_int(voice_cpu_max, cur.voice_cpu_max, 1, 8)
+    breeze_max = _setting_int(voice_breeze_max, cur.voice_breeze_max, 1, 4)
+    keep_mib = _setting_int(
+        keep_vram_mib, media_runtime_guard.get_safe_keep_vram_mib(),
+        media_runtime_guard.KEEP_VRAM_MIN_MIB, media_runtime_guard.KEEP_VRAM_MAX_MIB,
+    )
+    updates = {
+        "queue_concurrency": concurrency,
+        "done_tasks_max": task_limit,
+        "done_gallery_max": gallery_limit,
+        "adaptive_concurrency": adaptive_on,
+        "adaptive_light_gpu_max": light_max,
+        "adaptive_audio_gpu_max": audio_max,
+        "adaptive_voice_cpu_max": cpu_max,
+        "adaptive_voice_breeze_max": breeze_max,
+        "keep_model_max_vram_mib": keep_mib,
+    }
+    adaptive_keys = {k: v for k, v in updates.items() if k.startswith("adaptive_")}
+    _apply_adaptive_settings(adaptive_keys)
+    if "adaptive_concurrency_settings" in adaptive_keys:
+        updates["adaptive_concurrency_settings"] = adaptive_keys["adaptive_concurrency_settings"]
     try:
-        save_config({
-            "queue_concurrency": concurrency,
-            "done_tasks_max": task_limit,
-            "done_gallery_max": gallery_limit,
-        })
+        save_config(updates)
     except OSError as exc:
         return f"❌ 保存失败，设置未应用：{exc}"
 
     QUEUE_CONCURRENCY = concurrency
     DONE_TASKS_MAX = task_queue.set_max_done(task_limit)
     DONE_GALLERY_MAX = gallery_limit
+    media_runtime_guard.set_safe_keep_vram_mib(keep_mib)
+    adaptive_cfg = concurrency_controller.config()
     desired_workers = (
         concurrency_controller.worker_pool_size()
-        if concurrency_controller.config().enabled
+        if adaptive_cfg.enabled
         else (2 if VOICE_PARALLEL_ENABLED else concurrency)
     )
     target_workers, active_workers = task_queue.set_max_workers(desired_workers)
-    mode_note = "（自适应并发已启用，重型视频/生图独占，轻生图/CPU语音按负载动态扩展）" if concurrency_controller.config().enabled else ("（语音克隆最多两路，其他媒体独占）" if VOICE_PARALLEL_ENABLED else "")
+    if adaptive_cfg.enabled:
+        mode_note = (
+            f"（动态并发已开启：轻图 ≤{adaptive_cfg.light_gpu_max} · 音频GPU ≤{adaptive_cfg.audio_gpu_max} · "
+            f"Zonos3 ≤{adaptive_cfg.voice_cpu_max} · Breeze ≤{adaptive_cfg.voice_breeze_max}；重型任务独占）"
+        )
+    else:
+        mode_note = "（动态并发已关闭，按固定队列并发运行）"
     return (
-        f"✅ 全局设置已保存并生效：并发 {target_workers}{mode_note}（当前 worker {active_workers}），"
+        f"✅ 全局设置已保存并热生效：worker {target_workers}{mode_note}（当前 worker {active_workers}），"
+        f"显存免释放警戒线 {media_runtime_guard.get_safe_keep_vram_mib()} MiB，"
         f"保留任务 {DONE_TASKS_MAX} 条，画廊显示 {DONE_GALLERY_MAX} 个产物。"
     )
+
+
+def ops_free_comfy_vram() -> str:
+    """运维快捷操作：对空闲 ComfyUI 运行时执行 /free。队列非空时拒绝。"""
+    try:
+        freed = media_runtime_guard.free_runtime_vram(BASE)
+    except Exception as exc:  # noqa: BLE001 - surface any failure as UI feedback
+        return f"❌ 释放 ComfyUI 显存失败：{exc}"
+    used = None
+    try:
+        used = media_runtime_guard.gpu_used_mib()
+    except Exception:  # noqa: BLE001
+        pass
+    tail = f"，GPU0 当前占用 {used} MiB" if used is not None else ""
+    return f"✅ 已对 {freed} 个 ComfyUI 运行时执行 /free（卸载模型并释放显存）{tail}。"
+
+
+def ops_refresh_telemetry() -> str:
+    """运维快捷操作：丢弃遥测缓存并立即重新采样。"""
+    try:
+        system_telemetry._telemetry_cache.clear()
+        gpus = system_telemetry.collect_gpu_stats()
+        services = system_telemetry.collect_services_status()
+    except Exception as exc:  # noqa: BLE001
+        return f"❌ 刷新系统遥测失败：{exc}"
+    return (
+        f"✅ 系统遥测已刷新：GPU {len(gpus)} 张，核心服务 "
+        f"{services.get('online', 0)}/{services.get('total', 0)} 在线。"
+    )
+
+
+def ops_clear_thumbnail_cache() -> str:
+    """运维快捷操作：清空缩略图缓存（仅限缓存目录内的文件，可按需重新生成）。"""
+    root = THUMB_CACHE_DIR
+    removed = 0
+    freed = 0
+    try:
+        if root.is_dir():
+            for item in root.rglob("*"):
+                if item.is_file():
+                    try:
+                        size = item.stat().st_size
+                        item.unlink()
+                    except OSError:
+                        continue
+                    removed += 1
+                    freed += size
+        with _thumb_lock:
+            _thumb_pending.clear()
+    except OSError as exc:
+        return f"❌ 清理缩略图缓存失败：{exc}"
+    return f"✅ 已清理缩略图缓存 {removed} 个文件（{freed / 1048576:.1f} MiB），预览会按需重新生成。"
 
 
 def show_global_settings():
@@ -5525,6 +5650,18 @@ RETRY_FIELDS = {
 }
 
 
+def music_task_display_name(wfname, args, default_name: str) -> str:
+    """Make music task titles say which engine runs them (display only; REST contract unchanged)."""
+    if wfname != "音乐生成":
+        return default_name
+    model = str((args or {}).get("model") or "").strip().lower()
+    if model.startswith("yue2"):
+        return "音乐生成 · YuE2-3B"
+    if model.startswith("ace") or model in {"base", "turbo", "sft"}:
+        return "音乐生成 · ACE-Step 1.5"
+    return default_name
+
+
 def submit(wfname, args, auto_enhance: bool = False):
     """入队并返回供 LAN API/自动化跟踪的安全任务标识。"""
     args = dict(args or {})
@@ -5544,7 +5681,7 @@ def submit(wfname, args, auto_enhance: bool = False):
             f"磁盘可用空间仅 {free_percent:.1f}%，低于保护阈值 "
             f"{MIN_FREE_DISK_PERCENT:.1f}%。请先归档或清理历史素材后再提交。"
         )
-    _name = WORKFLOW_BUILDERS[wfname][1]
+    _name = music_task_display_name(wfname, args, WORKFLOW_BUILDERS[wfname][1])
     fields = RETRY_FIELDS.get(wfname, ())
     retry_recipe = {key: args[key] for key in fields} if all(key in args for key in fields) else {}
     sources = tuple(
@@ -6412,7 +6549,7 @@ def _render_dashboard_assets(records: list[dict[str, object]]) -> str:
         '<div><strong id="brm-audio-title">音频试听</strong><span>真实产物</span></div>'
         '<audio id="brm-audio-player" controls preload="metadata"></audio>'
         '<a id="brm-audio-download" href="#" download>下载</a>'
-        '<button type="button" data-brm-action="audio-clear">停止并移除当前试听</button></aside>'
+        '<button type="button" data-brm-action="audio-clear">关闭试听</button></aside>'
         '<aside id="brm-dashboard-viewer" class="brm-dashboard-viewer" hidden></aside>'
     )
 
@@ -7486,26 +7623,45 @@ def build_ui():
         with gr.Column(visible=True, elem_id="global-settings-panel") as settings_panel:
             gr.Markdown(
                 "### 全局设置\n"
-                "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
-                + (
-                    "ZONOS3-Mini（零显存直连）可与其它媒体并行，IndexTTS-2.5 独立排队。其他媒体任务独占 A5000。"
-                    if VOICE_PARALLEL_ENABLED
-                    else "当前媒体工作流共享 A5000 队列，并发固定为 **1**。"
-                    if MAX_MEDIA_QUEUE_CONCURRENCY == 1
-                    else "视频、数字人等高显存任务通常建议保持并发 **1**。"
-                )
+                "动态并发与显存保护写入 `yzy_config.json` 并**立即热生效**，无需重启；"
+                "下调时已在处理的任务会自然完成后再收缩。"
+            )
+            _acfg = concurrency_controller.config()
+            gr.Markdown("#### 动态并发与配额")
+            setting_adaptive = gr.Checkbox(
+                label="启用动态并发（按显存/CPU/内存负载自动放大或降档）",
+                value=bool(_acfg.enabled),
             )
             with gr.Row():
-                # Gradio 6 rejects a degenerate Slider range.  In H3 mode the
-                # policy deliberately caps media concurrency at one, so keep
-                # the control visibly disabled while giving the component a
-                # valid (unused) upper bound.
-                concurrency_slider_max = max(2, MAX_MEDIA_QUEUE_CONCURRENCY)
-                setting_concurrency = gr.Slider(
-                    1, concurrency_slider_max, value=QUEUE_CONCURRENCY,
-                    step=1, precision=0, interactive=MAX_MEDIA_QUEUE_CONCURRENCY > 1,
-                    label="任务并发数",
+                setting_light_gpu = gr.Slider(
+                    1, 4, value=int(_acfg.light_gpu_max), step=1, precision=0,
+                    label="轻量生图并发上限",
                 )
+                setting_audio_gpu = gr.Slider(
+                    1, 3, value=int(_acfg.audio_gpu_max), step=1, precision=0,
+                    label="音频 GPU 并发上限",
+                )
+                setting_voice_cpu = gr.Slider(
+                    1, 8, value=int(_acfg.voice_cpu_max), step=1, precision=0,
+                    label="Zonos3 语音并发上限",
+                )
+                setting_voice_breeze = gr.Slider(
+                    1, 4, value=int(_acfg.voice_breeze_max), step=1, precision=0,
+                    label="Breeze 语音并发上限",
+                )
+            gr.Markdown("#### 显存保护策略")
+            setting_keep_vram = gr.Slider(
+                media_runtime_guard.KEEP_VRAM_MIN_MIB, media_runtime_guard.KEEP_VRAM_MAX_MIB,
+                value=max(
+                    media_runtime_guard.KEEP_VRAM_MIN_MIB,
+                    min(media_runtime_guard.KEEP_VRAM_MAX_MIB, media_runtime_guard.get_safe_keep_vram_mib()),
+                ),
+                step=512, precision=0,
+                label="单实例免释放显存警戒线（MiB）",
+                info="同一模型连续任务时，GPU0 占用不超过该值则保留模型、不执行 /free。",
+            )
+            gr.Markdown("#### 结果保留")
+            with gr.Row():
                 setting_done_tasks = gr.Slider(
                     20, 500, value=DONE_TASKS_MAX, step=10, precision=0,
                     label="已完成任务保留数",
@@ -7516,6 +7672,12 @@ def build_ui():
                 )
             save_settings_btn = gr.Button("保存并应用", variant="primary")
             settings_status = gr.Markdown("", elem_classes=["brm-inline-status"])
+            gr.Markdown("#### 运维快捷操作")
+            with gr.Row(elem_id="global-ops-row"):
+                ops_free_btn = gr.Button("释放 ComfyUI 显存 (/free)", variant="secondary")
+                ops_telemetry_btn = gr.Button("刷新系统遥测", variant="secondary")
+                ops_thumb_btn = gr.Button("清理缩略图缓存", variant="secondary")
+            ops_status = gr.Markdown("", elem_classes=["brm-inline-status"])
             gr.Markdown("---\n#### brmadmin 主账号密码")
             gr.Markdown(
                 "这里只修改 `brmadmin` 主账号的 Basic Auth 密码，不影响新增用户。"
@@ -7531,7 +7693,7 @@ def build_ui():
                 lan_confirm_password = gr.Textbox(
                     label="确认 brmadmin 新密码", type="password", max_length=128,
                 )
-            change_lan_password_btn = gr.Button("修改 brmadmin 主账号密码", variant="secondary")
+            change_lan_password_btn = gr.Button("修改 brmadmin 主账号密码", variant="primary")
             lan_password_status = gr.Markdown("", elem_classes=["brm-inline-status"])
 
             gr.Markdown("---\n#### 新增访问用户")
@@ -7550,7 +7712,7 @@ def build_ui():
                 lan_user_confirm_password = gr.Textbox(
                     label="确认新用户密码", type="password", max_length=72,
                 )
-            add_lan_user_btn = gr.Button("新增用户", variant="secondary")
+            add_lan_user_btn = gr.Button("新增用户", variant="primary")
             lan_user_status = gr.Markdown("", elem_classes=["brm-inline-status"])
 
         gr.HTML(
@@ -8229,7 +8391,7 @@ def build_ui():
             with gr.Tab("Qwen 大模型"):
                 gr.Markdown("## 智能工具 / 本地大模型", elem_classes=["workflow-heading"])
                 with gr.Column(elem_id="llm-switch-toolbar"):
-                    gr.Markdown("### 本地大模型引擎 · Strata\n使用 Strata · Qwen3.8-Flash-Next（双 A4000 32GB 高速并发 · 支持 64K 上下文与多模态推理，原 Qwen 27B 已正式退役下线）。")
+                    gr.Markdown("### 本地大模型引擎 · Strata\n使用 Strata · Qwen3.8-Flash-Next（双 A4000 32GB 高速并发 · 支持 64K 上下文与多模态推理）。")
                     runtime_status = gr.Markdown(value=llm_control_updates(), elem_id="llm-runtime-status")
                     with gr.Row():
                         refresh_runtime = gr.Button("刷新模型状态", elem_id="llm-switch-refresh")
@@ -8291,21 +8453,25 @@ def build_ui():
                 )
                 with gr.Row(elem_classes=["brm-dashboard-actions"]):
                     dashboard_refresh_btn = gr.Button("刷新", variant="secondary")
+                    flux2_menu_item = (
+                        '<button type="button" data-brm-action="workflow" data-workflow="FLUX.2 Klein 快速图生图">图像 · FLUX.2 Fast (4步)</button>'
+                        if os.environ.get("BRM_FLUX2_FAST_ENABLED") == "1" else ""
+                    )
                     gr.HTML(
                         '<details id="dashboard-new-task-menu"><summary>＋ 新建任务</summary>'
                         '<div class="brm-new-task-list">'
                         '<button type="button" data-brm-action="workflow" data-workflow="Qwen Image 2.1 文生图">图像 · Qwen Image 2.1 Turbo</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="Qwen Image 2.1 图生图">图像 · Qwen Image 2.1 图生图</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="文生图Z-Image">图像 · Z-Image Turbo</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="FLUX.2 Klein 快速图生图">图像 · FLUX.2 Fast (4步)</button>'
+                        + flux2_menu_item +
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 文生视频">视频 · H3 文生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 图生视频">视频 · H3 图生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="文生视频 LTX2.3">视频 · LTX 文生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="图生视频 LTX2.3">视频 · LTX 图生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="图像/视频增强修复 SeedVR2">媒体 · SeedVR2 超分修复</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 & TTS">音频 · 语音克隆 (ZONOS3-Mini)</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成 YuE2-3B">音频 · 音乐生成 (YuE2-3B 新模型)</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成 (ACE-Step 1.5)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 & TTS">音频 · 语音克隆 (Zonos3 / Breeze / IndexTTS)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成 YuE2-3B">音频 · 音乐生成 · YuE2-3B (词曲唱一体)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成 · ACE-Step 1.5 (Base/Turbo)</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="Qwen 大模型">智能工具 · Strata / Qwen3.8</button>'
                         '</div></details>'
                     )
@@ -8329,7 +8495,7 @@ def build_ui():
                                         history_date = gr.Textbox(label="提交日期", placeholder="YYYY-MM-DD")
                                     with gr.Row():
                                         history_page = gr.Number(label="页码", value=1, minimum=1, precision=0)
-                                        history_search = gr.Button("查询任务", elem_id="brm-history-search")
+                                        history_search = gr.Button("查询任务", elem_id="brm-history-search", variant="primary")
                                     history_results = gr.HTML()
                                     retry_id = gr.Textbox(visible="hidden", elem_id="brm-retry-id")
                                     retry_load = gr.Button("读取原参数", visible="hidden", elem_id="brm-retry-load")
@@ -8369,7 +8535,7 @@ def build_ui():
                         choices=[("最新优先", "newest"), ("最早优先", "oldest")], value="newest", label="排序",
                     )
                     catalog_page = gr.Number(label="页码", value=1, minimum=1, precision=0)
-                    catalog_search = gr.Button("查询素材", elem_id="brm-catalog-search")
+                    catalog_search = gr.Button("查询素材", elem_id="brm-catalog-search", variant="primary")
                 catalog_results = gr.HTML()
 
         dashboard_state = gr.State(initial_dashboard)
@@ -8509,10 +8675,17 @@ def build_ui():
         )
         save_settings_btn.click(
             fn=save_global_settings,
-            inputs=[setting_concurrency, setting_done_tasks, setting_done_gallery],
+            inputs=[
+                gr.State(None), setting_done_tasks, setting_done_gallery,
+                setting_adaptive, setting_light_gpu, setting_audio_gpu,
+                setting_voice_cpu, setting_voice_breeze, setting_keep_vram,
+            ],
             outputs=settings_status,
             api_visibility="private",
         )
+        ops_free_btn.click(fn=ops_free_comfy_vram, outputs=ops_status, api_visibility="private")
+        ops_telemetry_btn.click(fn=ops_refresh_telemetry, outputs=ops_status, api_visibility="private")
+        ops_thumb_btn.click(fn=ops_clear_thumbnail_cache, outputs=ops_status, api_visibility="private")
         change_lan_password_btn.click(
             fn=change_lan_access_password,
             inputs=[lan_current_password, lan_new_password, lan_confirm_password],

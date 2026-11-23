@@ -34,6 +34,16 @@ CORE_SERVICE_SPECS: tuple[tuple[str, str, int, str], ...] = (
     ("qwen_gateway", "Qwen 网关", 9300, "http://127.0.0.1:9300/health"),
 )
 
+SERVICE_SHORT_NAMES: dict[str, str] = {
+    "strata": "Strata",
+    "zonos3": "Zonos3",
+    "comfyui": "Comfy",
+    "lan_api": "API",
+    "indextts25": "IndexTTS",
+    "breeze_tts2": "Breeze",
+    "qwen_gateway": "网关",
+}
+
 _cpu_lock = threading.Lock()
 _prev_cpu_sample: tuple[int, int] | None = None
 _cpu_model_cache: str | None = None
@@ -665,7 +675,7 @@ def render_system_status_html(stats: dict[str, Any], *, default_concurrency: int
 
     svc_pills = "".join(
         f'<span class="brm-sys-pill{" is-off" if not item.get("online") else ""}" title="{esc(str(item.get("label", "")))}">'
-        f'<i></i>:{item.get("port")}</span>'
+        f'<i></i>:{item.get("port")} {esc(SERVICE_SHORT_NAMES.get(str(item.get("key", "")), ""))}</span>'
         for item in (services.get("items") or [])
     )
 
@@ -677,12 +687,22 @@ def render_system_status_html(stats: dict[str, Any], *, default_concurrency: int
     conc_info = stats.get("concurrency") if isinstance(stats.get("concurrency"), dict) else {}
     conc_limits = conc_info.get("limits") if isinstance(conc_info.get("limits"), dict) else {}
     conc_summary = ""
+    conc_pills_html = ""
     if conc_limits:
         light_lim = conc_limits.get("image_light", q_conc)
         voice_lim = conc_limits.get("voice_cpu", 1)
+        audio_lim = conc_limits.get("audio_gpu", 1)
+        breeze_lim = conc_limits.get("voice_breeze", 1)
         degrade_reasons = conc_info.get("degrade_reasons") or []
-        degrade_note = f" · 降档({','.join(str(r) for r in degrade_reasons)})" if conc_info.get("degraded") and degrade_reasons else ""
-        conc_summary = f"重型独占 1 / 轻生图 {light_lim} / CPU语音 {voice_lim}{degrade_note}"
+        degrade_note = f"降档({','.join(str(r) for r in degrade_reasons)})" if conc_info.get("degraded") and degrade_reasons else ""
+        conc_items = [
+            f"重型 1", f"轻图 {light_lim}", f"音频GPU {audio_lim}",
+            f"Zonos3 {voice_lim}", f"Breeze {breeze_lim}",
+        ]
+        if degrade_note:
+            conc_items.append(degrade_note)
+        conc_summary = " · ".join(conc_items)
+        conc_pills_html = "".join(f'<span class="brm-sys-cpill">{esc(x)}</span>' for x in conc_items)
     today_done = int(t_stats.get("today_done", 0))
     total_ok = int(t_stats.get("total_ok", 0))
     total_fail = int(t_stats.get("total_fail", 0))
@@ -732,7 +752,8 @@ def render_system_status_html(stats: dict[str, Any], *, default_concurrency: int
         '<div class="brm-telemetry-details-body">'
         f'<div class="brm-sys-row"><span class="brm-sys-label">CPU 1/5/15m 负载</span><span class="brm-sys-val">{esc(load_text)}</span></div>'
         + (
-            f'<div class="brm-sys-row"><span class="brm-sys-label">动态并发配额</span><span class="brm-sys-val">{esc(conc_summary)}</span></div>'
+            f'<div class="brm-sys-row"><span class="brm-sys-label">动态并发配额</span></div>'
+            f'<div class="brm-sys-conc" title="{esc(conc_summary)}">{conc_pills_html}</div>'
             if conc_summary else ""
         )
         + f'{secondary_storage_html}'

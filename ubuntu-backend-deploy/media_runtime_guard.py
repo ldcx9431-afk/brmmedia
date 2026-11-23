@@ -29,6 +29,49 @@ SAFE_KEEP_VRAM_MIB = max(
     int(os.environ.get("BRM_KEEP_MODEL_MAX_VRAM_MIB", str(22 * 1024))),
 )
 
+KEEP_VRAM_MIN_MIB = 12288
+KEEP_VRAM_MAX_MIB = 23552
+KEEP_VRAM_DEFAULT_MIB = 22 * 1024
+
+
+def get_safe_keep_vram_mib() -> int:
+    """Current single-instance keep-loaded VRAM ceiling (MiB), hot-updatable."""
+    return int(SAFE_KEEP_VRAM_MIB)
+
+
+def set_safe_keep_vram_mib(value) -> int:
+    """Hot-update the keep-model VRAM ceiling; clamps to 12288-23552 MiB.
+
+    Handover/release/light-lease helpers read the module global on every call,
+    so the new value applies to the next task without a restart.
+    """
+    global SAFE_KEEP_VRAM_MIB
+    try:
+        mib = int(value)
+    except (TypeError, ValueError):
+        mib = KEEP_VRAM_DEFAULT_MIB
+    SAFE_KEEP_VRAM_MIB = max(KEEP_VRAM_MIN_MIB, min(KEEP_VRAM_MAX_MIB, mib))
+    return SAFE_KEEP_VRAM_MIB
+
+
+def free_runtime_vram(main_base) -> int:
+    """POST /free (unload models) to every idle runtime; refuses if busy. Returns bases freed."""
+    bases = runtime_bases(main_base)
+    freed = 0
+    with requests.Session() as s:
+        s.trust_env = False
+        for base in bases:
+            q = s.get(base + '/queue', timeout=10)
+            q.raise_for_status()
+            data = q.json()
+            if data.get('queue_running') or data.get('queue_pending'):
+                raise RuntimeError('ComfyUI 队列非空，拒绝释放显存')
+        for base in bases:
+            s.post(base + '/free', json={'unload_models': True, 'free_memory': True}, timeout=20).raise_for_status()
+            clear_last_model_group(base)
+            freed += 1
+    return freed
+
 
 def workflow_model_group(workflow_name: str, args: dict | None = None) -> str:
     """Map a workflow name and optional parameters to a coarse VRAM model group."""
