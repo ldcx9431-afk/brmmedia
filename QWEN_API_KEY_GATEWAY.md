@@ -10,7 +10,11 @@ Base URL: http://<服务器>/qwen-api/v1
 认证: Authorization: Bearer brm_<随机密钥>
 ```
 
-密钥仅在创建或轮换响应中返回一次。服务端只持久化 SHA-256 哈希、前缀、状态、到期时间和使用记录；无法从数据库还原原始密钥。
+认证仍使用 SHA-256 哈希。新增及轮换的密钥额外保存 Fernet 加密副本，管理员可按需查看；列表永不返回明文或密文。此前仅保存哈希的旧密钥不可逆，查看时提示使用原副本或轮换（旧密钥随即失效），不会自动轮换现有业务密钥。
+
+加密文件默认 `/var/lib/brmmedia/qwen-api-keys.sqlite3.fernet`，可通过 `BRM_QWEN_KEY_VAULT` 指定，权限 0600。备份数据库时必须单独安全备份匹配的加密文件，勿提交 Git、下载到公开目录或日志输出。已存在密文时若文件缺失，不生成替代文件；查看/新增/轮换返回 503，已有哈希认证继续工作。数据库迁移仅增加 `key_ciphertext` 列，兼容旧数据。当前 HTTP 入口只应在可信内网/VPN使用，公网接入须 HTTPS。
+
+每行显示查看与删除入口，正常密钥的删除按钮禁用，先禁用再确认物理删除。明文区域可手动隐藏，60 秒自动清空，离开菜单也清空；轮换须二次确认。旧记录的密文随物理删除一起删除，历史备份不受影响。
 
 ## 部署
 
@@ -71,6 +75,9 @@ location /qwen-api/admin/ {
 | `POST` | `/qwen-api/admin/api-keys/{id}/revoke` | 永久撤销密钥 |
 | `DELETE` | `/qwen-api/admin/api-keys/{id}` | 物理删除已禁用或已撤销的密钥记录 |
 | `POST` | `/qwen-api/admin/api-keys/{id}/rotate` | 撤销旧密钥并创建替代密钥 |
+| `POST` | `/qwen-api/admin/api-keys/{id}/reveal` | 管理员按需解密查看；响应 no-store；无旧明文副本时 409 |
+
+2026-10-11 已上线查看与明确的删除入口；生产代码及迁移前数据库备份：`/srv/brmmedia/strata/backups/key-reveal-20261011/`。线上验收覆盖旧密钥 409、新建/轮换密钥解密、no-store、未认证/业务 Bearer 无管理权限、活动密钥删除 409、禁用后物理删除；测试记录已清理，已有业务记录保持不变。回滚代码不回滚数据库使用记录或业务变更；加密列为向后兼容的增量列。
 
 创建示例：
 
@@ -123,3 +130,19 @@ print(reply.choices[0].message.content)
 ```
 
 网关没有开放 Qwen 运行端口；外部只允许经 Nginx TCP 80 访问。密钥泄露、离职或集成下线时应立即撤销对应密钥；常规轮换使用 `rotate`，并在目标系统更新新密钥后验证旧密钥已失效。
+
+## 客户端取消与连接清理（2026-10-11）
+
+网关使用 HTTPX 异步转发，整个 ASGI 响应生命周期监听下游断开；断开发生在等待上游响应头或流式读取期间，均取消上游读取。退出时在 AnyIO 屏蔽取消的清理区关闭响应和客户端，然后释放共享推理锁；请求体读取失败也会释放锁。正常完成、上游异常和下游发送失败使用相同清理路径。
+
+SSE 按可用块直接转发，不再等待累计 8 KiB；返回 `X-Accel-Buffering: no`。上游中途异常直接终止流，不伪造 `[DONE]`。客户端主动关闭连接属于取消，不应继续等待完整输出。
+
+回归测试：`python -m unittest tests.test_qwen_gateway_disconnect`，包含真实 Uvicorn / TCP 客户端关闭连接，以及响应头前断开、读流时断开、发送失败、外部任务取消和异常路径。生产验收还必须检查模型 `/slots` 空闲、共享锁可被排他获取，以及取消后能再次问答/安全切换；单纯看到浏览器停止显示不能证明上游已停止。
+
+生产代码：`/srv/brmmedia/app/ubuntu-backend-deploy/qwen_api_gateway.py`，运行环境为同目录 `.venv`。本次复用已安装的 HTTPX 0.28.1 / AnyIO，不升级框架、不改 Nginx。原代码备份：`/srv/brmmedia/strata/backups/gateway-cancel-20261011/qwen_api_gateway.py`。回滚前确认无在途请求，再恢复该文件并仅重启 `brmmedia-qwen-api-gateway`；无需重启媒体或模型服务。
+
+## 非阻塞鉴权、连接池复用与跨服务统一密钥（2026-11-23）
+
+- **非阻塞 Bearer 鉴权**：`qwen_api_gateway.py`（与 `lan_api.py`）对 SQLite 密钥库启用 `PRAGMA journal_mode=WAL` 与 `PRAGMA synchronous=NORMAL`，引入 **8 秒 TTL 内存缓存**（`BRM_QWEN_KEY_CACHE_TTL=8.0`）与 **5 秒批量使用记账缓冲**（`_USAGE_BUFFER`），并通过 `anyio.to_thread.run_sync` 卸载到工作线程，避免高频鉴权及写入阻塞 FastAPI 主事件循环。执行禁用、启用、撤销、删除或轮换操作时立即失效本地密钥缓存。
+- **异步 HTTP 连接池**：网关按当前事件循环复用 `httpx.AsyncClient`（`max_connections=64`、`max_keepalive_connections=16`、`keepalive_expiry=30.0`），自动回收已关闭事件循环的旧连接，降低反复建连延迟。
+- **统一 REST API 鉴权**：同一 `brm_...` Bearer API Key 现已同时支持 `/qwen-api/v1/*` 与媒体自动化接口 `/api/v1/*`（`lan_api` 直接读取共享密钥库；密钥创建、轮换、禁用与删除仍由 `/qwen-api/admin/` 统一管理）。
