@@ -9,6 +9,8 @@ loopback only; Nginx provides the authenticated ``/api/`` LAN entry point.
 
 from __future__ import annotations
 
+import asyncio
+import atexit
 import base64
 import binascii
 import copy
@@ -18,6 +20,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -27,6 +30,10 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
+try:
+    import anyio
+except ImportError:  # pragma: no cover - minimal contract test stub
+    anyio = None  # type: ignore[assignment]
 import requests
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -40,6 +47,7 @@ import adaptive_concurrency
 import llm_runtime
 import system_telemetry
 import zonos3_support
+import breeze_tts2_support
 from comfyui_server import BASE as COMFY_BASE, COMFY_ROOT, audio_duration, upload_image
 from flux2_fast_support import SIZES as FLUX2_FAST_SIZES
 from flux3_image_support import SIZES as FLUX3_IMAGE_SIZES
@@ -83,12 +91,22 @@ UPLOAD_DIR = OUTPUT_DIR / ".lan-api-uploads"
 GRADIO_BASE = os.environ.get("BRM_GRADIO_API_BASE", "http://127.0.0.1:9000").rstrip("/")
 ZONOS3_BASE = os.environ.get("BRM_ZONOS3_URL", "http://127.0.0.1:1919").rstrip("/")
 ZONOS3_TIMEOUT_SECONDS = max(30, int(os.environ.get("BRM_ZONOS3_TIMEOUT_SECONDS", "210")))
+BREEZE_TTS2_BASE = os.environ.get("BRM_BREEZE_TTS2_URL", "http://127.0.0.1:9206").rstrip("/")
+BREEZE_TTS2_TIMEOUT_SECONDS = max(30, int(os.environ.get("BRM_BREEZE_TTS2_TIMEOUT_SECONDS", "300")))
 MAX_UPLOAD_BYTES = max(1, int(os.environ.get("BRM_LAN_API_MAX_UPLOAD_BYTES", str(256 * 1024 * 1024))))
 GRADIO_TIMEOUT_SECONDS = max(10, int(os.environ.get("BRM_LAN_API_GRADIO_TIMEOUT", "60")))
 ASSET_TTL_SECONDS = max(3600, int(os.environ.get("BRM_LAN_API_ASSET_TTL", str(7 * 24 * 3600))))
 _API_KEY_DB_LOCK = threading.Lock()
+KEY_CACHE_TTL_SECONDS = max(0.0, float(os.environ.get("BRM_QWEN_KEY_CACHE_TTL", "8.0")))
+_KEY_CACHE_LOCK = threading.Lock()
+_KEY_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_USAGE_BUFFER: dict[tuple[str, str], tuple[int, int]] = {}
+_USAGE_FLUSH_AT: dict[str, float] = {}
+_HTPASSWD_CACHE_LOCK = threading.Lock()
+_HTPASSWD_CACHE: dict[str, tuple[tuple[int, int], list[tuple[str, str]]]] = {}
 _LOCAL_TASKS_LOCK = threading.Lock()
 _LOCAL_TASKS: dict[str, dict[str, Any]] = {}
+_LOCAL_TASKS_LOADED_PATH: str | None = None
 _CONCURRENCY_CONTROLLER = adaptive_concurrency.AdaptiveConcurrencyController()
 _ZONOS3_GATE = adaptive_concurrency.CrossProcessSlotGate(
     lambda: int(_CONCURRENCY_CONTROLLER.evaluate()["limits"][adaptive_concurrency.TIER_VOICE_CPU])
@@ -271,8 +289,56 @@ def _key_digest(api_key: str) -> str:
         return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
+def _invalidate_key_cache(db_path: Path | None = None) -> None:
+    db_key = str(db_path or _key_db_path())
+    with _KEY_CACHE_LOCK:
+        for cache_key in [k for k in _KEY_CACHE if k[0] == db_key]:
+            _KEY_CACHE.pop(cache_key, None)
+
+
+def _flush_usage_buffer(db_path: Path | None = None) -> None:
+    target_path = db_path or _key_db_path()
+    db_key = str(target_path)
+    with _KEY_CACHE_LOCK:
+        pending = [
+            (key_id, count, last_used)
+            for (k_db, key_id), (count, last_used) in list(_USAGE_BUFFER.items())
+            if k_db == db_key and _USAGE_BUFFER.pop((k_db, key_id), None)
+        ]
+        _USAGE_FLUSH_AT[db_key] = time.monotonic()
+    if not pending or not target_path.is_file():
+        return
+    with _API_KEY_DB_LOCK:
+        try:
+            connection = sqlite3.connect(target_path)
+        except sqlite3.Error:
+            return
+        try:
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.OperationalError:
+                pass
+            for key_id, count, last_used in pending:
+                connection.execute(
+                    "UPDATE api_keys SET last_used_at = MAX(COALESCE(last_used_at, 0), ?), use_count = use_count + ? WHERE id = ?",
+                    (last_used, count, key_id),
+                )
+            connection.commit()
+        except sqlite3.OperationalError:
+            # Allow read-only DB mounts while keeping token validation strict.
+            pass
+        except sqlite3.Error:
+            pass
+        finally:
+            connection.close()
+
+
+atexit.register(_flush_usage_buffer)
+
+
 def _validate_bearer_api_key(api_key: str) -> None:
-    """Validate Bearer API key against the shared qwen_api_gateway SQLite store."""
+    """Validate Bearer API key against the shared qwen_api_gateway SQLite store with 8s TTL cache."""
     token = api_key.strip()
     if not token:
         raise HTTPException(status_code=401, detail="Bearer API key is required")
@@ -280,7 +346,34 @@ def _validate_bearer_api_key(api_key: str) -> None:
     if not db_path.is_file():
         raise HTTPException(status_code=401, detail="API key is invalid, disabled, or revoked")
     now = int(time.time())
+    now_mono = time.monotonic()
+    db_key = str(db_path)
     digest = _key_digest(token)
+    cache_key = (db_key, digest)
+
+    if KEY_CACHE_TTL_SECONDS > 0:
+        should_flush = False
+        cached_entry = None
+        with _KEY_CACHE_LOCK:
+            cached = _KEY_CACHE.get(cache_key)
+            if cached is not None:
+                expires_mono, meta = cached
+                if now_mono < expires_mono:
+                    if meta["expires_at"] is not None and meta["expires_at"] <= now:
+                        _KEY_CACHE.pop(cache_key, None)
+                    else:
+                        prev_count, _ = _USAGE_BUFFER.get((db_key, meta["id"]), (0, 0))
+                        _USAGE_BUFFER[(db_key, meta["id"])] = (prev_count + 1, now)
+                        last_flush = _USAGE_FLUSH_AT.get(db_key, 0.0)
+                        should_flush = (now_mono - last_flush) >= 5.0
+                        cached_entry = meta
+                else:
+                    _KEY_CACHE.pop(cache_key, None)
+        if cached_entry is not None:
+            if should_flush:
+                _flush_usage_buffer(db_path)
+            return
+
     with _API_KEY_DB_LOCK:
         try:
             connection = sqlite3.connect(db_path)
@@ -288,6 +381,11 @@ def _validate_bearer_api_key(api_key: str) -> None:
         except sqlite3.Error:
             raise HTTPException(status_code=401, detail="API key store is unavailable") from None
         try:
+            try:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.OperationalError:
+                pass
             row = connection.execute(
                 "SELECT id, status, expires_at FROM api_keys WHERE key_hash = ?",
                 (digest,),
@@ -296,15 +394,26 @@ def _validate_bearer_api_key(api_key: str) -> None:
                 raise HTTPException(status_code=401, detail="API key is invalid, disabled, or revoked")
             if row["expires_at"] is not None and row["expires_at"] <= now:
                 raise HTTPException(status_code=401, detail="API key has expired")
+            with _KEY_CACHE_LOCK:
+                buffered_count, _ = _USAGE_BUFFER.pop((db_key, row["id"]), (0, 0))
+                _USAGE_FLUSH_AT[db_key] = now_mono
             try:
                 connection.execute(
-                    "UPDATE api_keys SET last_used_at = ?, use_count = use_count + 1 WHERE id = ?",
-                    (now, row["id"]),
+                    "UPDATE api_keys SET last_used_at = MAX(COALESCE(last_used_at, 0), ?), use_count = use_count + ? WHERE id = ?",
+                    (now, 1 + buffered_count, row["id"]),
                 )
                 connection.commit()
             except sqlite3.OperationalError:
                 # Allow read-only DB mounts while keeping token validation strict.
                 pass
+            if KEY_CACHE_TTL_SECONDS > 0:
+                with _KEY_CACHE_LOCK:
+                    _KEY_CACHE[cache_key] = (
+                        now_mono + KEY_CACHE_TTL_SECONDS,
+                        {"id": row["id"], "expires_at": row["expires_at"]},
+                    )
+        except HTTPException:
+            raise
         except sqlite3.Error:
             raise HTTPException(status_code=401, detail="API key is invalid, disabled, or revoked") from None
         finally:
@@ -326,6 +435,34 @@ def _verify_htpasswd_hash(password: str, stored_hash: str) -> bool:
         return hmac.compare_digest(crypt.crypt(password, stored_hash), stored_hash)
     except (ImportError, OSError):
         return False
+
+
+def _load_htpasswd_entries(htpasswd_path: Path) -> list[tuple[str, str]]:
+    """Load and parse htpasswd entries with st_mtime_ns + st_size memory cache."""
+    try:
+        st = htpasswd_path.stat()
+    except OSError as exc:
+        raise HTTPException(status_code=401, detail="Basic authentication store is unavailable") from exc
+    cache_key = str(htpasswd_path)
+    sig = (st.st_mtime_ns, st.st_size)
+    with _HTPASSWD_CACHE_LOCK:
+        cached = _HTPASSWD_CACHE.get(cache_key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+    try:
+        lines = htpasswd_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise HTTPException(status_code=401, detail="Basic authentication store is unavailable") from exc
+    entries: list[tuple[str, str]] = []
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        entry_user, entry_sep, entry_hash = line.partition(":")
+        if entry_sep and entry_user:
+            entries.append((entry_user, entry_hash.strip()))
+    with _HTPASSWD_CACHE_LOCK:
+        _HTPASSWD_CACHE[cache_key] = (sig, entries)
+    return entries
 
 
 def _validate_basic_auth(encoded: str) -> None:
@@ -350,17 +487,37 @@ def _validate_basic_auth(encoded: str) -> None:
     htpasswd_env = os.environ.get("BRM_LAN_API_HTPASSWD", "").strip()
     if htpasswd_env:
         htpasswd_path = Path(htpasswd_env).expanduser()
-        try:
-            lines = htpasswd_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            raise HTTPException(status_code=401, detail="Basic authentication store is unavailable") from None
-        for line in lines:
-            if not line or line.startswith("#"):
-                continue
-            entry_user, entry_sep, entry_hash = line.partition(":")
-            if entry_sep and hmac.compare_digest(username, entry_user) and _verify_htpasswd_hash(password, entry_hash.strip()):
+        entries = _load_htpasswd_entries(htpasswd_path)
+        for entry_user, entry_hash in entries:
+            if hmac.compare_digest(username, entry_user) and _verify_htpasswd_hash(password, entry_hash):
                 return
         raise HTTPException(status_code=401, detail="Invalid Basic authentication credentials")
+
+
+def _authenticate_request_sync(authorization: str, path: str) -> None:
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        lowered = scheme.lower()
+        if lowered == "bearer":
+            _validate_bearer_api_key(value)
+        elif lowered == "basic":
+            _validate_basic_auth(value.strip())
+        else:
+            raise HTTPException(status_code=401, detail="Unsupported authorization scheme")
+        return
+    unauthenticated_paths = {
+        f"{API_PREFIX}/health",
+        f"{API_PREFIX}/openapi.json",
+        f"{API_PREFIX}/docs",
+    }
+    require_auth = os.environ.get("BRM_LAN_API_REQUIRE_AUTH", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    if require_auth and path not in unauthenticated_paths:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required (Bearer API key or Basic auth)",
+        )
 
 
 @app.middleware("http")
@@ -370,28 +527,12 @@ async def auth_middleware(request: Request, call_next):
     authorization = request.headers.get("authorization", "")
     try:
         if authorization:
-            scheme, _, value = authorization.partition(" ")
-            lowered = scheme.lower()
-            if lowered == "bearer":
-                _validate_bearer_api_key(value)
-            elif lowered == "basic":
-                _validate_basic_auth(value.strip())
+            if anyio is not None:
+                await anyio.to_thread.run_sync(_authenticate_request_sync, authorization, request.url.path)
             else:
-                raise HTTPException(status_code=401, detail="Unsupported authorization scheme")
+                await asyncio.to_thread(_authenticate_request_sync, authorization, request.url.path)
         else:
-            unauthenticated_paths = {
-                f"{API_PREFIX}/health",
-                f"{API_PREFIX}/openapi.json",
-                f"{API_PREFIX}/docs",
-            }
-            require_auth = os.environ.get("BRM_LAN_API_REQUIRE_AUTH", "1").strip().lower() not in {
-                "0", "false", "no", "off",
-            }
-            if require_auth and request.url.path not in unauthenticated_paths:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Authentication required (Bearer API key or Basic auth)",
-                )
+            _authenticate_request_sync("", request.url.path)
     except HTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -793,6 +934,30 @@ def _normal_zonos3(params: dict[str, Any], assets: dict[str, AssetRecord]) -> li
     return [payload]
 
 
+def _normal_breeze_tts2(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
+    text_value = params.get("text") if params.get("text") is not None else params.get("prompt")
+    text = _trim_text(text_value, "text", maximum=breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS)
+    raw_lang = str(params.get("language") or "zh").strip().lower()
+    try:
+        lang = breeze_tts2_support.normalise_language(raw_lang)
+    except ValueError as exc:
+        _fail(422, str(exc))
+    speed = float(_number(params.get("speed", 1.0), "speed", minimum=0.5, maximum=2.0))
+    seed = int(_number(params.get("seed", 42), "seed", minimum=0, maximum=2**32 - 1, integer=True))
+    cfg_scale = float(_number(params.get("cfg_scale", 1.0), "cfg_scale", minimum=1.0, maximum=5.0))
+    ref_text = _trim_text(params.get("reference_text") if params.get("reference_text") is not None else params.get("ref_text", ""), "reference_text", maximum=2000, required=False)
+    instruction = _trim_text(params.get("instruction", ""), "instruction", maximum=1000, required=False)
+    ref_filename = ""
+    if params.get("ref_audio_asset_id"):
+        audio = _asset(params, assets, "ref_audio_asset_id", "audio")
+        try:
+            resolve_comfy_input(COMFY_ROOT, audio.filename)
+        except (OSError, ValueError) as exc:
+            _fail(422, f"unable to read reference audio: {exc}")
+        ref_filename = audio.filename
+    return [text, ref_filename, lang, speed, ref_text, instruction, seed, cfg_scale]
+
+
 def _normal_voice_clone(params: dict[str, Any], assets: dict[str, AssetRecord]) -> list[Any]:
     audio = _asset(params, assets, "ref_audio_asset_id", "audio")
     prompt_value = params.get("prompt") if params.get("prompt") is not None else params.get("text")
@@ -973,6 +1138,25 @@ ZONOS3_OPTIONS = {
     },
 }
 
+BREEZE_TTS2_OPTIONS = {
+    "engine": "Breeze-TTS2",
+    "direct_service": BREEZE_TTS2_BASE,
+    "output": "wav",
+    "sample_rate_hz": 24000,
+    "max_text_chars": breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS,
+    "languages": ["zh", "en", "auto"],
+    "params": {
+        "text": {"type": "string", "required": True, "maximum_length": breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS, "description": "要合成的文本（兼容 prompt 字段；支持 [叹气]/[笑] 与 (sigh)/(laugh) 情感标签）"},
+        "ref_audio_asset_id": {"type": "asset_id", "required": False, "asset_kind": "audio", "description": "可选参考音色音频 asset_id"},
+        "reference_text": {"type": "string", "required": False, "default": "", "description": "可选参考音频逐字稿（兼容 ref_text）"},
+        "instruction": {"type": "string", "required": False, "default": "", "description": "可选音色描述或语气指令"},
+        "language": {"type": "string", "required": False, "default": "zh", "enum": ["zh", "en", "auto"]},
+        "speed": {"type": "number", "required": False, "default": 1.0, "minimum": 0.5, "maximum": 2.0},
+        "seed": {"type": "integer", "required": False, "default": 42},
+        "cfg_scale": {"type": "number", "required": False, "default": 1.0, "minimum": 1.0, "maximum": 5.0},
+    },
+}
+
 WORKFLOWS: dict[str, WorkflowSpec] = {
     "h3-image-text-to-image": WorkflowSpec("submit_h3_image", "MiniMax H3 Image 文生图", {}, _normal_h3_image, H3_IMAGE_OPTIONS),
     "h3-image-edit": WorkflowSpec("submit_h3_image_edit", "MiniMax H3 Image 单图编辑", {"image_asset_id": "image"}, _normal_h3_image_edit, H3_IMAGE_OPTIONS),
@@ -985,6 +1169,7 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
     "flux3-image-edit": WorkflowSpec("submit_flux3_edit","FLUX 3单图编辑（实验）",{"image_asset_id":"image"},lambda params,assets:_normal_flux3(params,assets,True),{"experimental":True,"steps":16,"cfg":1,"batch":1,"output":"png","default_width":1024,"default_height":1024,"max_pixels":1048576,"sizes":[list(x) for x in FLUX3_IMAGE_SIZES],"prompt_enhancement":"official","restart_behavior":"fail_without_replay"}),
     "flux2-fast-edit": WorkflowSpec("submit_flux2_fast","FLUX.2 Klein 四步快速编辑",{"image_asset_id":"image"},_normal_flux2_fast,{"steps":4,"cfg":1,"batch":1,"output":"png","default_width":1024,"default_height":1024,"max_pixels":2073600,"sizes":[list(x) for x in FLUX2_FAST_SIZES],"additional_sizes":[[1920,1080],[1080,1920]]}),
     "zonos3-voice-clone": WorkflowSpec("direct_zonos3_voice_clone", "ZONOS3-Mini 语音克隆（直连推理）", {}, _normal_zonos3, ZONOS3_OPTIONS),
+    "breeze-tts2-voice-clone": WorkflowSpec("submit_breeze_tts2", "Breeze-TTS2 最新优化版（华语/中英混读语音克隆 · 零显存）", {}, _normal_breeze_tts2, BREEZE_TTS2_OPTIONS),
     "qwen3-voice-clone": WorkflowSpec("submit_qwen3_tts","Qwen3-TTS 语音克隆（实验）",{"ref_audio_asset_id":"audio"},_normal_qwen3_tts,{"experimental":True,"max_text_chars":600,"max_reference_text_chars":2000,"reference_seconds":[1,MAX_REFERENCE_SECONDS],"max_reference_bytes":MAX_REFERENCE_BYTES,"output":"wav","default_language":"zh","languages":list(QWEN3_TTS_LANGUAGES),"tested_languages":["zh","en","ja"]}),
     "text-to-video": WorkflowSpec(
         "submit_workflow_3_h3", "MiniMax H3 本地文生视频（含同步立体声音频）", {},
@@ -1021,16 +1206,16 @@ WORKFLOWS: dict[str, WorkflowSpec] = {
     "first-last-frame-video": WorkflowSpec("submit_workflow_5", "LTX2.3 首尾帧视频", {"first_image_asset_id": "image", "last_image_asset_id": "image"}, _normal_first_last_frame),
     "talking-head": WorkflowSpec("submit_workflow_6", "LTX2.3 单图数字人-语音驱动", {"image_asset_id": "image", "audio_asset_id": "audio"}, _normal_talking_head),
     "voice-clone": WorkflowSpec(
-        "submit_workflow_7", "IndexTTS-2.5 / ZONOS3 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone,
-        {"engine": "IndexTTS-2.5", "supported_tts_engines": ["indextts25", "zonos3"],
-         "service_boundary": "127.0.0.1 only; routed through the global A5000 media queue (or direct :1919 for tts_engine=zonos3)",
+        "submit_workflow_7", "IndexTTS-2.5 / ZONOS3 / Breeze-TTS2 语音克隆", {"ref_audio_asset_id": "audio"}, _normal_voice_clone,
+        {"engine": "IndexTTS-2.5", "supported_tts_engines": ["indextts25", "zonos3", "breeze_tts2"],
+         "service_boundary": "127.0.0.1 only; routed through the global A5000 media queue (or direct :1919 for tts_engine=zonos3, :9206 for tts_engine=breeze_tts2)",
          "output": {"service_format": "WAV", "sample_rate_hz": 22050, "workspace_format": "MP3"},
          "languages": VOICE_CLONE_LANGUAGE_VALUES,
          "params": {
              "prompt": {"type": "string", "required": True, "maximum_length": 12000},
              "ref_audio_asset_id": {"type": "asset_id", "required": True, "asset_kind": "audio"},
-             "tts_engine": {"type": "string", "required": False, "default": "indextts25", "enum": ["indextts25", "zonos3"],
-                            "description": "Set tts_engine='zonos3' to route directly to ZONOS3-Mini (:1919)."},
+             "tts_engine": {"type": "string", "required": False, "default": "indextts25", "enum": ["indextts25", "zonos3", "breeze_tts2"],
+                            "description": "Set tts_engine='zonos3' for ZONOS3-Mini (:1919) or tts_engine='breeze_tts2' for Breeze-TTS2 (:9206)."},
              "language": {"type": "string", "required": False, "default": "zh", "enum": VOICE_CLONE_LANGUAGE_VALUES,
                           "description": "Synthesis language for IndexTTS-2.5."},
              "speed": {"type": "number", "required": False, "default": 1.0, "minimum": 0.5, "maximum": 2.0,
@@ -1183,6 +1368,8 @@ def _active_workflows() -> dict[str, WorkflowSpec]:
         workflows.pop("qwen-image21-edit", None)
     if os.environ.get("BRM_ZONOS3_ENABLED", "1") == "0":
         workflows.pop("zonos3-voice-clone", None)
+    if os.environ.get("BRM_BREEZE_TTS2_ENABLED", "1") == "0":
+        workflows.pop("breeze-tts2-voice-clone", None)
     if _active_video_engine() != "h3":
         workflows["text-to-video"] = WorkflowSpec(
             "submit_workflow_3", "LTX2.3 文生视频（H3 尚未启用）", {},
@@ -1253,18 +1440,25 @@ def _resolve_workflow_and_params(
         _fit_qwen_image21_dimensions(params)
         return target, params, slug
 
+    if lowered in {"breeze-tts2", "breezyvoice", "breeze-tts-2", "breeze-tts2-voice-clone"}:
+        return "breeze-tts2-voice-clone", params, (slug if lowered != "breeze-tts2-voice-clone" else None)
+
     if lowered == "qwen3-voice-clone" or lowered.startswith("qwen3-tts"):
         tts_engine = str(params.get("tts_engine", "") or "").strip().lower()
         if tts_engine == "indextts25":
             if params.get("prompt") is None and params.get("text") is not None:
                 params["prompt"] = params["text"]
             return "voice-clone", params, slug
+        if tts_engine in {"breeze_tts2", "breeze-tts2", "breezyvoice"}:
+            return "breeze-tts2-voice-clone", params, slug
         return "zonos3-voice-clone", params, slug
 
     if lowered == "voice-clone":
         tts_engine = str(params.get("tts_engine", "") or "").strip().lower()
         if tts_engine == "zonos3":
             return "zonos3-voice-clone", params, slug
+        if tts_engine in {"breeze_tts2", "breeze-tts2", "breezyvoice"}:
+            return "breeze-tts2-voice-clone", params, slug
         return "voice-clone", params, None
 
     if lowered in {"ace-step-sft", "ace-step-turbo"}:
@@ -1272,6 +1466,65 @@ def _resolve_workflow_and_params(
         return "music-generate", params, slug
 
     return slug, params, None
+
+
+def _local_tasks_path() -> Path:
+    return Path(
+        os.environ.get("BRM_LAN_API_LOCAL_TASKS_PATH", "/var/lib/brmmedia/lan-api-local-tasks.json")
+    ).expanduser()
+
+
+def _save_local_tasks_locked() -> None:
+    path = _local_tasks_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "tasks": list(_LOCAL_TASKS.values())}
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        # Never break Zonos3 task execution if the persistence directory is read-only in tests.
+        pass
+
+
+def _ensure_local_tasks_loaded_locked() -> None:
+    global _LOCAL_TASKS_LOADED_PATH
+    path = _local_tasks_path()
+    path_key = str(path)
+    if _LOCAL_TASKS_LOADED_PATH == path_key:
+        return
+    _LOCAL_TASKS_LOADED_PATH = path_key
+    _LOCAL_TASKS.clear()
+    if not path.is_file():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    items = raw.get("tasks") if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+    if not isinstance(items, list):
+        return
+    now = time.time()
+    changed = False
+    for rec in items:
+        if not isinstance(rec, dict) or not isinstance(rec.get("task_id"), str):
+            continue
+        item = copy.deepcopy(rec)
+        if item.get("state") in {"queued", "running"}:
+            item["state"] = "failed"
+            item["status"] = "执行失败"
+            item["queue_position"] = None
+            item["finished_at"] = now
+            item["error"] = "服务重启导致本地语音任务中断，请重新提交"
+            execution = item.get("execution")
+            if isinstance(execution, dict):
+                execution["stage"] = "failed"
+                execution["last_progress_at"] = now
+            changed = True
+        _LOCAL_TASKS[item["task_id"]] = item
+    _prune_local_tasks_locked()
+    if changed:
+        _save_local_tasks_locked()
 
 
 def _prune_local_tasks_locked() -> None:
@@ -1288,41 +1541,58 @@ def _prune_local_tasks_locked() -> None:
 
 def _is_local_task_cancelled(task_id: str) -> bool:
     with _LOCAL_TASKS_LOCK:
+        _ensure_local_tasks_loaded_locked()
         rec = _LOCAL_TASKS.get(task_id)
         return rec is None or bool(rec.get("_cancelled"))
 
 
 def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
+    workflow_name = "zonos3-voice-clone"
+    started_mono: float | None = None
+    final_state = "failed"
+    final_error = ""
     if not _ZONOS3_GATE.acquire(cancel_check=lambda: _is_local_task_cancelled(task_id)):
         with _LOCAL_TASKS_LOCK:
             rec = _LOCAL_TASKS.get(task_id)
-            if rec is not None and rec.get("state") in {"queued", "running"}:
-                now = time.time()
-                rec["state"] = "cancelled"
-                rec["status"] = "已取消"
-                rec["queue_position"] = None
-                rec["finished_at"] = now
-                rec["execution"]["stage"] = "interrupted"
-        return
-    try:
-        with _LOCAL_TASKS_LOCK:
-            rec = _LOCAL_TASKS.get(task_id)
-            if rec is None or rec.get("_cancelled"):
-                if rec is not None:
+            if rec is not None:
+                workflow_name = str(rec.get("workflow") or workflow_name)
+                if rec.get("state") in {"queued", "running"}:
                     now = time.time()
                     rec["state"] = "cancelled"
                     rec["status"] = "已取消"
                     rec["queue_position"] = None
                     rec["finished_at"] = now
                     rec["execution"]["stage"] = "interrupted"
+                    _save_local_tasks_locked()
+        _CONCURRENCY_CONTROLLER.record_task_outcome(
+            workflow_name, success=False, duration_s=None, error="cancelled", cancelled=True
+        )
+        return
+    try:
+        with _LOCAL_TASKS_LOCK:
+            rec = _LOCAL_TASKS.get(task_id)
+            if rec is None or rec.get("_cancelled"):
+                if rec is not None:
+                    workflow_name = str(rec.get("workflow") or workflow_name)
+                    now = time.time()
+                    rec["state"] = "cancelled"
+                    rec["status"] = "已取消"
+                    rec["queue_position"] = None
+                    rec["finished_at"] = now
+                    rec["execution"]["stage"] = "interrupted"
+                    _save_local_tasks_locked()
+                final_state = "cancelled"
                 return
+            workflow_name = str(rec.get("workflow") or workflow_name)
             now = time.time()
+            started_mono = time.monotonic()
             rec["state"] = "running"
             rec["status"] = "运行中"
             rec["queue_position"] = None
             rec["started_at"] = now
             rec["execution"]["stage"] = "synthesizing_zonos3"
             rec["execution"]["last_progress_at"] = now
+            _save_local_tasks_locked()
 
         try:
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1366,6 +1636,8 @@ def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
                     rec["status"] = "已取消"
                     rec["finished_at"] = done_at
                     rec["execution"]["stage"] = "interrupted"
+                    _save_local_tasks_locked()
+                    final_state = "cancelled"
                     return
                 if rec is not None and isinstance(rec.get("effective_settings"), dict):
                     rec["effective_settings"]["chunked"] = bool(meta.get("chunked", False))
@@ -1389,19 +1661,32 @@ def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
                     rec["execution"]["stage"] = "completed"
                     rec["execution"]["progress"] = 1.0
                     rec["execution"]["last_progress_at"] = done_at
+                    _save_local_tasks_locked()
+            final_state = "completed"
         except Exception as exc:
             done_at = time.time()
+            final_error = str(exc)
+            final_state = "failed"
             with _LOCAL_TASKS_LOCK:
                 rec = _LOCAL_TASKS.get(task_id)
                 if rec is not None:
                     rec["state"] = "failed"
                     rec["status"] = "执行失败"
                     rec["finished_at"] = done_at
-                    rec["error"] = str(exc)
+                    rec["error"] = final_error
                     rec["execution"]["stage"] = "failed"
                     rec["execution"]["last_progress_at"] = done_at
+                    _save_local_tasks_locked()
     finally:
         _ZONOS3_GATE.release()
+        duration_s = (time.monotonic() - started_mono) if started_mono is not None else None
+        _CONCURRENCY_CONTROLLER.record_task_outcome(
+            workflow_name,
+            success=(final_state == "completed"),
+            duration_s=duration_s,
+            error=final_error,
+            cancelled=(final_state == "cancelled"),
+        )
 
 
 def _submit_zonos3_task(
@@ -1447,10 +1732,12 @@ def _submit_zonos3_task(
     if routed_from:
         record["routed_from"] = routed_from
     with _LOCAL_TASKS_LOCK:
+        _ensure_local_tasks_loaded_locked()
         _prune_local_tasks_locked()
         queue_position = sum(1 for r in _LOCAL_TASKS.values() if r.get("state") == "queued") + 1
         record["queue_position"] = queue_position
         _LOCAL_TASKS[task_id] = record
+        _save_local_tasks_locked()
     thread = threading.Thread(target=_run_zonos3_worker, args=(task_id, payload), daemon=True)
     thread.start()
     result: dict[str, Any] = {
@@ -1467,6 +1754,7 @@ def _submit_zonos3_task(
 
 def _local_task_status(task_id: str) -> dict[str, Any] | None:
     with _LOCAL_TASKS_LOCK:
+        _ensure_local_tasks_loaded_locked()
         rec = _LOCAL_TASKS.get(task_id)
         if rec is None:
             return None
@@ -1477,6 +1765,7 @@ def _local_task_status(task_id: str) -> dict[str, Any] | None:
 
 def _local_cancel_task(task_id: str) -> dict[str, Any] | None:
     with _LOCAL_TASKS_LOCK:
+        _ensure_local_tasks_loaded_locked()
         rec = _LOCAL_TASKS.get(task_id)
         if rec is None:
             return None
@@ -1490,12 +1779,15 @@ def _local_cancel_task(task_id: str) -> dict[str, Any] | None:
             rec["queue_position"] = None
             rec["finished_at"] = time.time()
             rec["execution"]["stage"] = "interrupted"
+            _save_local_tasks_locked()
             return {"task_id": task_id, "state": "cancelled"}
+        _save_local_tasks_locked()
         return {"task_id": task_id, "state": "cancel_requested"}
 
 
 def _local_delete_artifact(task_id: str, filename: str) -> dict[str, Any] | None:
     with _LOCAL_TASKS_LOCK:
+        _ensure_local_tasks_loaded_locked()
         rec = _LOCAL_TASKS.get(task_id)
         if rec is None:
             return None
@@ -1511,7 +1803,12 @@ def _local_delete_artifact(task_id: str, filename: str) -> dict[str, Any] | None
         except OSError:
             return {"error": "not_found"}
         rec["output_files"] = [name for name in rec["output_files"] if name != filename]
+        _save_local_tasks_locked()
         return {"deleted": filename, "task_id": task_id}
+
+
+with _LOCAL_TASKS_LOCK:
+    _ensure_local_tasks_loaded_locked()
 
 
 def _gradio_endpoint_params(endpoint: str, *, force_refresh: bool = False) -> list[str]:
@@ -1601,11 +1898,68 @@ def _gradio_call(endpoint: str, arguments: list[Any]) -> Any:
     raise RuntimeError("Gradio SSE stream ended before completion")
 
 
+def _internal_api_token() -> str:
+    if os.environ.get("BRM_INTERNAL_API_DISABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return ""
+    explicit = os.environ.get("BRM_INTERNAL_API_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    api_key = os.environ.get("BRM_API_KEY", "").strip()
+    if api_key:
+        return hmac.new(api_key.encode("utf-8"), b"brmmedia-internal-v1", hashlib.sha256).hexdigest()
+    token_path = OUTPUT_DIR / ".brm-internal-api.token"
+    try:
+        if token_path.is_file():
+            stored = token_path.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_hex(32)
+        try:
+            fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return token_path.read_text(encoding="utf-8").strip()
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(generated + "\n")
+        return generated
+    except OSError:
+        return ""
+
+
+def _internal_api_call(method: str, path: str, *, timeout: float = 5.0) -> dict[str, Any] | None:
+    """Call webui.py /internal/v1 routes directly over loopback, bypassing Gradio queue/SSE."""
+    token = _internal_api_token()
+    if not token:
+        return None
+    client = _http_session()
+    fn = getattr(client, method.lower(), None)
+    if not callable(fn):
+        return None
+    url = f"{GRADIO_BASE.rstrip('/')}{path}"
+    try:
+        resp = fn(
+            url,
+            headers={"X-BRM-Internal-Token": token},
+            timeout=timeout,
+        )
+        status_code = getattr(resp, "status_code", 200)
+        if status_code in {401, 403, 404, 405, 501}:
+            return None
+        if hasattr(resp, "raise_for_status"):
+            resp.raise_for_status()
+        payload = resp.json()
+        return payload if isinstance(payload, dict) else None
+    except (requests.RequestException, ValueError, OSError):
+        return None
+
+
 def _task_status(task_id: str) -> dict[str, Any]:
     local = _local_task_status(task_id)
     if local is not None:
         return local
-    payload = _gradio_call("task_status", [task_id])
+    payload = _internal_api_call("GET", f"/internal/v1/tasks/{quote(task_id, safe='')}")
+    if payload is None:
+        payload = _gradio_call("task_status", [task_id])
     if not isinstance(payload, dict):
         raise RuntimeError("Gradio task_status returned an invalid payload")
     return payload
@@ -1681,6 +2035,23 @@ def health() -> JSONResponse:
     )
 
 
+@app.get(f"{API_PREFIX}/metrics", tags=["system"])
+def get_metrics() -> dict[str, Any]:
+    webui_metrics = _internal_api_call("GET", "/internal/v1/metrics", timeout=2.0)
+    local_metrics = _CONCURRENCY_CONTROLLER.metrics_snapshot()
+    merged = adaptive_concurrency.merge_workflow_metrics(webui_metrics or {}, local_metrics)
+    return {
+        "status": "ok",
+        "generated_at": time.time(),
+        "sources": {
+            "webui": webui_metrics is not None,
+            "lan_api": True,
+        },
+        "summary": merged["summary"],
+        "workflows": merged["workflows"],
+    }
+
+
 @app.get(f"{API_PREFIX}/capabilities", tags=["system"])
 def capabilities() -> dict[str, Any]:
     active_engine = _active_video_engine()
@@ -1710,6 +2081,7 @@ def capabilities() -> dict[str, Any]:
             ],
             "tts": [
                 {"id": "zonos3-voice-clone", "workflow": "zonos3-voice-clone", "status": "active", "recommended": True},
+                {"id": "breeze-tts2-voice-clone", "workflow": "breeze-tts2-voice-clone", "status": "active"},
                 {"id": "cosyvoice3-tts", "workflow": "cosyvoice3-tts", "status": "planned"},
                 {"id": "indextts25", "workflow": "voice-clone", "status": "active"},
             ],
@@ -1744,6 +2116,7 @@ def capabilities() -> dict[str, Any]:
         "recommended_model_ids": [
             "qwen-image21-turbo",
             "zonos3-voice-clone",
+            "breeze-tts2-voice-clone",
             "yue2-3b-music",
             "cosyvoice3-tts",
             "ace-step-turbo",
@@ -1868,7 +2241,7 @@ def submit_task(submission: TaskSubmission) -> dict[str, Any]:
     spec = _active_workflows().get(resolved_workflow)
     if spec is None:
         _fail(422, "unknown workflow; use GET /api/v1/capabilities")
-    if auto_enhance and resolved_workflow not in {"zonos3-voice-clone", "voice-clone", "qwen3-voice-clone"}:
+    if auto_enhance and resolved_workflow not in {"zonos3-voice-clone", "breeze-tts2-voice-clone", "voice-clone", "qwen3-voice-clone"}:
         if isinstance(resolved_params.get("prompt"), str) and resolved_params["prompt"].strip():
             resolved_params["prompt"] = llm_runtime.enhance_prompt(
                 resolved_params["prompt"], workflow=resolved_workflow
@@ -1926,10 +2299,14 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     local_result = _local_cancel_task(task_id)
     if local_result is not None:
         return local_result
-    try:
-        result = _gradio_call("cancel_task", [task_id])
-    except RuntimeError as exc:
-        _fail(503, str(exc))
+    result = _internal_api_call("POST", f"/internal/v1/tasks/{quote(task_id, safe='')}/cancel")
+    if result is None:
+        try:
+            result = _gradio_call("cancel_task", [task_id])
+        except RuntimeError as exc:
+            _fail(503, str(exc))
+    if not isinstance(result, dict):
+        _fail(503, "invalid task cancellation response")
     if result.get("error") == "not_found":
         _fail(404, "task not found")
     return result
@@ -2004,10 +2381,15 @@ def delete_artifact(task_id: str, filename: str, confirmation: dict[str, Any]) -
         if error:
             _fail({"not_found": 404, "asset_busy": 409, "confirmation_required": 400}.get(error, 500), str(error))
         return local_result
-    try:
-        result = _gradio_call("delete_asset", [task_id, filename, True])
-    except RuntimeError:
-        _fail(503, "asset deletion service unavailable")
+    result = _internal_api_call(
+        "DELETE",
+        f"/internal/v1/tasks/{quote(task_id, safe='')}/artifacts/{quote(filename, safe='')}?confirmed=true",
+    )
+    if result is None:
+        try:
+            result = _gradio_call("delete_asset", [task_id, filename, True])
+        except RuntimeError:
+            _fail(503, "asset deletion service unavailable")
     if not isinstance(result, dict):
         _fail(503, "invalid asset deletion response")
     error = result.get("error")

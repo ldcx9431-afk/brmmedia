@@ -1,0 +1,11 @@
+[Unit]
+Description=Run BRMMedia daily cleanup every early morning
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=brmmedia-cleanup.service
+
+[Install]
+WantedBy=timers.target

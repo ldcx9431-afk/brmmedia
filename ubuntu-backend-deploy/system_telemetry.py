@@ -31,6 +31,7 @@ CORE_SERVICE_SPECS: tuple[tuple[str, str, int, str], ...] = (
     ("qwen_image21", "Qwen-Image-2.1", 8190, "http://127.0.0.1:8190/system_stats"),
     ("lan_api", "LAN API", 9100, "http://127.0.0.1:9100/api/v1/health"),
     ("indextts25", "IndexTTS-2.5", 9205, "http://127.0.0.1:9205/health"),
+    ("breeze_tts2", "Breeze-TTS2", 9206, "http://127.0.0.1:9206/health"),
     ("qwen_gateway", "Qwen 网关", 9300, "http://127.0.0.1:9300/health"),
 )
 

@@ -616,10 +616,24 @@ def start_comfyui(wait: bool = True):
     )
     _process_watch_thread.start()
     atexit.register(stop_comfyui)
+    install_signal_handlers()
 
     if wait:
         _wait_until_ready()
     return _process
+
+
+def _handle_sigterm(signum, frame) -> None:
+    stop_comfyui()
+    raise SystemExit(0)
+
+
+def install_signal_handlers() -> None:
+    """Register SIGTERM shutdown handler on the main thread."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def stop_comfyui() -> None:
@@ -645,6 +659,7 @@ def stop_comfyui() -> None:
 
 
 if __name__ == "__main__":
+    install_signal_handlers()
     start_comfyui(wait=True)
     print("[Launcher] ComfyUI is running. Press Ctrl+C to stop.")
     try:

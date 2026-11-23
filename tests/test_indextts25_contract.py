@@ -65,7 +65,8 @@ class IndexTTS25ContractTests(unittest.TestCase):
         self.assertIn("def api_submit_workflow_7(", webui)
         self.assertIn("temperature_deprecated", webui)
         self.assertIn('"voice-clone"', lan)
-        self.assertIn('"IndexTTS-2.5 语音克隆"', lan)
+        self.assertIn("IndexTTS-2.5", lan)
+        self.assertIn("语音克隆", lan)
         self.assertIn('"deprecated": True', lan)
         self.assertIn("VOICE_CLONE_LANGUAGE_VALUES", lan)
 

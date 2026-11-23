@@ -39,14 +39,34 @@ def status():
         return {"state": "idle", "model": selection()[1], "message": "尚未切换"}
 
 
+def _traffic_lock_path() -> Path:
+    override = os.getenv("BRM_LLM_TRAFFIC_LOCK", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return TRAFFIC_LOCK
+
+
 @contextmanager
 def inference_guard():
     # Only activate the Linux interlock after deployment has provisioned it.
-    if os.name != "posix" or not TRAFFIC_LOCK.exists():
+    lock_path = _traffic_lock_path()
+    try:
+        exists = lock_path.exists()
+    except PermissionError as exc:
+        logging.warning("Skipping llm_runtime traffic lock (%s): %s", lock_path, exc)
+        yield
+        return
+    if os.name != "posix" or not exists:
         yield
         return
     import fcntl
-    with TRAFFIC_LOCK.open("rb") as lock:
+    try:
+        lock = lock_path.open("rb")
+    except PermissionError as exc:
+        logging.warning("Skipping llm_runtime traffic lock (%s): %s", lock_path, exc)
+        yield
+        return
+    with lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:

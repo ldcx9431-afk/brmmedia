@@ -13,6 +13,8 @@ from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "ubuntu-backend-deploy" / "qwen_api_gateway.py"
+if str(MODULE_PATH.parent) not in sys.path:
+    sys.path.insert(0, str(MODULE_PATH.parent))
 
 
 class QwenApiGatewayTests(unittest.TestCase):
@@ -45,6 +47,12 @@ class QwenApiGatewayTests(unittest.TestCase):
         else:
             os.environ["BRM_QWEN_API_KEY_DB"] = self.previous_db
         self.tempdir.cleanup()
+
+    def test_proxy_paths_cannot_escape_v1(self):
+        for value in ["../health", "%2e%2e/health", "%252e%252e%252fsettings", "chat/../../settings", "..\\settings", "chat?x=1"]:
+            self.assertFalse(self.gateway._valid_upstream_path(value), value)
+        for value in ["models", "chat/completions", "responses", "messages", "files/a.b"]:
+            self.assertTrue(self.gateway._valid_upstream_path(value), value)
 
     def test_plaintext_key_is_not_stored_and_usage_is_recorded(self):
         record, api_key = self.gateway._create_key("integration", 30)

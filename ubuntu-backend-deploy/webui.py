@@ -20,9 +20,14 @@ webui.py
 
 from __future__ import annotations
 
+import atexit
+import copy
 import re
 import enum
 import os
+import signal
+import secrets
+import hmac
 import uuid
 import time
 import random
@@ -35,7 +40,7 @@ import hashlib
 import queue as stdlib_queue
 import zipfile
 import logging
-from functools import partial
+from functools import lru_cache, partial
 from datetime import datetime
 from collections import deque
 from contextlib import nullcontext
@@ -53,6 +58,7 @@ import flux3_image_support as flux3_image
 import qwen3_tts_support as qwen3_tts
 import voice_presets_support as voice_presets
 import zonos3_support
+import breeze_tts2_support
 import media_runtime_guard
 import system_telemetry
 import adaptive_concurrency
@@ -268,7 +274,7 @@ MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED or os
 QUEUE_CONCURRENCY = config_int(
     "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
 )
-VOICE_PARALLEL_WORKFLOWS = frozenset({"IndexTTS-2.5-语音克隆", "Zonos3-语音克隆", qwen3_tts.WORKFLOW})
+VOICE_PARALLEL_WORKFLOWS = frozenset({"IndexTTS-2.5-语音克隆", "Zonos3-语音克隆", "Breeze-TTS2-语音克隆", qwen3_tts.WORKFLOW})
 VOICE_PARALLEL_ENABLED = (
     MAX_MEDIA_QUEUE_CONCURRENCY == 1
     and os.environ.get("BRM_VOICE_PARALLEL") == "1"
@@ -326,6 +332,7 @@ class Task:
     stage_seconds: dict[str, float] = field(default_factory=dict)
     stage_clock: float = field(default=0.0, repr=False)
     gpu_active: bool = field(default=True, repr=False)
+    peak_vram_mib: int = field(default=0, repr=False)
     # 每个任务独立的取消信号。不能复用队列生命周期的 stop 事件，否则一次
     # 用户中断会让 worker 退出并影响之后的新任务。
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -793,6 +800,10 @@ class TaskQueue:
             task.last_progress_ts = now
             self._state_version += 1
             if critical_change:
+                if self._concurrency_controller is not None and task.gpu_active:
+                    vram_mib = self._concurrency_controller.sample_gpu0_vram_mib()
+                    if vram_mib is not None and vram_mib > task.peak_vram_mib:
+                        task.peak_vram_mib = vram_mib
                 self._save_history(async_write=False)
             else:
                 self._history_dirty = True
@@ -889,6 +900,10 @@ class TaskQueue:
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
                 continue
+            if self._concurrency_controller is not None and task.gpu_active:
+                start_vram = self._concurrency_controller.sample_gpu0_vram_mib()
+                if start_vram is not None and start_vram > task.peak_vram_mib:
+                    task.peak_vram_mib = start_vram
             status, stage, error = TaskStatus.ERROR, "failed", "工作线程提前退出"
             try:
                 self._processor(task)
@@ -905,6 +920,10 @@ class TaskQueue:
                     print(f"[Queue] 任务「{task.name}」失败: {exc}")
             finally:
                 if self._concurrency_controller is not None:
+                    if task.gpu_active:
+                        end_vram = self._concurrency_controller.sample_gpu0_vram_mib()
+                        if end_vram is not None and end_vram > task.peak_vram_mib:
+                            task.peak_vram_mib = end_vram
                     duration_s = (time.time() - task.start_ts) if task.start_ts else None
                     self._concurrency_controller.record_task_outcome(
                         task.workflow_name,
@@ -912,6 +931,7 @@ class TaskQueue:
                         duration_s=duration_s,
                         error=error,
                         cancelled=(status == TaskStatus.CANCELLED),
+                        peak_vram_mib=(task.peak_vram_mib or None),
                     )
                 if status == TaskStatus.DONE and isinstance(task.result, list):
                     _adjust_cached_output_asset_count(len(task.result))
@@ -3074,6 +3094,12 @@ ZONOS3_LANGUAGES = {
     "ru": "ru",
 }
 
+BREEZE_TTS2_SERVICE_URL = os.environ.get("BRM_BREEZE_TTS2_URL", "http://127.0.0.1:9206").rstrip("/")
+BREEZE_TTS2_WORKFLOW = "Breeze-TTS2-语音克隆"
+BREEZE_TTS2_TIMEOUT_SECONDS = max(30, int(os.environ.get("BRM_BREEZE_TTS2_TIMEOUT_SECONDS", "300")))
+BREEZE_TTS2_MAX_REFERENCE_BYTES = 32 * 1024 * 1024
+BREEZE_TTS2_LANGUAGES = ("zh", "en", "auto")
+
 
 def normalise_h3_request(
     size: str, seconds, profile: str = "preview", acceleration: str = "standard"
@@ -3256,6 +3282,19 @@ def extract_result(
             if local_src is not None:
                 with local_src.open("rb") as src_fh, out_path.open("wb") as dst_fh:
                     shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
+                if (
+                    item.get("type", "output") == "output"
+                    and out_path.is_file()
+                    and out_path.stat().st_size > 0
+                ):
+                    try:
+                        comfy_output_root = (COMFY_ROOT / "output").resolve()
+                        local_resolved = local_src.resolve()
+                        out_resolved = out_path.resolve()
+                        if comfy_output_root in local_resolved.parents and local_resolved != out_resolved:
+                            local_resolved.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             elif get_view_file is _ORIG_GET_VIEW_FILE and callable(stream_fn):
                 stream_fn(
                     item["filename"],
@@ -3482,6 +3521,107 @@ def run_zonos3(task: Task) -> list[str]:
     return [str(wav_path)]
 
 
+def run_breeze_tts2(task: Task) -> list[str]:
+    """Invoke the isolated CPU Breeze-TTS2 loopback service (:9206) and save WAV."""
+    if task.cancel_event.is_set():
+        raise RuntimeError("Breeze-TTS2 语音任务已取消")
+    text = str(task.args.get("text") or task.args.get("prompt") or "").strip()
+    if not text:
+        raise RuntimeError("Breeze-TTS2 合成文本不能为空")
+    if len(text) > breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS:
+        raise RuntimeError(f"Breeze-TTS2 合成文本最多 {breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS} 字符")
+    lang = breeze_tts2_support.normalise_language(task.args.get("language", "zh"))
+    try:
+        speed = float(task.args.get("speed", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Breeze-TTS2 语速必须是数字") from exc
+    if not 0.5 <= speed <= 2.0:
+        raise RuntimeError("Breeze-TTS2 语速必须在 0.5–2.0 之间")
+    try:
+        seed = int(task.args.get("seed", 42))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Breeze-TTS2 随机种子必须为整数") from exc
+    if not 0 <= seed <= 2**32 - 1:
+        raise RuntimeError("Breeze-TTS2 随机种子范围须为 0–4294967295")
+    try:
+        cfg_scale = float(task.args.get("cfg_scale", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Breeze-TTS2 cfg_scale 必须是数字") from exc
+    if not 1.0 <= cfg_scale <= 5.0:
+        raise RuntimeError("Breeze-TTS2 cfg_scale 必须在 1.0–5.0 之间")
+
+    ref_bytes: bytes | None = None
+    ref_filename = "reference.wav"
+    ref_audio = str(task.args.get("ref_audio") or "").strip()
+    if ref_audio:
+        reference = _indextts25_reference_path(ref_audio)
+        ref_bytes = reference.read_bytes()
+        ref_filename = reference.name
+        if len(ref_bytes) > BREEZE_TTS2_MAX_REFERENCE_BYTES:
+            raise RuntimeError("Breeze-TTS2 参考音频不能超过 32 MiB")
+
+    reference_text = str(task.args.get("reference_text") or "").strip()
+    instruction = str(task.args.get("instruction") or "").strip()
+
+    if not _zonos3_cross_gate.acquire(cancel_check=task.cancel_event.is_set):
+        raise RuntimeError("Breeze-TTS2 语音任务已取消")
+    try:
+        task_queue.update_execution(task, {"stage": "checking_breeze_tts2"})
+        with requests.Session() as session:
+            session.trust_env = False
+            try:
+                health = session.get(f"{BREEZE_TTS2_SERVICE_URL}/health", timeout=(5, 10))
+            except requests.RequestException as exc:
+                raise RuntimeError("Breeze-TTS2 服务暂不可用，请检查 brmmedia-breeze-tts2 服务状态") from exc
+            if health.status_code != 200:
+                raise RuntimeError(f"Breeze-TTS2 健康检查失败（HTTP {health.status_code}）")
+            try:
+                health_payload = health.json()
+            except ValueError as exc:
+                raise RuntimeError("Breeze-TTS2 健康检查返回了无效内容") from exc
+            if not health_payload.get("ok"):
+                raise RuntimeError("Breeze-TTS2 模型尚未就绪")
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        wav_path = OUTPUT_DIR / f"{task.name}.wav"
+        tmp_path = OUTPUT_DIR / f".{task.name}.{os.getpid()}.wav.tmp"
+        task_queue.update_execution(task, {"stage": "synthesizing_breeze_tts2"})
+        try:
+            content, meta = breeze_tts2_support.synthesize_breeze_tts2_wav(
+                text=text,
+                service_url=BREEZE_TTS2_SERVICE_URL,
+                timeout_seconds=BREEZE_TTS2_TIMEOUT_SECONDS,
+                language=lang,
+                speed=speed,
+                reference_text=reference_text,
+                instruction=instruction,
+                seed=seed,
+                cfg_scale=cfg_scale,
+                reference_bytes=ref_bytes,
+                reference_filename=ref_filename,
+                cancel_check=task.cancel_event.is_set,
+            )
+            if not content.startswith(b"RIFF") or content[8:12] != b"WAVE":
+                raise RuntimeError("Breeze-TTS2 返回了无效 WAV 数据")
+            if task.cancel_event.is_set():
+                raise RuntimeError("Breeze-TTS2 语音任务已取消")
+            tmp_path.write_bytes(content)
+            tmp_path.replace(wav_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    finally:
+        _zonos3_cross_gate.release()
+
+    task.args.update({
+        "engine": "Breeze-TTS2 最新优化版",
+        "language": lang,
+        "speed": speed,
+        "output_format": "WAV (24kHz)",
+        "chunks": int(meta.get("chunks", 1)),
+    })
+    return [str(wav_path)]
+
+
 # ---------------------------------------------------------------------------
 # 提交工作流
 # ---------------------------------------------------------------------------
@@ -3650,6 +3790,83 @@ def api_submit_zonos3(text: str, input_filename: str = "", language: str = "zh",
         "language": lang_code,
         "seed": seed_val,
     })
+
+
+def submit_breeze_tts2(
+    text: str,
+    input_filename: str = "",
+    language: str = "zh",
+    speed: float = 1.0,
+    reference_text: str = "",
+    instruction: str = "",
+    seed: int = 42,
+    cfg_scale: float = 1.0,
+) -> dict:
+    text = str(text or "").strip()
+    if not text:
+        raise gr.Error("请输入要合成的文本")
+    if len(text) > breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS:
+        raise gr.Error(f"合成文本最多 {breeze_tts2_support.DEFAULT_MAX_TEXT_CHARS} 字符")
+    try:
+        lang_code = breeze_tts2_support.normalise_language(language)
+    except ValueError as exc:
+        raise gr.Error(str(exc)) from exc
+    try:
+        speed_val = float(speed)
+    except (TypeError, ValueError):
+        raise gr.Error("语速必须是 0.5–2.0 的数字") from None
+    if not 0.5 <= speed_val <= 2.0:
+        raise gr.Error("语速仅支持 0.5–2.0")
+    try:
+        seed_val = int(seed)
+    except (TypeError, ValueError):
+        raise gr.Error("随机种子必须为整数") from None
+    if not 0 <= seed_val <= 2**32 - 1:
+        raise gr.Error("随机种子须在 0–4294967295 之间")
+    try:
+        cfg_val = float(cfg_scale)
+    except (TypeError, ValueError):
+        raise gr.Error("cfg_scale 必须是 1.0–5.0 的数字") from None
+    if not 1.0 <= cfg_val <= 5.0:
+        raise gr.Error("cfg_scale 仅支持 1.0–5.0")
+    ref_name = str(input_filename or "").strip()
+    if ref_name:
+        try:
+            _indextts25_reference_path(ref_name)
+        except RuntimeError as exc:
+            raise gr.Error(str(exc)) from exc
+    return submit(BREEZE_TTS2_WORKFLOW, {
+        "text": text,
+        "ref_audio": ref_name,
+        "language": lang_code,
+        "speed": speed_val,
+        "reference_text": str(reference_text or "").strip(),
+        "instruction": str(instruction or "").strip(),
+        "seed": seed_val,
+        "cfg_scale": cfg_val,
+    })
+
+
+def api_submit_breeze_tts2(
+    text: str,
+    input_filename: str = "",
+    language: str = "zh",
+    speed: float = 1.0,
+    reference_text: str = "",
+    instruction: str = "",
+    seed: int = 42,
+    cfg_scale: float = 1.0,
+) -> dict:
+    return submit_breeze_tts2(
+        text=text,
+        input_filename=input_filename,
+        language=language,
+        speed=speed,
+        reference_text=reference_text,
+        instruction=instruction,
+        seed=seed,
+        cfg_scale=cfg_scale,
+    )
 
 
 def api_submit_qwen3_tts(text: str, input_filename: str = "", language: str = "zh", reference_text: str = "") -> dict:
@@ -4101,15 +4318,26 @@ def api_submit_seedvr2_enhance(
 # ---------------------------------------------------------------------------
 # 构建 工作流
 # ---------------------------------------------------------------------------
+@lru_cache(maxsize=32)
+def _load_workflow_template_cached(path_str: str, mtime_ns: int, size: int) -> dict:
+    return json.loads(Path(path_str).read_text(encoding="utf-8"))
+
+
+def _load_workflow_template(workflow_name: str) -> dict:
+    path = WORKFLOW_DIR / (workflow_name + ".json")
+    if not path.exists():
+        raise gr.Error(f"找不到工作流文件:{path}")
+    st = path.stat()
+    return copy.deepcopy(
+        _load_workflow_template_cached(str(path.resolve()), st.st_mtime_ns, st.st_size)
+    )
+
+
 def build_workflow_1(workflow_name: str, args: dict) -> dict:
     """
     workflow_name 是工作流文件名(不是完整路径,没有 .json 后缀),会到 WORKFLOW_DIR 下查找。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     width, height = _parse_size(args["size"])
     wf["57:27"]["inputs"]["text"] = args["prompt"]
     wf["57:13"]["inputs"]["width"] = width
@@ -4123,11 +4351,7 @@ def build_workflow_2(workflow_name: str, args: dict) -> dict:
     """
     工作流的构建。读取 JSON 后编辑。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["76"]["inputs"]["image"] = args["input_filename"]
     wf["75:74"]["inputs"]["text"] = args["prompt"]
     wf["75:73"]["inputs"]["noise_seed"] = random.randint(1, 10000)
@@ -4138,11 +4362,7 @@ def build_workflow_3(workflow_name: str, args: dict) -> dict:
     """
     工作流的构建。读取 JSON 后编辑。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["104"]["inputs"].update({
         "prompt": args["prompt"], "width": args["width"],
         "height": args["height"], "length": args["frames"],
@@ -4157,11 +4377,7 @@ def build_workflow_4(workflow_name: str, args: dict) -> dict:
     """
     工作流的构建。读取 JSON 后编辑。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["1"]["inputs"]["image"] = args["input_filename"]
     wf["104"]["inputs"].update({
         "prompt": args["prompt"], "width": args["width"],
@@ -4216,12 +4432,8 @@ def _configure_h3_acceleration(wf: dict, args: dict) -> None:
 
 
 def build_workflow_ltx3(workflow_name: str, args: dict) -> dict:
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
     width, height = _parse_size(args["size"])
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["14"]["inputs"]["text"] = args["prompt"]
     wf["38"]["inputs"]["value"] = args["seconds"]
     wf["23"]["inputs"]["width"] = width
@@ -4231,11 +4443,7 @@ def build_workflow_ltx3(workflow_name: str, args: dict) -> dict:
 
 
 def build_workflow_ltx4(workflow_name: str, args: dict) -> dict:
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["10"]["inputs"]["image"] = args["input_filename"]
     wf["14"]["inputs"]["text"] = args["prompt"]
     wf["38"]["inputs"]["value"] = args["seconds"]
@@ -4247,11 +4455,7 @@ def build_workflow_5(workflow_name: str, args: dict) -> dict:
     """
     工作流的构建。读取 JSON 后编辑。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["10"]["inputs"]["image"] = args["input_filename1"]
     wf["220"]["inputs"]["image"] = args["input_filename2"]
     wf["14"]["inputs"]["text"] = args["prompt"]
@@ -4264,12 +4468,8 @@ def build_workflow_6(workflow_name: str, args: dict) -> dict:
     """
     工作流的构建。读取 JSON 后编辑。
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
     width, height = _parse_size(args["size"])
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
     wf["423"]["inputs"]["audio"] = args["audio"]
     wf["423"]["inputs"]["start_time"] = 0.0
     wf["423"]["inputs"]["end_time"] = args["duration"]
@@ -4299,11 +4499,7 @@ def build_workflow_7(workflow_name: str, args: dict) -> dict:
       ref_audio:        克隆参考音频在 ComfyUI input 目录里的文件名(由 upload_image 上传得到)
       temperature:      采样温度,影响多样性(默认 0.8)
     """
-    import json
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
 
     # 节点1: LoadAudio —— 指定参考音频文件名
     wf["1"]["inputs"]["audio"] = args["ref_audio"]
@@ -4433,10 +4629,7 @@ def build_workflow_8(workflow_name: str, args: dict) -> dict:
     if model == "yue2":
         return build_yue2_music_workflow(args)
 
-    path = WORKFLOW_DIR / (workflow_name + ".json")
-    if not path.exists():
-        raise gr.Error(f"找不到工作流文件:{path}")
-    wf = json.loads(path.read_text(encoding="utf-8"))
+    wf = _load_workflow_template(workflow_name)
 
     # 选择模型版本(base/turbo), 对应不同的采样参数与 LM 引导强度
     wf["104"]["inputs"]["unet_name"] = resolve_acestep_unet_name(model)
@@ -4616,6 +4809,7 @@ WORKFLOW_BUILDERS = {
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),
     "IndexTTS-2.5-语音克隆": (build_workflow_7, "语音克隆 IndexTTS-2.5"),
     ZONOS3_WORKFLOW: (lambda name, args: {}, "语音克隆 ZONOS3-Mini"),
+    BREEZE_TTS2_WORKFLOW: (lambda name, args: {}, "语音克隆 Breeze-TTS2"),
     "音乐生成": (build_workflow_8, "音乐生成"),
     "SeedVR2-图像/视频增强修复": (build_seedvr2_workflow, "SeedVR2 图像/视频增强修复"),
 }
@@ -4694,8 +4888,51 @@ def _cleanup_seedvr2_comfy_outputs(outputs: dict) -> None:
                     continue
 
 
+def _is_cfr_copy_eligible(source: Path, info: dict) -> bool:
+    """Return True when source looks like a CFR MP4/MOV stream safe to probe for -c:v copy slicing."""
+    if source.suffix.lower() not in {".mp4", ".mov", ".m4v"}:
+        return False
+    fps = float(info.get("fps") or 0.0)
+    nominal = float(info.get("nominal_fps") or fps)
+    if fps <= 0 or nominal <= 0 or abs(fps - nominal) / nominal > 0.005:
+        return False
+    codec = str(info.get("codec_name") or "").strip().lower()
+    if codec and codec not in {"h264", "hevc", "mpeg4"}:
+        return False
+    return True
+
+
+def _is_gpu0_idle_for_nvenc() -> bool:
+    """Check that no GPU task holds GPU0 and GPU0 has free compute/VRAM for NVENC."""
+    try:
+        with task_queue._lock:
+            if any(t.gpu_active for t in task_queue._running.values()):
+                return False
+    except Exception:
+        pass
+    try:
+        gpus = system_telemetry.collect_gpu_stats()
+        gpu0 = next((g for g in gpus if g.get("index") == 0), gpus[0] if gpus else None)
+        if not isinstance(gpu0, dict):
+            return False
+        util = float(gpu0.get("util_pct") or 0.0)
+        total = int(gpu0.get("vram_total_mib") or 0)
+        used = int(gpu0.get("vram_used_mib") or 0)
+        return util < 50.0 and total > 0 and (total - used) >= 1024
+    except Exception:
+        return False
+
+
+def _clear_segment_files(temp_dir: Path) -> None:
+    for leftover in temp_dir.glob("input_*.mp4"):
+        try:
+            leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _seedvr2_video_segments(source: Path, info: dict, temp_dir: Path, task: Task, deadline: float) -> list[Path]:
-    """Transcode long sources into sequential, audio-free, bounded segments."""
+    """Slice long sources: probe CFR -c:v copy first, then NVENC when GPU0 idle, fallback libx264."""
     segment_seconds = segment_duration_seconds(info["fps"])
     if info["duration"] <= segment_seconds:
         return [source]
@@ -4704,15 +4941,45 @@ def _seedvr2_video_segments(source: Path, info: dict, temp_dir: Path, task: Task
         raise RuntimeError("服务器未安装 ffmpeg，无法分段处理长视频")
     task_queue.update_execution(task, {"stage": "preparing_video_segments", "progress": 0.01})
     pattern = temp_dir / "input_%04d.mp4"
-    command = [
-        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(source), "-map", "0:v:0", "-an", "-c:v", "libx264",
-        "-preset", "ultrafast", "-crf", "18", "-fps_mode", "cfr",
-        "-r", str(info["fps_text"]), "-force_key_frames",
-        f"expr:gte(t,n_forced*{segment_seconds:.9f})", "-f", "segment",
-        "-segment_time", f"{segment_seconds:.9f}", "-reset_timestamps", "1", str(pattern),
-    ]
-    _run_seedvr2_command(command, task, deadline)
+
+    if _is_cfr_copy_eligible(source, info):
+        copy_cmd = [
+            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-map", "0:v:0", "-an", "-c:v", "copy",
+            "-f", "segment", "-segment_time", f"{segment_seconds:.9f}",
+            "-reset_timestamps", "1", str(pattern),
+        ]
+        try:
+            _run_seedvr2_command(copy_cmd, task, deadline)
+            copied = sorted(temp_dir.glob("input_*.mp4"))
+            if len(copied) >= 2 and all(seg.stat().st_size > 0 for seg in copied):
+                return copied
+        except RuntimeError:
+            if task.cancel_event.is_set():
+                raise
+        _clear_segment_files(temp_dir)
+
+    def _encode_cmd(codec: str, extra_args: list[str]) -> list[str]:
+        return [
+            ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-map", "0:v:0", "-an", "-c:v", codec, *extra_args,
+            "-fps_mode", "cfr", "-r", str(info["fps_text"]), "-force_key_frames",
+            f"expr:gte(t,n_forced*{segment_seconds:.9f})", "-f", "segment",
+            "-segment_time", f"{segment_seconds:.9f}", "-reset_timestamps", "1", str(pattern),
+        ]
+
+    if _is_gpu0_idle_for_nvenc():
+        try:
+            _run_seedvr2_command(_encode_cmd("h264_nvenc", ["-preset", "p4", "-cq", "18"]), task, deadline)
+            segments = sorted(temp_dir.glob("input_*.mp4"))
+            if segments and all(seg.stat().st_size > 0 for seg in segments):
+                return segments
+        except RuntimeError:
+            if task.cancel_event.is_set():
+                raise
+        _clear_segment_files(temp_dir)
+
+    _run_seedvr2_command(_encode_cmd("libx264", ["-preset", "ultrafast", "-crf", "18"]), task, deadline)
     segments = sorted(temp_dir.glob("input_*.mp4"))
     if not segments:
         raise RuntimeError("长视频分段结果为空")
@@ -4966,8 +5233,8 @@ def _make_exclusive_gpu_guard(task: Task, target_base: str, model_group: str):
 
 
 def process_task(task: Task) -> None:
-    if task.workflow_name == ZONOS3_WORKFLOW:
-        # ZONOS3-Mini runs on CPU (:1919) and consumes zero A5000 VRAM.
+    if task.workflow_name in {ZONOS3_WORKFLOW, BREEZE_TTS2_WORKFLOW}:
+        # ZONOS3-Mini (:1919) and Breeze-TTS2 (:9206) run on CPU and consume zero A5000 VRAM.
         return _process_task_impl(task)
     profile = adaptive_concurrency.classify_workflow(task.workflow_name)
     model_group = media_runtime_guard.workflow_model_group(task.workflow_name, task.args)
@@ -5045,6 +5312,10 @@ def process_task(task: Task) -> None:
 def _process_task_impl(task: Task) -> None:
     if task.workflow_name == ZONOS3_WORKFLOW:
         task.result = run_zonos3(task)
+        task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
+        return
+    if task.workflow_name == BREEZE_TTS2_WORKFLOW:
+        task.result = run_breeze_tts2(task)
         task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
         return
     if task.workflow_name == qwen3_tts.WORKFLOW:
@@ -5590,6 +5861,7 @@ def _schedule_thumbnail(path: Path, kind: str) -> Path | None:
         return None
     if target.is_file():
         return target
+    start_media_cache_worker()
     job_key = str(target)
     with _thumb_lock:
         if job_key not in _thumb_pending:
@@ -5600,6 +5872,7 @@ def _schedule_thumbnail(path: Path, kind: str) -> Path | None:
 
 def _thumbnail_worker() -> None:
     """Generate only one FFmpeg preview at a time so refreshes never block."""
+    global _dashboard_static_cache
     ffmpeg = shutil.which("ffmpeg")
     while True:
         path, target, kind = _thumb_jobs.get()
@@ -5630,6 +5903,7 @@ def _thumbnail_worker() -> None:
                 with _thumb_lock:
                     if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size and _completed_output_path(path):
                         temporary.replace(target)
+                        _dashboard_static_cache = None
             finally:
                 temporary.unlink(missing_ok=True)
         except (OSError, subprocess.TimeoutExpired):
@@ -6284,7 +6558,15 @@ def _build_dashboard_snapshot():
         )
         cards_html = _render_task_cards(all_tasks, pending_positions)
         assets_html = _render_dashboard_assets(_asset_records(done))
-        _dashboard_static_cache = (cache_key, summary, cards_html, table_md, assets_html)
+        has_pending_preview = any(
+            marker in cards_html or marker in assets_html
+            for marker in ("音频产物", "图片预览准备中", "视频预览准备中", "正在生成真实波形预览…")
+        )
+        _dashboard_static_cache = (
+            None
+            if has_pending_preview
+            else (cache_key, summary, cards_html, table_md, assets_html)
+        )
 
     system_stats = _real_system_status(done, running)
     return (
@@ -6463,6 +6745,11 @@ ZONOS3_UI_LANGUAGE_CHOICES = [
     ("意大利文", "it"),
     ("俄文", "ru"),
 ]
+BREEZE_TTS2_UI_LANGUAGE_CHOICES = [
+    ("中文 / 中英混读", "zh"),
+    ("英文", "en"),
+    ("自动检测", "auto"),
+]
 INDEXTTS25_UI_LANGUAGE_CHOICES = [
     ("中文", "zh"),
     ("英文", "en"),
@@ -6473,14 +6760,23 @@ INDEXTTS25_UI_LANGUAGE_CHOICES = [
 
 
 def on_voice_engine_change(engine_choice, current_lang):
-    is_zonos = str(engine_choice or "zonos3").strip().lower() == "zonos3"
-    if is_zonos:
+    choice = str(engine_choice or "zonos3").strip().lower()
+    if choice == "zonos3":
         choices = ZONOS3_UI_LANGUAGE_CHOICES
         valid_codes = {code for _, code in choices}
         lang_val = current_lang if current_lang in valid_codes else "zh"
         return (
             gr.update(choices=choices, value=lang_val),
             gr.update(visible=False),
+            gr.update(visible=True),
+        )
+    if choice == "breeze_tts2":
+        choices = BREEZE_TTS2_UI_LANGUAGE_CHOICES
+        valid_codes = {code for _, code in choices}
+        lang_val = current_lang if current_lang in valid_codes else "zh"
+        return (
+            gr.update(choices=choices, value=lang_val),
+            gr.update(visible=True),
             gr.update(visible=True),
         )
     choices = INDEXTTS25_UI_LANGUAGE_CHOICES
@@ -6494,10 +6790,22 @@ def on_voice_engine_change(engine_choice, current_lang):
 
 
 def ui_submit_voice_clone(engine_choice, prompt, preset_id, uploaded_name, language, speed, seed):
+    reference_text = ""
     if preset_id:
-        uploaded_name, _ = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
-    if str(engine_choice or "zonos3").strip().lower() == "zonos3":
+        uploaded_name, voice = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
+        reference_text = str(voice.get("reference_text") or "")
+    choice = str(engine_choice or "zonos3").strip().lower()
+    if choice == "zonos3":
         return api_submit_zonos3(prompt, uploaded_name, language, seed)
+    if choice == "breeze_tts2":
+        return submit_breeze_tts2(
+            text=prompt,
+            input_filename=uploaded_name,
+            language=language,
+            speed=speed,
+            reference_text=reference_text,
+            seed=seed,
+        )
     return submit_workflow_7(prompt, uploaded_name, 0.8, language, speed)
 
 
@@ -6505,29 +6813,31 @@ def build_voice_clone_panel(qwen=False):
     engine = "zonos3"
     with gr.Column(elem_classes=["voice-clone-panel"]):
         gr.Markdown(
-            "## 语音克隆 & TTS · ZONOS3-Mini / IndexTTS-2.5\n"
-            "主力推荐 **ZONOS3-Mini（约 3.3s 极速零显存语音克隆，直连 :1919 输出 WAV）**；"
-            "亦可切换 **IndexTTS-2.5（高表现力情感克隆，输出 MP3）**。支持 12 款内置音色、自定义参考音频或零样本默认音色（ZONOS3-Mini）。",
+            "## 语音克隆 & TTS · ZONOS3-Mini / Breeze-TTS2 / IndexTTS-2.5\n"
+            "三大语音合成引擎一键平铺切换：**ZONOS3-Mini（约 3.3s 极速零显存语音克隆 · 推荐）**、"
+            "**Breeze-TTS2 最新优化版（高自然度华语/中英混读情感克隆 · 零显存）**、"
+            "**IndexTTS-2.5（高表现力多语种情感克隆）**。共用内置音色与自定义参考音频，支持语速与语言选择。",
             elem_classes=["voice-clone-heading"],
         )
         tts_engine = gr.Radio(
             label="语音合成引擎",
             choices=[
                 ("ZONOS3-Mini（3.3s 极速零显存语音克隆 · 推荐）", "zonos3"),
-                ("IndexTTS-2.5（高表现力情感克隆）", "indextts25"),
+                ("Breeze-TTS2 最新优化版（高自然度华语/中英混读情感克隆 · 新增）", "breeze_tts2"),
+                ("IndexTTS-2.5（高表现力多语种情感克隆）", "indextts25"),
             ],
             value="zonos3",
         )
         with gr.Row(equal_height=False, elem_classes=["voice-clone-row"]):
             with gr.Column(scale=3, min_width=320, elem_classes=["voice-text-column"]):
                 text = gr.Textbox(label="合成文本", value="欢迎使用本地人工智能工作台，让创作更加自然高效。",
-                                  placeholder="输入要朗读的文字，可用标点安排停顿。", lines=9, max_lines=14,
+                                  placeholder="输入要朗读的文字，可用标点安排停顿（Breeze-TTS2 还支持 [叹气]/[笑] 等情感标签）。", lines=9, max_lines=14,
                                   elem_classes=["voice-clone-text"])
                 gr.Markdown("建议先用一小段文字试听，再提交完整内容。", elem_classes=["voice-clone-hint"])
             with gr.Column(scale=2, min_width=320, elem_classes=["voice-reference-column"]):
                 preset = gr.Dropdown(label="音色选择", choices=voice_presets.choices(), value="", filterable=True,
-                                     info="12款内置参考音色，ZONOS3-Mini 与 IndexTTS-2.5 共用；上传音频后自动切换为自定义。")
-                description = gr.Markdown("选择内置音色即可试听，也可在下方上传自己的参考音频（ZONOS3-Mini 也支持不传参考音频直接合成）。",
+                                     info="内置参考音色，三大引擎共用；上传音频后自动切换为自定义。")
+                description = gr.Markdown("选择内置音色即可试听，也可在下方上传自己的参考音频（ZONOS3-Mini 与 Breeze-TTS2 也支持不传参考音频直接合成）。",
                                            elem_classes=["voice-preset-description"])
                 audio = gr.Audio(type="filepath", label="参考音频 · 可试听、上传或录音", editable=False,
                                  elem_classes=["voice-reference-audio"])
@@ -6535,7 +6845,7 @@ def build_voice_clone_panel(qwen=False):
         with gr.Row(equal_height=False, elem_classes=["voice-clone-controls"]):
             language = gr.Dropdown(label="合成语言", value="zh", scale=1, choices=ZONOS3_UI_LANGUAGE_CHOICES)
             speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="语速（1.0 为正常）", scale=2, visible=False)
-            seed = gr.Number(label="随机种子（ZONOS3-Mini）", value=42, precision=0, minimum=0, maximum=2**32 - 1, scale=2, visible=True)
+            seed = gr.Number(label="随机种子（ZONOS3 / Breeze）", value=42, precision=0, minimum=0, maximum=2**32 - 1, scale=2, visible=True)
         button = gr.Button("提交语音任务", variant="primary", elem_classes=["voice-clone-submit"])
     source_outputs = [audio, name, duration, description]
     upload_outputs = [name, duration, preset, description]
@@ -6591,29 +6901,7 @@ def llm_status_text(state=None):
 
 
 def llm_control_updates():
-    state = _llm_ui_state()
-    ready = state.get("state") == "ready" and not state.get("switching") and not state.get("control_unavailable")
-    return (llm_status_text(state),
-            gr.update(interactive=False, visible=False),
-            gr.update(interactive=ready and state.get("target") != "strata" and bool(state.get("strata_installed")), visible=False))
-
-
-def switch_llm_ui(target):
-    message = request_llm_switch(target)
-    if message.startswith("切换已开始"):
-        return message, gr.update(interactive=False), gr.update(interactive=False)
-    _, qwen, strata = llm_control_updates()
-    return message, qwen, strata
-
-
-def request_llm_switch(target):
-    try:
-        response = requests.post("http://127.0.0.1:9300/admin/llm-runtime/switch", json={"target": target}, timeout=8)
-        if response.status_code != 202:
-            return "切换未开始：" + response.json().get("detail", response.text)
-        return "切换已开始。双 A4000 互斥加载；状态每 5 秒自动刷新，完成后再发送问题。"
-    except requests.RequestException:
-        return "切换控制服务暂不可用，请联系管理员。"
+    return llm_status_text()
 
 
 def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_thinking):
@@ -7924,20 +8212,12 @@ def build_ui():
             # ========== Tab 9 ==========
             with gr.Tab("Qwen 大模型"):
                 gr.Markdown("## 智能工具 / 本地大模型", elem_classes=["workflow-heading"])
-                initial_runtime_status, initial_qwen, initial_strata = llm_control_updates()
                 with gr.Column(elem_id="llm-switch-toolbar"):
-                    gr.Markdown("### 本地大模型引擎 · Strata\n当前唯一主力本地大模型：**Strata · Qwen3.8-Flash-Next**（双 A4000 32GB 高速并发 · 支持 64K 上下文与多模态推理，原 Qwen 27B 已正式退役下线）。")
-                    runtime_status = gr.Markdown(value=initial_runtime_status, elem_id="llm-runtime-status")
+                    gr.Markdown("### 本地大模型引擎 · Strata\n使用 Strata · Qwen3.8-Flash-Next（双 A4000 32GB 高速并发 · 支持 64K 上下文与多模态推理，原 Qwen 27B 已正式退役下线）。")
+                    runtime_status = gr.Markdown(value=llm_control_updates(), elem_id="llm-runtime-status")
                     with gr.Row():
-                        switch_qwen = gr.Button("使用 Qwen 27B（已下线）", elem_id="llm-switch-qwen", interactive=False, visible=False)
-                        switch_strata = gr.Button("使用 Strata（高速）", elem_id="llm-switch-strata", interactive=False, visible=False)
                         refresh_runtime = gr.Button("刷新模型状态", elem_id="llm-switch-refresh")
-                    runtime_outputs = [runtime_status, switch_qwen, switch_strata]
-                    switch_qwen.click(lambda: switch_llm_ui("qwen38"), outputs=runtime_outputs, queue=False, api_visibility="private")
-                    switch_strata.click(lambda: switch_llm_ui("strata"), outputs=runtime_outputs, queue=False, api_visibility="private")
-                    refresh_runtime.click(llm_control_updates, outputs=runtime_outputs, queue=False, api_visibility="private")
-                    runtime_timer = gr.Timer(5)
-                    runtime_timer.tick(llm_control_updates, outputs=runtime_outputs, queue=False, show_progress="hidden", api_visibility="private")
+                    refresh_runtime.click(llm_control_updates, outputs=[runtime_status], queue=False, api_visibility="private")
                 with gr.Row(elem_id="qwen-workspace"):
                     with gr.Column(scale=3, elem_id="qwen-chat-panel"):
                         gr.Markdown(
@@ -8143,6 +8423,7 @@ def build_ui():
         gr.api(api_submit_flux3_edit, api_name="submit_flux3_edit")
         gr.api(api_submit_qwen3_tts, api_name="submit_qwen3_tts")
         gr.api(api_submit_zonos3, api_name="submit_zonos3")
+        gr.api(api_submit_breeze_tts2, api_name="submit_breeze_tts2")
         gr.api(api_submit_workflow_3, api_name="submit_workflow_3")
         gr.api(api_submit_workflow_4, api_name="submit_workflow_4")
         gr.api(api_submit_workflow_3_h3, api_name="submit_workflow_3_h3")
@@ -8259,8 +8540,110 @@ def build_ui():
     return demo
 
 
+def _internal_api_token() -> str:
+    explicit = os.environ.get("BRM_INTERNAL_API_TOKEN", "").strip()
+    if explicit:
+        return explicit
+    api_key = os.environ.get("BRM_API_KEY", "").strip()
+    if api_key:
+        return hmac.new(api_key.encode("utf-8"), b"brmmedia-internal-v1", hashlib.sha256).hexdigest()
+    token_path = OUTPUT_DIR / ".brm-internal-api.token"
+    try:
+        if token_path.is_file():
+            stored = token_path.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_hex(32)
+        try:
+            fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return token_path.read_text(encoding="utf-8").strip()
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(generated + "\n")
+        return generated
+    except OSError:
+        return ""
+
+
+def build_internal_api_router():
+    """Build lightweight loopback-only internal FastAPI routes bypassing Gradio SSE."""
+    try:
+        from fastapi import APIRouter, Body, Depends, Header, HTTPException
+    except ImportError:
+        return None
+
+    router = APIRouter(prefix="/internal/v1")
+
+    def _require_internal_token(
+        x_brm_internal_token: str | None = Header(default=None, alias="X-BRM-Internal-Token"),
+    ) -> None:
+        expected = _internal_api_token()
+        provided = (x_brm_internal_token or "").strip()
+        if not expected or not provided or not hmac.compare_digest(provided, expected):
+            raise HTTPException(status_code=401, detail="Unauthorized internal request")
+
+    @router.get("/tasks/{task_id}", dependencies=[Depends(_require_internal_token)])
+    def internal_task_status(task_id: str) -> dict:
+        return task_queue.task_status(task_id)
+
+    @router.post("/tasks/{task_id}/cancel", dependencies=[Depends(_require_internal_token)])
+    def internal_cancel_task(task_id: str) -> dict:
+        return api_cancel_task(task_id)
+
+    @router.delete("/tasks/{task_id}/artifacts/{filename}", dependencies=[Depends(_require_internal_token)])
+    def internal_delete_artifact(
+        task_id: str,
+        filename: str,
+        confirmed: bool = False,
+        body: dict | None = Body(default=None),
+    ) -> dict:
+        is_confirmed = confirmed is True or (isinstance(body, dict) and body.get("confirmed") is True)
+        return api_delete_asset(task_id, filename, confirmed=is_confirmed)
+
+    @router.get("/metrics", dependencies=[Depends(_require_internal_token)])
+    def internal_metrics() -> dict:
+        ctrl = getattr(task_queue, "_concurrency_controller", None)
+        if ctrl is not None and hasattr(ctrl, "metrics_snapshot"):
+            return ctrl.metrics_snapshot()
+        return {
+            "window_size": 100,
+            "workflows": {},
+            "summary": {"total": 0, "success": 0, "failed": 0, "cancelled": 0, "oom": 0},
+        }
+
+    return router
+
+
+def _graceful_shutdown(signum=None, frame=None) -> None:
+    try:
+        task_queue._stop.set()
+    except Exception:
+        pass
+    try:
+        with task_queue._lock:
+            task_queue._save_history(async_write=False)
+    except Exception:
+        pass
+    try:
+        stop_comfyui()
+    except Exception:
+        pass
+    if signum is not None:
+        raise SystemExit(0)
+
+
+def install_shutdown_handlers() -> None:
+    if threading.current_thread() is not threading.main_thread():
+        return
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+
 def main():
+    atexit.register(_graceful_shutdown)
     start_comfyui(wait=True)
+    install_shutdown_handlers()
     task_queue.start_workers()      # 启动队列后台 worker
     start_media_cache_worker()      # 单线程补齐视频首帧与音频波形，不阻塞任务刷新
     start_dashboard_cache_worker()  # 首屏预填充；GPU/磁盘探测不占用浏览器回调
@@ -8269,17 +8652,24 @@ def main():
     demo.queue()
     from starlette.middleware import Middleware
     from ui_event_guard import middleware_class
-    demo.launch(
-        server_name=GRADIO_HOST,
-        server_port=server_port,
-        css=CUSTOM_CSS + voice_presets.CSS,
-        theme=gr.themes.Soft(primary_hue="red", secondary_hue="orange", neutral_hue="stone"),
-        inbrowser=False,
-        root_path=GRADIO_ROOT_PATH,
-        allowed_paths=[str(THUMB_CACHE_DIR), str(DOWNLOAD_CACHE_DIR)],
-        js=BRM_NAV_JS,
-        app_kwargs={"middleware":[Middleware(middleware_class(demo))]},
-    )
+    app_kwargs: dict[str, object] = {"middleware": [Middleware(middleware_class(demo))]}
+    internal_router = build_internal_api_router()
+    if internal_router is not None:
+        app_kwargs["routes"] = list(internal_router.routes)
+    try:
+        demo.launch(
+            server_name=GRADIO_HOST,
+            server_port=server_port,
+            css=CUSTOM_CSS + voice_presets.CSS,
+            theme=gr.themes.Soft(primary_hue="red", secondary_hue="orange", neutral_hue="stone"),
+            inbrowser=False,
+            root_path=GRADIO_ROOT_PATH,
+            allowed_paths=[str(THUMB_CACHE_DIR), str(DOWNLOAD_CACHE_DIR)],
+            js=BRM_NAV_JS,
+            app_kwargs=app_kwargs,
+        )
+    finally:
+        _graceful_shutdown()
 
 
 if __name__ == "__main__":

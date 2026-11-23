@@ -9,6 +9,7 @@ host MemAvailable, CPU loadavg & utilization) with anti-starvation support.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -90,9 +91,13 @@ _WORKFLOW_PROFILES: dict[str, TaskProfile] = {
     "Qwen3-TTS-语音克隆": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
     "voice-clone": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
     "qwen3-voice-clone": TaskProfile(TIER_AUDIO_GPU, False, True, False, 35),
-    # Pure CPU voice workflow (Zonos3-mini :1919): zero GPU0 VRAM, decoupled 1..4
+    # Pure CPU voice workflows (Zonos3-mini :1919, Breeze-TTS2 :9206): zero GPU0 VRAM, decoupled 1..4
     "Zonos3-语音克隆": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
     "zonos3-voice-clone": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
+    "Breeze-TTS2-语音克隆": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
+    "breeze-tts2-voice-clone": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
+    "breeze-tts2": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
+    "breezyvoice": TaskProfile(TIER_VOICE_CPU, False, False, False, 10),
 }
 
 _DEFAULT_CONSERVATIVE_PROFILE = TaskProfile(TIER_IMAGE_HEAVY, True, True, False, 90)
@@ -107,7 +112,7 @@ def classify_workflow(workflow_name: str) -> TaskProfile:
     if direct is not None:
         return direct
     lower = name.lower()
-    if "zonos3" in lower:
+    if "zonos3" in lower or "breeze-tts2" in lower or "breeze_tts2" in lower or "breezyvoice" in lower:
         return TaskProfile(TIER_VOICE_CPU, False, False, False, 10)
     if "minimaxh3image" in lower or "h3-image" in lower or "qwenimage21" in lower or "qwen-image21" in lower or "flux3" in lower:
         return TaskProfile(TIER_IMAGE_HEAVY, True, True, False, 90)
@@ -657,6 +662,174 @@ def evaluate_concurrency(
     return result
 
 
+def _percentile(sorted_values: list[float], pct: float) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return round(float(sorted_values[0]), 3)
+    idx = math.ceil((float(pct) / 100.0) * len(sorted_values)) - 1
+    idx = max(0, min(len(sorted_values) - 1, idx))
+    return round(float(sorted_values[idx]), 3)
+
+
+class WorkflowMetricsTracker:
+    """Thread-safe sliding-window latency, peak VRAM, and outcome tracker per workflow."""
+
+    def __init__(self, *, window_size: int = 100) -> None:
+        self._window_size = max(1, int(window_size))
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict[str, Any]] = {}
+
+    def record(
+        self,
+        workflow_name: str,
+        *,
+        success: bool,
+        duration_s: float | None = None,
+        error: str = "",
+        cancelled: bool = False,
+        peak_vram_mib: int | None = None,
+    ) -> None:
+        name = str(workflow_name or "unknown").strip() or "unknown"
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None:
+                entry = {
+                    "durations": deque(maxlen=self._window_size),
+                    "vram_peaks": deque(maxlen=self._window_size),
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "oom": 0,
+                    "last_duration_s": None,
+                    "last_peak_vram_mib": None,
+                    "last_updated_at": None,
+                }
+                self._entries[name] = entry
+
+            entry["total"] += 1
+            entry["last_updated_at"] = now
+            if cancelled:
+                entry["cancelled"] += 1
+            elif success:
+                entry["success"] += 1
+            else:
+                entry["failed"] += 1
+                if _is_oom_or_cuda_error(error):
+                    entry["oom"] += 1
+
+            if not cancelled and duration_s is not None and math.isfinite(float(duration_s)) and float(duration_s) >= 0:
+                val = round(float(duration_s), 3)
+                entry["durations"].append(val)
+                entry["last_duration_s"] = val
+
+            if peak_vram_mib is not None and int(peak_vram_mib) > 0:
+                vram_val = int(peak_vram_mib)
+                entry["vram_peaks"].append(vram_val)
+                entry["last_peak_vram_mib"] = vram_val
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            workflows: dict[str, Any] = {}
+            summary = {"total": 0, "success": 0, "failed": 0, "cancelled": 0, "oom": 0}
+            for wf, entry in sorted(self._entries.items()):
+                durs = sorted(entry["durations"])
+                vrams = list(entry["vram_peaks"])
+                terminal_non_cancel = entry["success"] + entry["failed"]
+                workflows[wf] = {
+                    "tier": classify_workflow(wf).tier,
+                    "total": entry["total"],
+                    "success": entry["success"],
+                    "failed": entry["failed"],
+                    "cancelled": entry["cancelled"],
+                    "oom": entry["oom"],
+                    "success_rate": round(entry["success"] / terminal_non_cancel, 4)
+                    if terminal_non_cancel > 0
+                    else None,
+                    "sample_count": len(durs),
+                    "p50_duration_s": _percentile(durs, 50.0),
+                    "p95_duration_s": _percentile(durs, 95.0),
+                    "avg_duration_s": round(sum(durs) / len(durs), 3) if durs else None,
+                    "last_duration_s": entry["last_duration_s"],
+                    "peak_vram_mib": max(vrams) if vrams else None,
+                    "last_peak_vram_mib": entry["last_peak_vram_mib"],
+                    "last_updated_at": entry["last_updated_at"],
+                    "_durations": list(entry["durations"]),
+                    "_vram_peaks": vrams,
+                }
+                for key in summary:
+                    summary[key] += entry[key]
+        return {
+            "window_size": self._window_size,
+            "workflows": workflows,
+            "summary": summary,
+        }
+
+
+def merge_workflow_metrics(*snapshots: dict[str, Any]) -> dict[str, Any]:
+    """Merge one or more WorkflowMetricsTracker snapshots into one clean public view."""
+    merged: dict[str, dict[str, Any]] = {}
+    summary = {"total": 0, "success": 0, "failed": 0, "cancelled": 0, "oom": 0}
+    for snap in snapshots:
+        if not isinstance(snap, dict):
+            continue
+        workflows = snap.get("workflows")
+        if not isinstance(workflows, dict):
+            continue
+        for wf, item in workflows.items():
+            if not isinstance(item, dict):
+                continue
+            target = merged.setdefault(
+                wf,
+                {
+                    "tier": item.get("tier") or classify_workflow(wf).tier,
+                    "total": 0,
+                    "success": 0,
+                    "failed": 0,
+                    "cancelled": 0,
+                    "oom": 0,
+                    "_durations": [],
+                    "_vram_peaks": [],
+                    "last_duration_s": None,
+                    "last_peak_vram_mib": None,
+                    "last_updated_at": None,
+                },
+            )
+            for key in ("total", "success", "failed", "cancelled", "oom"):
+                val = int(item.get(key) or 0)
+                target[key] += val
+                summary[key] += val
+            if isinstance(item.get("_durations"), list):
+                target["_durations"].extend(float(x) for x in item["_durations"])
+            elif item.get("last_duration_s") is not None:
+                target["_durations"].append(float(item["last_duration_s"]))
+            if isinstance(item.get("_vram_peaks"), list):
+                target["_vram_peaks"].extend(int(x) for x in item["_vram_peaks"])
+            elif item.get("peak_vram_mib") is not None:
+                target["_vram_peaks"].append(int(item["peak_vram_mib"]))
+            item_ts = item.get("last_updated_at")
+            if item_ts is not None and (target["last_updated_at"] is None or item_ts >= target["last_updated_at"]):
+                target["last_updated_at"] = item_ts
+                target["last_duration_s"] = item.get("last_duration_s")
+                target["last_peak_vram_mib"] = item.get("last_peak_vram_mib")
+
+    public_workflows: dict[str, Any] = {}
+    for wf, item in sorted(merged.items()):
+        durs = sorted(item.pop("_durations"))
+        vrams = item.pop("_vram_peaks")
+        terminal_non_cancel = item["success"] + item["failed"]
+        item["success_rate"] = round(item["success"] / terminal_non_cancel, 4) if terminal_non_cancel > 0 else None
+        item["sample_count"] = len(durs)
+        item["p50_duration_s"] = _percentile(durs, 50.0)
+        item["p95_duration_s"] = _percentile(durs, 95.0)
+        item["avg_duration_s"] = round(sum(durs) / len(durs), 3) if durs else None
+        item["peak_vram_mib"] = max(vrams) if vrams else None
+        public_workflows[wf] = item
+    return {"workflows": public_workflows, "summary": summary}
+
+
 class AdaptiveConcurrencyController:
     """Thread-safe controller caching live hardware snapshots for task schedulers."""
 
@@ -683,6 +856,7 @@ class AdaptiveConcurrencyController:
         self._gpu_cooldown_until = 0.0
         self._cooldown_reason = ""
         self._ewma_duration: dict[str, float] = {}
+        self._metrics = WorkflowMetricsTracker()
 
     def _default_probe(self) -> dict[str, Any]:
         import system_telemetry
@@ -747,7 +921,16 @@ class AdaptiveConcurrencyController:
         duration_s: float | None = None,
         error: str = "",
         cancelled: bool = False,
+        peak_vram_mib: int | None = None,
     ) -> None:
+        self._metrics.record(
+            workflow_name,
+            success=success,
+            duration_s=duration_s,
+            error=error,
+            cancelled=cancelled,
+            peak_vram_mib=peak_vram_mib,
+        )
         profile = classify_workflow(workflow_name)
         cfg = self.config()
         now = time.monotonic()
@@ -784,6 +967,32 @@ class AdaptiveConcurrencyController:
             self._gpu_outcomes.clear()
             self._gpu_cooldown_until = 0.0
             self._cooldown_reason = ""
+
+    def metrics_snapshot(self) -> dict[str, Any]:
+        return self._metrics.snapshot()
+
+    def sample_gpu0_vram_mib(self) -> int | None:
+        try:
+            gpus = None
+            if self._probe_fn is not None:
+                hw = self._probe_fn()
+                if isinstance(hw, dict):
+                    gpus = hw.get("gpus")
+            else:
+                import system_telemetry
+
+                gpus = system_telemetry._collect_gpu_stats_pynvml()
+                if gpus is None:
+                    with self._lock:
+                        cached = self._cached_hw
+                    if isinstance(cached, dict):
+                        gpus = cached.get("gpus")
+            gpu0 = _select_gpu0(gpus)
+            if isinstance(gpu0, dict) and gpu0.get("vram_used_mib") is not None:
+                return int(gpu0["vram_used_mib"])
+        except Exception:
+            pass
+        return None
 
     def config(self) -> AdaptiveConfig:
         return self._config_provider()

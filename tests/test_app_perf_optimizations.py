@@ -648,15 +648,21 @@ class HotPathGatewayAndTelemetryAccelerationTests(unittest.TestCase):
         session.__exit__ = Mock(return_value=False)
         session.post.return_value = fake_resp
 
-        with patch("requests.Session", return_value=session, create=True):
-            enhanced = llm_runtime.enhance_prompt("neon city", workflow="text-to-image")
-            self.assertEqual(enhanced, "Cinematic neon city in rain, 8k Masterpiece")
+        with tempfile.TemporaryDirectory() as lock_dir:
+            lock_file = Path(lock_dir) / "missing-traffic.lock"
+            with patch.object(llm_runtime, "TRAFFIC_LOCK", lock_file), \
+                 patch.dict(os.environ, {"BRM_LLM_TRAFFIC_LOCK": str(lock_file)}), \
+                 patch("requests.Session", return_value=session, create=True):
+                enhanced = llm_runtime.enhance_prompt("neon city", workflow="text-to-image")
+                self.assertEqual(enhanced, "Cinematic neon city in rain, 8k Masterpiece")
 
-        # Negative: Strata error or timeout -> falls back to original prompt without raising
-        session.post.side_effect = RuntimeError("Strata connection refused")
-        with patch("requests.Session", return_value=session, create=True):
-            fallback = llm_runtime.enhance_prompt("original prompt", workflow="text-to-video")
-            self.assertEqual(fallback, "original prompt")
+            # Negative: Strata error or timeout -> falls back to original prompt without raising
+            session.post.side_effect = RuntimeError("Strata connection refused")
+            with patch.object(llm_runtime, "TRAFFIC_LOCK", lock_file), \
+                 patch.dict(os.environ, {"BRM_LLM_TRAFFIC_LOCK": str(lock_file)}), \
+                 patch("requests.Session", return_value=session, create=True):
+                fallback = llm_runtime.enhance_prompt("original prompt", workflow="text-to-video")
+                self.assertEqual(fallback, "original prompt")
 
     def test_lan_api_music_models_assets_dotenv_caches_and_submit_auto_enhance(self):
         # 1) _available_music_models 60s TTL cache

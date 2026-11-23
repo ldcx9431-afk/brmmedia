@@ -35,6 +35,11 @@ server {
     auth_basic "BRMMedia testing";
     auth_basic_user_file /etc/nginx/.htpasswd-brmmedia;
 
+    # Block external access to internal loopback-only IPC routes
+    location ^~ /internal/ {
+        return 404;
+    }
+
     # Zero-copy internal static artifact exit for X-Accel-Redirect
     location /internal-outputs/ {
         internal;
@@ -44,10 +49,11 @@ server {
         aio threads;
     }
 
-    # Expose the active local Qwen/Strata engine through the authenticated LAN entry.
+    # Expose the loopback-only vLLM/Strata API through the authenticated LAN entry.
     location = /qwen {
         return 308 /qwen/v1/;
     }
+
     include /etc/nginx/snippets/brmmedia-qwen-upstream.conf;
     include /etc/nginx/snippets/brmmedia-qwen-api-gateway.conf;
 

@@ -175,7 +175,7 @@ def probe_video(path: Path | str, *, timeout: int = 30) -> dict[str, Any]:
         raise RuntimeError("服务器未安装 ffprobe，无法安全读取视频信息")
     command = [
         ffprobe, "-v", "error", "-show_entries",
-        "format=duration:stream=codec_type,width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
+        "format=duration:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
         "-of", "json", str(path),
     ]
     try:
@@ -208,6 +208,7 @@ def probe_video(path: Path | str, *, timeout: int = 30) -> dict[str, Any]:
         "frame_count": frame_count,
         "width": width,
         "height": height,
+        "codec_name": str(video.get("codec_name") or "").lower(),
         "has_audio": any(stream.get("codec_type") == "audio" for stream in streams),
     }
 

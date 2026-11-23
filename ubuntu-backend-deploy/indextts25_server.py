@@ -114,6 +114,22 @@ def health() -> dict[str, Any]:
     }
 
 
+def _prepare_request_files(filename: str | None, payload: bytes) -> tuple[Path, Path, Path]:
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=RUN_DIR))
+    reference = request_dir / f"reference{Path(filename or '.audio').suffix.lower() or '.audio'}"
+    output = request_dir / "output.wav"
+    reference.write_bytes(payload)
+    return request_dir, reference, output
+
+
+def _synthesize_and_release(reference: Path, text: str, language: str, speed: float, output: Path) -> bytes:
+    try:
+        return _synthesize(reference, text, language, speed, output)
+    finally:
+        _release_engine()
+
+
 @app.post("/v1/voice-clone")
 async def voice_clone(
     text: str = Form(...), language: str = Form("zh"), speed: float = Form(1.0),
@@ -130,23 +146,19 @@ async def voice_clone(
     if not 0.5 <= speed <= 2.0:
         raise HTTPException(422, "speed 必须在 0.5–2.0 之间")
 
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    request_dir = Path(tempfile.mkdtemp(prefix="request-", dir=RUN_DIR))
-    reference = request_dir / f"reference{Path(reference_audio.filename or '.audio').suffix.lower() or '.audio'}"
-    output = request_dir / "output.wav"
+    request_dir: Path | None = None
     try:
         payload = await reference_audio.read(MAX_REFERENCE_BYTES + 1)
         if len(payload) > MAX_REFERENCE_BYTES:
             raise HTTPException(413, "参考音频超过允许大小")
         if not payload:
             raise HTTPException(422, "参考音频为空")
-        reference.write_bytes(payload)
+        request_dir, reference, output = await asyncio.to_thread(
+            _prepare_request_files, reference_audio.filename, payload
+        )
         started = time.perf_counter()
         async with _engine_lock:
-            try:
-                audio = await asyncio.to_thread(_synthesize, reference, text, language, speed, output)
-            finally:
-                _release_engine()
+            audio = await asyncio.to_thread(_synthesize_and_release, reference, text, language, speed, output)
         elapsed = time.perf_counter() - started
         return Response(
             content=audio, media_type="audio/wav",
@@ -162,4 +174,5 @@ async def voice_clone(
     except Exception as exc:
         raise HTTPException(500, f"IndexTTS-2.5 推理失败：{exc}") from exc
     finally:
-        shutil.rmtree(request_dir, ignore_errors=True)
+        if request_dir is not None:
+            await asyncio.to_thread(shutil.rmtree, request_dir, ignore_errors=True)

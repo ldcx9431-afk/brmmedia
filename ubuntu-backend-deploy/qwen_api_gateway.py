@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -56,6 +57,7 @@ _USAGE_FLUSH_AT: dict[str, float] = {}
 _ORIGINAL_ASYNC_CLIENT = httpx.AsyncClient
 _ASYNC_CLIENT_LOCK = threading.Lock()
 _ASYNC_CLIENT_MAP: dict[int, httpx.AsyncClient] = {}
+_ASYNC_CLIENT_LOOPS: dict[int, weakref.ref[asyncio.AbstractEventLoop]] = {}
 
 
 class SwitchModelRequest(BaseModel):
@@ -377,13 +379,26 @@ def _acquire_async_client() -> tuple[httpx.AsyncClient, bool]:
     timeout = httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
     if httpx.AsyncClient is not _ORIGINAL_ASYNC_CLIENT:
         return httpx.AsyncClient(timeout=timeout, trust_env=False), True
-    loop_key = id(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    loop_key = id(loop)
     with _ASYNC_CLIENT_LOCK:
+        stale_keys = [
+            key for key, loop_ref in list(_ASYNC_CLIENT_LOOPS.items())
+            if (ref_loop := loop_ref()) is None or ref_loop.is_closed()
+        ]
+        for key in stale_keys:
+            _ASYNC_CLIENT_LOOPS.pop(key, None)
+            _ASYNC_CLIENT_MAP.pop(key, None)
+        existing_ref = _ASYNC_CLIENT_LOOPS.get(loop_key)
+        if existing_ref is not None and existing_ref() is not loop:
+            _ASYNC_CLIENT_LOOPS.pop(loop_key, None)
+            _ASYNC_CLIENT_MAP.pop(loop_key, None)
         client = _ASYNC_CLIENT_MAP.get(loop_key)
         if client is None or getattr(client, "is_closed", False):
             limits = httpx.Limits(max_connections=64, max_keepalive_connections=16, keepalive_expiry=30.0)
             client = httpx.AsyncClient(timeout=timeout, limits=limits, trust_env=False)
             _ASYNC_CLIENT_MAP[loop_key] = client
+            _ASYNC_CLIENT_LOOPS[loop_key] = weakref.ref(loop)
         return client, False
 
 
@@ -391,6 +406,7 @@ async def _close_async_clients() -> None:
     with _ASYNC_CLIENT_LOCK:
         clients = list(_ASYNC_CLIENT_MAP.values())
         _ASYNC_CLIENT_MAP.clear()
+        _ASYNC_CLIENT_LOOPS.clear()
     for client in clients:
         try:
             await client.aclose()
@@ -468,7 +484,8 @@ class _UpstreamResponse(Response):
                         if client is not None and owns_client:
                             await client.aclose()
             finally:
-                self.guard.__exit__(None, None, None)
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(self.guard.__exit__, None, None, None)
 
 
 def _valid_upstream_path(path: str) -> bool:
@@ -663,31 +680,45 @@ def rotate_api_key(key_id: str) -> dict[str, Any]:
     return {**record, "api_key": api_key}
 
 
+def _resolve_upstream_target_and_headers(
+    upstream_path: str, query: str, base_headers: dict[str, str]
+) -> tuple[str, dict[str, str]]:
+    target = _active_qwen_base().rstrip("/")
+    if upstream_path:
+        target += "/" + upstream_path
+    if query:
+        target += "?" + query
+    headers = dict(base_headers)
+    headers.update(llm_runtime.upstream_headers(llm_runtime.selection()[1]))
+    return target, headers
+
+
 @app.api_route("/v1/{upstream_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def qwen_proxy(upstream_path: str, request: Request):
-    _validate_and_record_usage(_authorization_key(request))
+    token = _authorization_key(request)
+    await anyio.to_thread.run_sync(_validate_and_record_usage, token)
     if not _valid_upstream_path(upstream_path):
         return _error_response(400, "Invalid API path")
     guard = llm_runtime.inference_guard()
     try:
-        guard.__enter__()
+        await anyio.to_thread.run_sync(guard.__enter__)
     except RuntimeError as error:
         return _error_response(503, str(error))
     try:
-        target = _active_qwen_base().rstrip("/")
-        if upstream_path:
-            target += "/" + upstream_path
-        if request.url.query:
-            target += "?" + request.url.query
-        headers = {key: value for key, value in request.headers.items()
-                   if key.lower() in {"accept", "content-type", "user-agent"}}
-        headers.update(llm_runtime.upstream_headers(llm_runtime.selection()[1]))
+        base_headers = {
+            key: value for key, value in request.headers.items()
+            if key.lower() in {"accept", "content-type", "user-agent"}
+        }
+        target, headers = await anyio.to_thread.run_sync(
+            _resolve_upstream_target_and_headers, upstream_path, request.url.query, base_headers
+        )
         body = await request.body()
         if upstream_path.rstrip("/") == "chat/completions":
-            body = _prepare_chat_payload(body)
+            body = await anyio.to_thread.run_sync(_prepare_chat_payload, body)
         return _UpstreamResponse(request.method, target, body, headers, guard)
     except BaseException:
         # Failures/disconnect while reading the request body precede response
         # ownership, so they must also release the lock here.
-        guard.__exit__(None, None, None)
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(guard.__exit__, None, None, None)
         raise

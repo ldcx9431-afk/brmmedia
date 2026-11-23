@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Daily retention cleanup for temporary ComfyUI inputs, LAN API uploads,
+# ComfyUI intermediate outputs, and orphaned .seedvr2-* staging directories.
+set -euo pipefail
+
+cd /tmp || true
+
+DRY_RUN="${BRMMEDIA_CLEANUP_DRY_RUN:-0}"
+if [ "${1:-}" = "--dry-run" ]; then
+  DRY_RUN=1
+fi
+
+RETENTION_DAYS="${BRMMEDIA_CLEANUP_RETENTION_DAYS:-7}"
+COMFY_ROOT="${COMFYUI_ROOT:-/srv/brmmedia/ComfyUI-v039}"
+OUTPUT_DIR="${BRM_OUTPUT_DIR:-/mnt/d/brmmedia/outputs}"
+COMFY_OUTPUT_DIR="${BRMMEDIA_COMFY_OUTPUT_DIR:-/mnt/d/brmmedia/comfyui-output}"
+UPLOADS_DIR="$OUTPUT_DIR/.lan-api-uploads"
+COMFY_INPUT_DIR="$COMFY_ROOT/input"
+
+deleted_files=0
+deleted_dirs=0
+
+clean_old_files() {
+  local base="$1"
+  shift
+  [ -d "$base" ] || return 0
+  while IFS= read -r -d '' entry; do
+    deleted_files=$((deleted_files + 1))
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[DRY-RUN] rm -f %s\n' "$entry"
+    else
+      rm -f -- "$entry"
+    fi
+  done < <(find "$base" -mindepth 1 -type f -mtime +"$RETENTION_DAYS" "$@" -print0)
+}
+
+clean_empty_subdirs() {
+  local base="$1"
+  [ -d "$base" ] || return 0
+  while IFS= read -r -d '' dir; do
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[DRY-RUN] rmdir %s\n' "$dir"
+    else
+      rmdir -- "$dir" 2>/dev/null || true
+    fi
+  done < <(find "$base" -mindepth 2 -type d -empty -print0)
+}
+
+# 1. Old ComfyUI inputs (>7d), preserving ComfyUI's built-in example.png
+clean_old_files "$COMFY_INPUT_DIR" ! -name 'example.png'
+
+# 2. Old LAN API uploads (>7d)
+clean_old_files "$UPLOADS_DIR"
+
+# 3. Old ComfyUI intermediate outputs (>7d), preserving directory placeholder files
+clean_old_files "$COMFY_OUTPUT_DIR" ! -name '_output_images_will_be_put_here'
+clean_empty_subdirs "$COMFY_OUTPUT_DIR"
+
+# 4. Orphan .seedvr2-* temporary directories/files (>7d)
+for root in "$OUTPUT_DIR" "$COMFY_INPUT_DIR" "$COMFY_OUTPUT_DIR" /tmp; do
+  [ -d "$root" ] || continue
+  maxdepth=2
+  [ "$root" = "/tmp" ] && maxdepth=1
+  while IFS= read -r -d '' entry; do
+    deleted_dirs=$((deleted_dirs + 1))
+    if [ "$DRY_RUN" = "1" ]; then
+      printf '[DRY-RUN] rm -rf %s\n' "$entry"
+    else
+      rm -rf -- "$entry"
+    fi
+  done < <(find "$root" -maxdepth "$maxdepth" -mindepth 1 -name '.seedvr2-*' -mtime +"$RETENTION_DAYS" -print0)
+done
+
+printf '[OK] BRMMedia cleanup (%s): retention_days=%s files=%s seedvr2_entries=%s\n' \
+  "$([ "$DRY_RUN" = "1" ] && echo dry-run || echo applied)" \
+  "$RETENTION_DAYS" "$deleted_files" "$deleted_dirs"

@@ -21,9 +21,9 @@ class QwenStartupRecoveryTests(unittest.TestCase):
     def test_workspace_identifies_the_active_qwen38_dual_gpu_service(self):
         text = WEBUI.read_text(encoding="utf-8")
         self.assertIn("def qwen_runtime_label()", text)
-        self.assertIn("Qwen3.8-27B · 双 A4000", text)
-        self.assertIn("智能工具 / Qwen3.8 流式对话测试", text)
-        self.assertIn("当前模型：`{QWEN_MODEL}`", text)
+        self.assertIn("Strata · Qwen3.8-Flash-Next (双 A4000)", text)
+        self.assertIn("智能工具 / 本地大模型", text)
+        self.assertIn("当前模型：`{model}`", text)
         self.assertIn("cancels=[qwen_submit_event]", text)
 
     def test_qwen_sse_is_explicitly_decoded_as_utf8(self):
