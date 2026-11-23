@@ -1,0 +1,32 @@
+[Unit]
+Description=BRMMedia Strata dual A4000 runtime
+After=network-online.target
+Conflicts=qwen38-llama.service qwen-vllm.service
+
+[Service]
+Type=simple
+User=brm
+WorkingDirectory=/srv/brmmedia/strata/Strata
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=TMPDIR=/var/tmp/brmmedia-strata
+Environment=HF_HOME=/var/lib/brmmedia-nvme1/cache/huggingface
+Environment=TORCH_HOME=/var/lib/brmmedia-nvme1/cache/torch
+# Engine args in strata-iq2_xs-engine-0159.json include: --aux-cpus auto
+ExecStart=/srv/brmmedia/strata/Strata/.venv/bin/python -m serve.server --engine strata --config /srv/brmmedia/strata/Strata/strata-iq2_xs-engine-0159.json --host 127.0.0.1 --port 8002
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=900
+TimeoutStopSec=60
+KillMode=control-group
+Nice=5
+MemoryHigh=76G
+MemoryMax=88G
+MemorySwapMax=0
+OOMScoreAdjust=-200
+LimitMEMLOCK=infinity
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+/srv/brmmedia/logs/*.log
+/srv/brmmedia/releases/*/logs/*.log
+/var/lib/brmmedia-nvme1/releases/*/logs/*.log
+/var/lib/brmmedia-nvme1/releases/*/ubuntu-backend-deploy/*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+    su brm brm
+}

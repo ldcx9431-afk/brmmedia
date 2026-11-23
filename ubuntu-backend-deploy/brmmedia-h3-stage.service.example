@@ -1,0 +1,16 @@
+[Unit]
+Description=BRMMedia MiniMax H3 model staging (resumable download and E: import)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=APP_ROOT
+ExecStart=/usr/bin/env bash APP_ROOT/stage_minimax_h3_models.sh
+Restart=on-failure
+RestartSec=60
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=BRMMedia IndexTTS-2.5 isolated loopback service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brm
+Group=brm
+WorkingDirectory=/srv/brmmedia/releases/h3-23d7084/ubuntu-backend-deploy
+Environment=PYTHONUNBUFFERED=1
+Environment=BRMMEDIA_INDEXTTS25_ENV_FILE=/srv/brmmedia/releases/h3-23d7084/.env.indextts25
+MemoryHigh=12G
+MemoryMax=16G
+MemorySwapMax=0
+OOMScoreAdjust=300
+ExecStart=/srv/brmmedia/releases/h3-23d7084/ubuntu-backend-deploy/start_indextts25.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

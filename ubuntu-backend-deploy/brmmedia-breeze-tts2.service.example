@@ -1,0 +1,24 @@
+[Unit]
+Description=BRMMedia Breeze-TTS2 isolated loopback voice cloning service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brm
+Group=brm
+WorkingDirectory=/srv/brmmedia/releases/h3-23d7084/ubuntu-backend-deploy
+Environment=PYTHONUNBUFFERED=1
+Environment=BREEZE_THREADS=24
+CPUQuota=2400%
+Nice=5
+MemoryMax=12G
+MemorySwapMax=0
+OOMScoreAdjust=100
+ExecStart=/srv/brmmedia/releases/h3-23d7084/ubuntu-backend-deploy/start_breeze_tts2.sh
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# Dependency-light watchdog for the BRMMedia bare-metal Ubuntu runtime.
+# Probes all core media, TTS, LLM, gateway, and Nginx services and only
+# triggers controlled restarts after consecutive failed checks.
+set -euo pipefail
+
+STATE_DIR="${BRMMEDIA_HEALTHCHECK_STATE_DIR:-/var/lib/brmmedia}"
+REPORT_FILE="${BRMMEDIA_HEALTHCHECK_REPORT_FILE:-/srv/brmmedia/artifacts/service-health.txt}"
+FAIL_FILE="$STATE_DIR/healthcheck-failures"
+MEDIA_FAIL_FILE="$STATE_DIR/healthcheck-media-failures"
+NGINX_FAIL_FILE="$STATE_DIR/healthcheck-nginx-failures"
+STRATA_FAIL_FILE="$STATE_DIR/healthcheck-qwen-failures"
+LAN_API_FAIL_FILE="$STATE_DIR/healthcheck-lan-api-failures"
+GATEWAY_FAIL_FILE="$STATE_DIR/healthcheck-qwen-gateway-failures"
+ZONOS3_FAIL_FILE="$STATE_DIR/healthcheck-zonos3-failures"
+BREEZE_FAIL_FILE="$STATE_DIR/healthcheck-breeze-tts2-failures"
+INDEXTTS25_FAIL_FILE="$STATE_DIR/healthcheck-indextts25-failures"
+RESTART_AFTER="${BRMMEDIA_HEALTHCHECK_RESTART_AFTER:-3}"
+HTTP_TIMEOUT="${BRMMEDIA_HEALTHCHECK_HTTP_TIMEOUT:-10}"
+
+mkdir -p "$STATE_DIR" "$(dirname "$REPORT_FILE")"
+
+service_state() {
+  systemctl is-active "$1" 2>/dev/null || true
+}
+
+http_code() {
+  curl --silent --output /dev/null --write-out '%{http_code}' --max-time "$HTTP_TIMEOUT" "$1" || true
+}
+
+media_queue_active() {
+  # Never restart ComfyUI/Gradio merely because a heavy workflow is running.
+  local queue
+  queue="$(curl --silent --max-time 5 http://127.0.0.1:8188/queue 2>/dev/null || true)"
+  printf '%s' "$queue" | grep -Eq '"queue_(running|pending)"[[:space:]]*:[[:space:]]*\[[[:space:]]*[^][:space:]]'
+}
+
+is_ok() {
+  [ "$1" = "active" ]
+}
+
+read_failures() {
+  local fail_file="$1"
+  local failures=0
+  if [ -r "$fail_file" ]; then
+    read -r failures < "$fail_file" || failures=0
+  fi
+  case "$failures" in
+    ''|*[!0-9]*) failures=0 ;;
+  esac
+  printf '%s' "$failures"
+}
+
+write_failures() {
+  printf '%s\n' "$2" > "$1"
+}
+
+append_restart() {
+  if [ "$restarted" = "none" ]; then
+    restarted="$1"
+  else
+    restarted="$restarted,$1"
+  fi
+}
+
+mode="a5000-media-dual-a4000-strata"
+backend_service="baorong-backend"
+strata_service="brmmedia-strata"
+lan_api_service="brmmedia-lan-api"
+gateway_service="brmmedia-qwen-api-gateway"
+zonos3_service="brmmedia-zonos3-mini"
+breeze_service="brmmedia-breeze-tts2"
+indextts25_service="brmmedia-indextts25"
+
+backend_state="$(service_state "$backend_service")"
+nginx_state="$(service_state nginx)"
+strata_state="$(service_state "$strata_service")"
+lan_api_state="$(service_state "$lan_api_service")"
+gateway_state="$(service_state "$gateway_service")"
+zonos3_state="$(service_state "$zonos3_service")"
+breeze_state="$(service_state "$breeze_service")"
+indextts25_state="$(service_state "$indextts25_service")"
+
+gradio_code="$(http_code http://127.0.0.1:9000/gradio_api/info)"
+comfy_code="$(http_code http://127.0.0.1:8188/system_stats)"
+strata_code="$(http_code http://127.0.0.1:8002/health)"
+lan_api_code="$(http_code http://127.0.0.1:9100/api/v1/health)"
+gateway_code="$(http_code http://127.0.0.1:9300/health)"
+zonos3_code="$(http_code http://127.0.0.1:1919/v2/health)"
+breeze_code="$(http_code http://127.0.0.1:9206/health)"
+indextts25_code="$(http_code http://127.0.0.1:9205/health)"
+nginx_http_code="$(http_code http://127.0.0.1/api/v1/health)"
+
+media_problem=false
+nginx_problem=false
+strata_problem=false
+lan_api_problem=false
+gateway_problem=false
+zonos3_problem=false
+breeze_problem=false
+indextts25_problem=false
+problems=()
+
+if ! is_ok "$backend_state" || [ "$gradio_code" != "200" ] || [ "$comfy_code" != "200" ]; then
+  media_problem=true
+  is_ok "$backend_state" || problems+=("$backend_service=$backend_state")
+  [ "$gradio_code" = "200" ] || problems+=("gradio_http=$gradio_code")
+  [ "$comfy_code" = "200" ] || problems+=("comfy_http=$comfy_code")
+fi
+
+if ! is_ok "$nginx_state" || [ "$nginx_http_code" != "200" ]; then
+  nginx_problem=true
+  is_ok "$nginx_state" || problems+=("nginx=$nginx_state")
+  [ "$nginx_http_code" = "200" ] || problems+=("nginx_http=$nginx_http_code")
+fi
+
+if ! is_ok "$strata_state" || [ "$strata_code" != "200" ]; then
+  strata_problem=true
+  is_ok "$strata_state" || problems+=("$strata_service=$strata_state")
+  [ "$strata_code" = "200" ] || problems+=("strata_http=$strata_code")
+fi
+
+if ! is_ok "$lan_api_state" || [ "$lan_api_code" != "200" ]; then
+  lan_api_problem=true
+  is_ok "$lan_api_state" || problems+=("$lan_api_service=$lan_api_state")
+  [ "$lan_api_code" = "200" ] || problems+=("lan_api_http=$lan_api_code")
+fi
+
+if ! is_ok "$gateway_state" || [ "$gateway_code" != "200" ]; then
+  gateway_problem=true
+  is_ok "$gateway_state" || problems+=("$gateway_service=$gateway_state")
+  [ "$gateway_code" = "200" ] || problems+=("qwen_gateway_http=$gateway_code")
+fi
+
+if ! is_ok "$zonos3_state" || [ "$zonos3_code" != "200" ]; then
+  zonos3_problem=true
+  is_ok "$zonos3_state" || problems+=("$zonos3_service=$zonos3_state")
+  [ "$zonos3_code" = "200" ] || problems+=("zonos3_http=$zonos3_code")
+fi
+
+if ! is_ok "$breeze_state" || [ "$breeze_code" != "200" ]; then
+  breeze_problem=true
+  is_ok "$breeze_state" || problems+=("$breeze_service=$breeze_state")
+  [ "$breeze_code" = "200" ] || problems+=("breeze_tts2_http=$breeze_code")
+fi
+
+if systemctl is-enabled --quiet "$indextts25_service" 2>/dev/null; then
+  if ! is_ok "$indextts25_state" || [ "$indextts25_code" != "200" ]; then
+    indextts25_problem=true
+    is_ok "$indextts25_state" || problems+=("$indextts25_service=$indextts25_state")
+    [ "$indextts25_code" = "200" ] || problems+=("indextts25_http=$indextts25_code")
+  fi
+fi
+
+media_failures="$(read_failures "$MEDIA_FAIL_FILE")"
+nginx_failures="$(read_failures "$NGINX_FAIL_FILE")"
+strata_failures="$(read_failures "$STRATA_FAIL_FILE")"
+lan_api_failures="$(read_failures "$LAN_API_FAIL_FILE")"
+gateway_failures="$(read_failures "$GATEWAY_FAIL_FILE")"
+zonos3_failures="$(read_failures "$ZONOS3_FAIL_FILE")"
+breeze_failures="$(read_failures "$BREEZE_FAIL_FILE")"
+indextts25_failures="$(read_failures "$INDEXTTS25_FAIL_FILE")"
+restarted="none"
+
+if [ "$media_problem" = true ]; then
+  media_failures=$((media_failures + 1))
+  if [ "$media_failures" -ge "$RESTART_AFTER" ]; then
+    if media_queue_active; then
+      append_restart "deferred-active-media"
+    else
+      systemctl restart "$backend_service"
+      append_restart "$backend_service"
+      media_failures=0
+    fi
+  fi
+else
+  media_failures=0
+fi
+
+if [ "$nginx_problem" = true ]; then
+  nginx_failures=$((nginx_failures + 1))
+  if [ "$nginx_failures" -ge "$RESTART_AFTER" ]; then
+    systemctl restart nginx
+    append_restart "nginx"
+    nginx_failures=0
+  fi
+else
+  nginx_failures=0
+fi
+
+if [ "$strata_problem" = true ]; then
+  strata_failures=$((strata_failures + 1))
+  if [ "$strata_failures" -ge "$RESTART_AFTER" ]; then
+    if [ "$strata_state" = active ] && \
+       [ "$(( $(awk '{printf "%.0f", $1*1000000}' /proc/uptime) - $(systemctl show "$strata_service" -p ActiveEnterTimestampMonotonic --value) ))" -lt 900000000 ]; then
+      append_restart "deferred-strata-warmup"
+    else
+      systemctl restart "$strata_service"
+      append_restart "$strata_service"
+    fi
+    strata_failures=0
+  fi
+else
+  strata_failures=0
+fi
+
+handle_simple_service() {
+  local problem="$1"
+  local svc="$2"
+  local current_failures="$3"
+  if [ "$problem" = true ]; then
+    current_failures=$((current_failures + 1))
+    if [ "$current_failures" -ge "$RESTART_AFTER" ]; then
+      systemctl restart "$svc"
+      append_restart "$svc"
+      current_failures=0
+    fi
+  else
+    current_failures=0
+  fi
+  printf '%s' "$current_failures"
+}
+
+lan_api_failures="$(handle_simple_service "$lan_api_problem" "$lan_api_service" "$lan_api_failures")"
+gateway_failures="$(handle_simple_service "$gateway_problem" "$gateway_service" "$gateway_failures")"
+zonos3_failures="$(handle_simple_service "$zonos3_problem" "$zonos3_service" "$zonos3_failures")"
+breeze_failures="$(handle_simple_service "$breeze_problem" "$breeze_service" "$breeze_failures")"
+if systemctl is-enabled --quiet "$indextts25_service" 2>/dev/null; then
+  indextts25_failures="$(handle_simple_service "$indextts25_problem" "$indextts25_service" "$indextts25_failures")"
+else
+  indextts25_failures=0
+fi
+
+failures=0
+for count in "$media_failures" "$nginx_failures" "$strata_failures" "$lan_api_failures" "$gateway_failures" "$zonos3_failures" "$breeze_failures" "$indextts25_failures"; do
+  if [ "$count" -gt "$failures" ]; then failures="$count"; fi
+done
+
+write_failures "$MEDIA_FAIL_FILE" "$media_failures"
+write_failures "$NGINX_FAIL_FILE" "$nginx_failures"
+write_failures "$STRATA_FAIL_FILE" "$strata_failures"
+write_failures "$LAN_API_FAIL_FILE" "$lan_api_failures"
+write_failures "$GATEWAY_FAIL_FILE" "$gateway_failures"
+write_failures "$ZONOS3_FAIL_FILE" "$zonos3_failures"
+write_failures "$BREEZE_FAIL_FILE" "$breeze_failures"
+write_failures "$INDEXTTS25_FAIL_FILE" "$indextts25_failures"
+write_failures "$FAIL_FILE" "$failures"
+
+report_tmp="${REPORT_FILE}.tmp"
+{
+  printf 'timestamp=%s\n' "$(date --iso-8601=seconds)"
+  printf 'mode=%s\n' "$mode"
+  printf 'backend_service=%s\n' "$backend_service"
+  printf 'backend_state=%s\n' "$backend_state"
+  printf 'nginx_state=%s\n' "$nginx_state"
+  printf 'nginx_http=%s\n' "$nginx_http_code"
+  printf 'qwen_state=%s\n' "$strata_state"
+  printf 'qwen_http=%s\n' "$strata_code"
+  printf 'gradio_http=%s\n' "$gradio_code"
+  printf 'comfy_http=%s\n' "$comfy_code"
+  printf 'lan_api_state=%s\n' "$lan_api_state"
+  printf 'lan_api_http=%s\n' "$lan_api_code"
+  printf 'qwen_gateway_state=%s\n' "$gateway_state"
+  printf 'qwen_gateway_http=%s\n' "$gateway_code"
+  printf 'zonos3_state=%s\n' "$zonos3_state"
+  printf 'zonos3_http=%s\n' "$zonos3_code"
+  printf 'breeze_tts2_state=%s\n' "$breeze_state"
+  printf 'breeze_tts2_http=%s\n' "$breeze_code"
+  printf 'indextts25_state=%s\n' "$indextts25_state"
+  printf 'indextts25_http=%s\n' "$indextts25_code"
+  printf 'consecutive_failures=%s\n' "$failures"
+  printf 'media_consecutive_failures=%s\n' "$media_failures"
+  printf 'nginx_consecutive_failures=%s\n' "$nginx_failures"
+  printf 'qwen_consecutive_failures=%s\n' "$strata_failures"
+  printf 'lan_api_consecutive_failures=%s\n' "$lan_api_failures"
+  printf 'qwen_gateway_consecutive_failures=%s\n' "$gateway_failures"
+  printf 'zonos3_consecutive_failures=%s\n' "$zonos3_failures"
+  printf 'breeze_tts2_consecutive_failures=%s\n' "$breeze_failures"
+  printf 'indextts25_consecutive_failures=%s\n' "$indextts25_failures"
+  printf 'restart_action=%s\n' "$restarted"
+  printf 'media_queue_active=%s\n' "$(media_queue_active && echo true || echo false)"
+  printf 'problems=%s\n' "${problems[*]:-none}"
+} > "$report_tmp"
+mv -f "$report_tmp" "$REPORT_FILE"
+
+if [ "${#problems[@]}" -ne 0 ]; then
+  printf '[WARN] BRMMedia healthcheck: %s (failure %s/%s; restart=%s)\n' \
+    "${problems[*]}" "$failures" "$RESTART_AFTER" "$restarted" >&2
+  exit 1
+fi
+
+printf '[OK] BRMMedia healthcheck: mode=%s\n' "$mode"

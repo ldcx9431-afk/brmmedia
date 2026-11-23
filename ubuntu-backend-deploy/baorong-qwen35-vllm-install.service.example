@@ -1,0 +1,17 @@
+[Unit]
+Description=Install or resume Qwen3.5 vLLM runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brm
+WorkingDirectory=/srv/brmmedia/app/llm-backend-deploy
+Environment=BRMMEDIA_PROXY_URL=http://192.168.1.254:8888
+ExecStart=/bin/bash /mnt/d/brmmedia/source/install_qwen35_vllm_resume.sh
+Restart=on-failure
+RestartSec=60
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

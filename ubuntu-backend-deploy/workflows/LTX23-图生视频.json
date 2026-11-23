@@ -228,20 +228,6 @@
       "title": "基本调度器"
     }
   },
-  "27": {
-    "inputs": {
-      "start_step": 0,
-      "end_step": -1,
-      "sigmas": [
-        "26",
-        0
-      ]
-    },
-    "class_type": "VisualizeSigmasKJ",
-    "_meta": {
-      "title": "VisualizeSigmasKJ"
-    }
-  },
   "29": {
     "inputs": {
       "add_noise": true,
@@ -264,7 +250,7 @@
         0
       ],
       "sigmas": [
-        "27",
+        "26",
         0
       ],
       "latent_image": [

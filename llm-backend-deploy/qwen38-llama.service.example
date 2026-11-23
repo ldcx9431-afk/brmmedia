@@ -1,0 +1,21 @@
+[Unit]
+Description=Qwen3.8 27B Unsloth GGUF llama.cpp OpenAI-compatible service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=2min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/srv/brmmedia/app/llm-backend-deploy
+ExecStart=/srv/brmmedia/app/llm-backend-deploy/start_qwen38_llama.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=20min
+TimeoutStopSec=2min
+Environment=PYTHONUNBUFFERED=1
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+[Install]
+WantedBy=multi-user.target

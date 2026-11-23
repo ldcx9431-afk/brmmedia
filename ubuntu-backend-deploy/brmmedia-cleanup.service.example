@@ -1,0 +1,14 @@
+[Unit]
+Description=BRMMedia daily temporary media and upload retention cleanup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=brm
+Group=brm
+Environment=COMFYUI_ROOT=/srv/brmmedia/ComfyUI-v039
+Environment=BRM_OUTPUT_DIR=/mnt/d/brmmedia/outputs
+Environment=BRMMEDIA_COMFY_OUTPUT_DIR=/mnt/d/brmmedia/comfyui-output
+Environment=BRMMEDIA_CLEANUP_RETENTION_DAYS=7
+ExecStart=/usr/local/sbin/brmmedia-cleanup
+TimeoutStartSec=300
