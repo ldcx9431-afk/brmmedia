@@ -12,6 +12,8 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 Environment=PYTHONUNBUFFERED=1
+MemorySwapMax=0
+OOMScoreAdjust=-300
 
 [Install]
 WantedBy=multi-user.target

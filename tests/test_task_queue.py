@@ -86,6 +86,79 @@ def _load_webui(output_dir: Path):
 
 
 class TaskQueueTests(unittest.TestCase):
+    def test_audio_parallel_admission_preserves_fifo_and_gpu_exclusivity(self):
+        from collections import deque
+        queue = self.webui.TaskQueue(lambda task: None, max_workers=2,
+                                    parallel_workflows=self.webui.VOICE_PARALLEL_WORKFLOWS)
+        index = self.webui.Task('index', 'index', 'IndexTTS-2.5-语音克隆', {})
+        qwen = self.webui.Task('qwen', 'qwen', self.webui.qwen3_tts.WORKFLOW, {})
+        video = self.webui.Task('video', 'video', 'MiniMaxH3-video', {})
+        queue._running = {index.id: index}
+        queue._pending = deque([index, qwen])
+        self.assertFalse(queue._can_start_next_locked())
+        queue._pending = deque([video, qwen])
+        self.assertFalse(queue._can_start_next_locked())
+        queue._pending.popleft()
+        self.assertTrue(queue._can_start_next_locked())
+        queue._running = {video.id: video}
+        self.assertFalse(queue._can_start_next_locked())
+
+    def test_image_presets_respect_each_models_pixel_and_grid_limits(self):
+        for model, choices in self.webui.IMAGE_SIZE_PRESETS.items():
+            for choice in choices:
+                w,h=self.webui._parse_size(choice)
+                if (w,h) in ((1920,1080),(1080,1920)):
+                    continue  # Full HD uses an aligned latent and an exact final crop.
+                self.assertEqual(w%32,0); self.assertEqual(h%32,0)
+                self.assertLessEqual(w*h,4194304 if model=='h3' else 1048576)
+
+    def test_image_tab_submission_routes_edit_with_selected_dimensions(self):
+        with patch.object(self.webui,'api_submit_h3_image_edit',return_value={'task_id':'test'}) as submit:
+            self.webui.ui_submit_image('h3',True,'保留构图',self.webui.IMAGE_SIZE_PRESETS['h3'][5],6,42,'reference.png')
+            submit.assert_called_once_with('保留构图',2560,1440,42,'reference.png')
+
+    def test_dashboard_cached_request_never_probes_gpu_or_disk(self):
+        snapshot = ('summary', {'value': 'progress', 'visible': True}, 'cards', 'stats', 'table', 'assets')
+        with patch.object(self.webui, '_dashboard_cache', snapshot), patch.object(self.webui, '_dashboard_cache_started', True), patch.object(self.webui, '_build_dashboard_snapshot', side_effect=AssertionError('slow probe in request')):
+            result = self.webui.render_queue()
+            self.assertEqual(result, snapshot)
+            result[1]['value'] = 'client changed'
+            self.assertEqual(snapshot[1]['value'], 'progress')
+
+    def test_failed_dashboard_collection_preserves_last_complete_snapshot(self):
+        snapshot = ('summary', {}, 'cards', 'stats', 'table', 'assets')
+        with patch.object(self.webui, '_dashboard_cache', snapshot), patch.object(self.webui, '_build_dashboard_snapshot', side_effect=OSError('temporary disk failure')):
+            with self.assertRaises(OSError):
+                self.webui._refresh_dashboard_cache()
+            self.assertIs(self.webui._dashboard_cache, snapshot)
+
+    def test_targeted_cancel_preserves_other_pending_and_running_tasks(self):
+        queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+        first = self.webui.Task('first', 'first', 'image', {})
+        second = self.webui.Task('second', 'second', 'image', {})
+        queue.enqueue(first); queue.enqueue(second)
+        self.assertEqual(queue.cancel_task('first')['state'], 'cancelled')
+        self.assertEqual([t.id for t in queue._pending], ['second'])
+        self.assertEqual(queue.task_status('first')['state'], 'cancelled')
+        with queue._lock:
+            queue._pending.clear()
+            second.status = self.webui.TaskStatus.RUNNING
+            queue._running[second.id] = second
+        self.assertEqual(queue.cancel_task('second')['state'], 'cancel_requested')
+        self.assertTrue(second.cancel_event.is_set())
+        self.assertEqual(queue.cancel_task('unknown'), {'error': 'not_found'})
+
+    def test_h3_image_recovery_preserves_dimensions_without_prompt(self):
+        task = self.webui.Task('image-recovery', 'image', 'MiniMaxH3Image-文生图', {'prompt': 'private', 'width': 3072, 'height': 1344, 'seed': 45})
+        task.status = self.webui.TaskStatus.RUNNING
+        task.prompt_id = 'existing-prompt'
+        record = self.webui.TaskQueue._record_from_task(task)
+        restored = self.webui.TaskQueue._task_from_record(record)
+        self.assertTrue(restored.recovered)
+        self.assertEqual(restored.args['width'], 3072)
+        self.assertEqual(restored.args['height'], 1344)
+        self.assertNotIn('prompt', restored.args)
+
     @classmethod
     def setUpClass(cls):
         cls.temp_dir = tempfile.TemporaryDirectory()
@@ -96,6 +169,54 @@ class TaskQueueTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp_dir.cleanup()
         os.environ.pop("BRM_OUTPUT_DIR", None)
+
+    def test_dashboard_delta_only_returns_changed_panels(self):
+        before = ("summary", {"value": "old"}, "", "system", "history", "assets")
+        after = ("summary", {"value": "new"}, "", "system", "history", "assets")
+        with patch.object(self.webui, "render_queue", return_value=after):
+            result = self.webui.refresh_dashboard(before)
+        self.assertEqual(result[1], {"value": "new"})
+        self.assertEqual(result[2:6], ({"__type__": "skip"},) * 4)
+        self.assertEqual(result[-1], after)
+
+    def test_workbench_stage_and_retry_metadata_round_trip(self):
+        mod = self.webui
+        task = mod.Task("workbench-stage", "test", "image_z_image_turbo", {})
+        task.input_sources = ("reference.png",)
+        task.retry_recipe = {"prompt": "test", "size": "512 x 512", "batch": 1}
+        task.stage = "loading_diffusion_model"
+        task.stage_clock = 10.0
+        with patch.object(mod.time, "monotonic", return_value=13.75):
+            mod.TaskQueue._record_stage(task, "sampling")
+        task.status = mod.TaskStatus.ERROR
+        restored = mod.TaskQueue._task_from_record(mod.TaskQueue._record_from_task(task))
+        self.assertEqual(restored.stage_seconds, {"loading_diffusion_model": 3.75})
+        self.assertEqual(restored.input_sources, ("reference.png",))
+        self.assertEqual(restored.retry_recipe, task.retry_recipe)
+        self.assertNotIn("prompt", restored.args)
+
+    def test_catalog_searches_past_recent_gallery_and_paginates(self):
+        mod = self.webui
+        with tempfile.TemporaryDirectory(dir=self.output_dir) as folder:
+            tasks = []
+            for index in range(32):
+                path = Path(folder) / f"fixture-{index}.png"
+                path.touch()
+                tasks.append(mod.Task(
+                    str(index), path.name, "image_z_image_turbo", {},
+                    submit_ts=1700000000 + index, result=[str(path)],
+                ))
+            with patch.object(mod.task_queue, "snapshot", return_value=([], [], tasks)), \
+                 patch.object(mod, "_archive_files", return_value=()), \
+                 patch.object(mod, "_cached_preview_url", return_value=""):
+                result, page = mod.search_workbench_assets("fixture-0.png", "image", "文生图", "", "newest", 2)
+                self.assertIn("共 1 项", result)
+                self.assertIn("生成任务", result)
+                self.assertEqual(page["value"], 1)
+                result, page = mod.search_workbench_assets("", "image", "", "", "oldest", 2)
+                self.assertIn("第 2 / 2 页", result)
+                self.assertNotIn("fixture-0.png", result)
+                self.assertIn("fixture-31.png", result)
 
     def test_pending_task_has_queue_position(self):
         queue = self.webui.TaskQueue(lambda task: None, max_done=5)
@@ -180,6 +301,12 @@ class TaskQueueTests(unittest.TestCase):
         self.assertIn("采样 3/8 步", live_html)
         self.assertIn("38%", live_html)
         self.assertIn("&lt;正在生成&gt;", live_html)
+        self.assertIn('role="progressbar"', live_html)
+        self.assertIn('aria-valuenow="37.50"', live_html)
+        self.assertIn('style="width:37.50%"', live_html)
+        self.assertIn('<details class="brm-live-progress-details" data-task-id="render-progress-1"><summary>查看详情</summary>', live_html)
+        self.assertNotIn('<details open', live_html)
+        self.assertLess(live_html.index('role="progressbar"'),live_html.index('<details'))
         self.assertIn("实时进度", table_md)
         self.assertEqual(
             table_md.splitlines()[1],
@@ -202,6 +329,56 @@ class TaskQueueTests(unittest.TestCase):
 
         self.assertFalse(live_update["visible"])
         self.assertEqual(live_update["value"], "")
+
+    def test_unknown_progress_uses_animation_not_fake_percentage(self):
+        task=self.webui.Task('loading','模型加载','QwenImage21-文生图',{})
+        task.status=self.webui.TaskStatus.RUNNING
+        task.stage='encoding_prompt'
+        html=self.webui._render_live_progress([task])
+        self.assertIn('is-indeterminate',html)
+        self.assertIn('正在编码提示词',html)
+        self.assertNotIn('aria-valuenow=',html)
+
+    def test_single_asset_delete_removes_file_cache_and_history_references(self):
+        queue=self.webui.TaskQueue(lambda task:None,max_done=5)
+        first=self.output_dir/'delete-one.png'; first.write_bytes(b'first')
+        other=self.output_dir/'keep.png'; other.write_bytes(b'keep')
+        task=self.webui.Task('owner','owner','image',{})
+        task.status=self.webui.TaskStatus.DONE;task.result=[str(first),str(other)]
+        duplicate=self.webui.Task('duplicate','duplicate','image',{})
+        duplicate.status=self.webui.TaskStatus.DONE;duplicate.result=[str(first)]
+        queue._done=[task,duplicate]
+        preview=self.webui._thumbnail_path(first,'image');preview.parent.mkdir(parents=True,exist_ok=True);preview.write_bytes(b'preview')
+        archive=self.webui.DOWNLOAD_CACHE_DIR/'BRM-AI-素材-test.zip';archive.parent.mkdir(parents=True,exist_ok=True);archive.write_bytes(b'copy')
+        with patch.object(self.webui,'task_queue',queue):
+            self.assertEqual(self.webui.api_delete_asset('owner',first.name),{'error':'confirmation_required'})
+            self.assertTrue(first.is_file())
+            self.assertEqual(self.webui.api_delete_asset('owner','../keep.png',True),{'error':'not_found'})
+            result=self.webui.api_delete_asset('owner',first.name,True)
+            self.assertTrue(result['deleted'])
+            self.assertEqual(result['warnings'],[])
+            self.assertEqual(self.webui.api_delete_asset('owner',first.name,True),{'error':'not_found'})
+        self.assertFalse(first.exists());self.assertFalse(preview.exists());self.assertFalse(archive.exists())
+        self.assertTrue(other.exists());self.assertEqual(task.result,[str(other)]);self.assertEqual(duplicate.result,[])
+        saved=json.loads((self.output_dir/'task-history.json').read_text(encoding='utf-8'))
+        self.assertNotIn(str(first),json.dumps(saved))
+
+    def test_delete_refuses_files_not_owned_by_terminal_task(self):
+        queue=self.webui.TaskQueue(lambda task:None,max_done=5)
+        existing=self.output_dir/'private.png';existing.write_bytes(b'keep')
+        task=self.webui.Task('running','running','image',{});task.result=[str(existing)]
+        queue._running[task.id]=task
+        with patch.object(self.webui,'task_queue',queue):
+            self.assertEqual(self.webui.api_delete_asset('running',existing.name,True),{'error':'not_found'})
+            self.assertEqual(self.webui.api_delete_asset('unknown',existing.name,True),{'error':'not_found'})
+        self.assertTrue(existing.exists())
+
+    def test_asset_card_has_confirmed_single_delete_action(self):
+        path=self.output_dir/'single.png';path.write_bytes(b'fixture')
+        task=self.webui.Task('owner','owner','image',{})
+        html=self.webui._asset_card_html({'path':path,'task':task,'kind':'image'})
+        self.assertIn('data-brm-action="asset-delete"',html)
+        self.assertIn('data-task-id="owner" data-filename="single.png"',html)
 
     def test_completed_audio_is_present_in_unified_library_without_audio_section(self):
         audio_path = self.output_dir / "direct-listen.mp3"
@@ -343,8 +520,8 @@ class TaskQueueTests(unittest.TestCase):
         self.assertNotIn('close_settings_btn', source)
         self.assertIn('#global-settings-panel {\n    width:100% !important;', source)
         self.assertIn('height:44px !important;', source)
-        self.assertIn('let currentAssetFilter = "all"', source)
-        self.assertIn('applyAssetFilter(currentAssetFilter)', source)
+        self.assertIn('const assetState = { type:"all", query:"", sort:"newest", view:"grid" }', source)
+        self.assertIn('new MutationObserver(applyAssetFilter)', source)
         self.assertIn('const syncShellViewport = () =>', source)
         self.assertIn('window.innerWidth <= 980 ? "132px 14px 34px"', source)
         self.assertIn('class="brm-assets-control-row"', source)
@@ -584,6 +761,18 @@ class TaskQueueTests(unittest.TestCase):
 
         self.assertIn("当前工作台任务仍保持原状态", result)
         self.assertFalse(task.cancel_event.is_set())
+
+    def test_owned_runtimes_cancel_without_global_comfy_interrupt(self):
+        for workflow in (*self.webui.flux3_image.WORKFLOWS,self.webui.qwen3_tts.WORKFLOW):
+            with self.subTest(workflow=workflow):
+                queue = self.webui.TaskQueue(lambda task: None, max_done=5)
+                task = self.webui.Task('owned-runtime', 'owned', workflow, {})
+                task.status = self.webui.TaskStatus.RUNNING
+                queue._running[task.id] = task
+                with patch.object(self.webui,'task_queue',queue), patch.object(self.webui,'interrupt') as interrupt:
+                    self.assertIn('定向中断',self.webui.interrupt_running_tasks())
+                    self.assertTrue(task.cancel_event.is_set())
+                    interrupt.assert_not_called()
 
     def test_history_restores_completed_task_without_leaking_paths(self):
         artifact = self.output_dir / "generated.png"

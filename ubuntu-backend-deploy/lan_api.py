@@ -32,6 +32,8 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+import adaptive_concurrency
+import system_telemetry
 from comfyui_server import BASE as COMFY_BASE, COMFY_ROOT, audio_duration, upload_image
 from flux2_fast_support import SIZES as FLUX2_FAST_SIZES
 from flux3_image_support import SIZES as FLUX3_IMAGE_SIZES
@@ -81,7 +83,10 @@ ASSET_TTL_SECONDS = max(3600, int(os.environ.get("BRM_LAN_API_ASSET_TTL", str(7 
 _API_KEY_DB_LOCK = threading.Lock()
 _LOCAL_TASKS_LOCK = threading.Lock()
 _LOCAL_TASKS: dict[str, dict[str, Any]] = {}
-_ZONOS3_SEMAPHORE = threading.Semaphore(1)
+_CONCURRENCY_CONTROLLER = adaptive_concurrency.AdaptiveConcurrencyController()
+_ZONOS3_GATE = adaptive_concurrency.AdaptiveSlotGate(
+    lambda: int(_CONCURRENCY_CONTROLLER.evaluate()["limits"][adaptive_concurrency.TIER_VOICE_CPU])
+)
 _MAX_LOCAL_TASKS = 500
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
@@ -1114,8 +1119,25 @@ def _prune_local_tasks_locked() -> None:
         _LOCAL_TASKS.pop(tid, None)
 
 
+def _is_local_task_cancelled(task_id: str) -> bool:
+    with _LOCAL_TASKS_LOCK:
+        rec = _LOCAL_TASKS.get(task_id)
+        return rec is None or bool(rec.get("_cancelled"))
+
+
 def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
-    with _ZONOS3_SEMAPHORE:
+    if not _ZONOS3_GATE.acquire(cancel_check=lambda: _is_local_task_cancelled(task_id)):
+        with _LOCAL_TASKS_LOCK:
+            rec = _LOCAL_TASKS.get(task_id)
+            if rec is not None and rec.get("state") in {"queued", "running"}:
+                now = time.time()
+                rec["state"] = "cancelled"
+                rec["status"] = "已取消"
+                rec["queue_position"] = None
+                rec["finished_at"] = now
+                rec["execution"]["stage"] = "interrupted"
+        return
+    try:
         with _LOCAL_TASKS_LOCK:
             rec = _LOCAL_TASKS.get(task_id)
             if rec is None or rec.get("_cancelled"):
@@ -1188,6 +1210,8 @@ def _run_zonos3_worker(task_id: str, payload: dict[str, Any]) -> None:
                     rec["error"] = str(exc)
                     rec["execution"]["stage"] = "failed"
                     rec["execution"]["last_progress_at"] = done_at
+    finally:
+        _ZONOS3_GATE.release()
 
 
 def _submit_zonos3_task(
@@ -1234,6 +1258,8 @@ def _submit_zonos3_task(
         record["routed_from"] = routed_from
     with _LOCAL_TASKS_LOCK:
         _prune_local_tasks_locked()
+        queue_position = sum(1 for r in _LOCAL_TASKS.values() if r.get("state") == "queued") + 1
+        record["queue_position"] = queue_position
         _LOCAL_TASKS[task_id] = record
     thread = threading.Thread(target=_run_zonos3_worker, args=(task_id, payload), daemon=True)
     thread.start()
@@ -1241,7 +1267,7 @@ def _submit_zonos3_task(
         "task_id": task_id,
         "workflow": workflow_name,
         "state": "accepted",
-        "queue_position": 1,
+        "queue_position": queue_position,
         "links": {"status": f"{API_PREFIX}/tasks/{task_id}"},
     }
     if routed_from:
@@ -1395,9 +1421,35 @@ def health() -> JSONResponse:
         except requests.RequestException:
             dependencies[name] = False
     ready = all(dependencies.values())
+    telemetry = system_telemetry.collect_host_telemetry(
+        OUTPUT_DIR,
+        cache_ttl=3.0,
+        self_service="lan_api",
+    )
+    with _LOCAL_TASKS_LOCK:
+        zonos_running = sum(1 for r in _LOCAL_TASKS.values() if r.get("state") == "running")
+        zonos_queued = sum(1 for r in _LOCAL_TASKS.values() if r.get("state") == "queued")
+    concurrency = dict(telemetry.get("concurrency") or {})
+    if concurrency:
+        active = dict(concurrency.get("active") or {})
+        active.update({
+            "zonos3_running": zonos_running,
+            "zonos3_queued": zonos_queued,
+            "zonos3_gate_active": _ZONOS3_GATE.active_count(),
+            "zonos3_effective_limit": _ZONOS3_GATE.current_limit(),
+        })
+        concurrency["active"] = active
+        telemetry = dict(telemetry)
+        telemetry["concurrency"] = concurrency
     return JSONResponse(
         status_code=200 if ready else 503,
-        content={"status": "ok" if ready else "degraded", "dependencies": dependencies},
+        content={
+            "status": "ok" if ready else "degraded",
+            "dependencies": dependencies,
+            "output_dir": str(OUTPUT_DIR),
+            "concurrency": concurrency,
+            "telemetry": telemetry,
+        },
     )
 
 

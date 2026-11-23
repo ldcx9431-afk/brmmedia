@@ -34,6 +34,8 @@ import subprocess
 import hashlib
 import queue as stdlib_queue
 import zipfile
+import logging
+from functools import partial
 from datetime import datetime
 from collections import deque
 from dataclasses import dataclass, field
@@ -42,7 +44,16 @@ from pathlib import Path
 from urllib.parse import quote
 import gradio as gr
 import requests
+import llm_runtime
 import qwen_image21_support as qwen_image21
+import h3_image_support as h3_image
+import flux2_fast_support as flux2_fast
+import flux3_image_support as flux3_image
+import qwen3_tts_support as qwen3_tts
+import voice_presets_support as voice_presets
+import media_runtime_guard
+import system_telemetry
+import adaptive_concurrency
 
 # 所有与 ComfyUI 的通信都来自通用层。
 from comfyui_server import (
@@ -111,9 +122,9 @@ PRIMARY_VIDEO_SECONDS_MIN = 3 if H3_ENABLED else 2
 # acceptance.  The UI/API still default to the quicker profiles.
 PRIMARY_VIDEO_SECONDS_MAX = 15 if H3_ENABLED else 360
 PRIMARY_VIDEO_SECONDS_DEFAULT = 5
-TASK_HISTORY_PATH = OUTPUT_DIR / "task-history.json"
+TASK_HISTORY_PATH = Path(os.environ.get("BRM_TASK_HISTORY_PATH", OUTPUT_DIR / "task-history.json")).expanduser().resolve()
 # 自定义全屏查看器仅允许读取任务产物目录；不会因此暴露宿主机其它路径。
-gr.set_static_paths(paths=[OUTPUT_DIR])
+gr.set_static_paths(paths=[OUTPUT_DIR, voice_presets.ROOT])
 
 # 历史恢复时只扫描实际可展示或可下载的媒体，避免把日志等运行文件放进任务列表。
 PERSISTABLE_MEDIA_EXTS = {
@@ -147,7 +158,7 @@ DONE_TASKS_MAX   = 200      # 已完成任务最多保留多少条(防止长时�
 
 # 首页素材卡片需要的派生预览均放在输出目录的私有缓存中。原始素材和
 # task-history 不会被修改；缓存路径也绝不参与任务产物扫描。
-MEDIA_CACHE_DIR = OUTPUT_DIR / ".brm-cache"
+MEDIA_CACHE_DIR = Path(os.environ.get("BRM_MEDIA_CACHE_DIR", OUTPUT_DIR / ".brm-cache")).expanduser().resolve()
 THUMB_CACHE_DIR = MEDIA_CACHE_DIR / "thumbnails"
 DOWNLOAD_CACHE_DIR = MEDIA_CACHE_DIR / "downloads"
 DOWNLOAD_CACHE_KEEP = 10
@@ -184,8 +195,8 @@ QWEN_STARTUP_RETRY_SECONDS = max(
 def qwen_runtime_label() -> str:
     """Return a truthful, concise label for the locally selected Qwen service."""
     model = QWEN_MODEL.lower()
-    if "qwen38" in model or "qwen3.8" in model:
-        return "Qwen3.8-27B · 双 A4000"
+    if "strata" in model or "qwen38" in model or "qwen3.8" in model:
+        return "Strata · Qwen3.8-Flash-Next (双 A4000)"
     if "qwen35" in model or "qwen3.5" in model:
         return "Qwen3.5-4B · A4000 冷备"
     return QWEN_MODEL
@@ -249,9 +260,14 @@ def config_int(name, default=1, min_value=1, max_value=4):
 # must never overlap another ComfyUI workflow on that GPU.  The regular LTX
 # mode keeps the existing user-configurable range, while H3 makes the queue a
 # deliberate single-worker queue rather than merely a UI recommendation.
-MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1" else 4
+MAX_MEDIA_QUEUE_CONCURRENCY = 1 if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1" or h3_image.runtime_ready() else 4
 QUEUE_CONCURRENCY = config_int(
     "queue_concurrency", default=1, min_value=1, max_value=MAX_MEDIA_QUEUE_CONCURRENCY
+)
+VOICE_PARALLEL_WORKFLOWS = frozenset({"IndexTTS-2.5-语音克隆", "Zonos3-语音克隆", qwen3_tts.WORKFLOW})
+VOICE_PARALLEL_ENABLED = (
+    MAX_MEDIA_QUEUE_CONCURRENCY == 1
+    and os.environ.get("BRM_VOICE_PARALLEL") == "1"
 )
 DONE_TASKS_MAX = config_int("done_tasks_max", default=DONE_TASKS_MAX, min_value=20, max_value=500)
 DONE_GALLERY_MAX = config_int("done_gallery_max", default=DONE_GALLERY_MAX, min_value=24, max_value=100)
@@ -301,6 +317,10 @@ class Task:
     progress: float | None = None
     last_progress_ts: float = 0.0
     recovered: bool = False
+    input_sources: tuple[str, ...] = ()
+    retry_recipe: dict = field(default_factory=dict)
+    stage_seconds: dict[str, float] = field(default_factory=dict)
+    stage_clock: float = field(default=0.0, repr=False)
     # 每个任务独立的取消信号。不能复用队列生命周期的 stop 事件，否则一次
     # 用户中断会让 worker 退出并影响之后的新任务。
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -318,15 +338,20 @@ def make_task_name(wfname: str) -> str:
 class TaskQueue:
     """
     Gradio 程序自己的任务队列(不是 ComfyUI 的队列)。
-    支持多个后台 worker、FIFO 执行。worker 数由启动器配置 queue_concurrency 控制;
-    队列空时新任务一进来就会被立即取走执行。
+    支持多个后台 worker、按任务权重与硬件负载动态并发调度及防饥饿控制。
     通过传入的 processor(task) 实际执行任务,所以队列本身与模态无关。
     """
 
-    def __init__(self, processor, max_done: int = DONE_TASKS_MAX, max_workers: int = 1):
+    def __init__(self, processor, max_done: int = DONE_TASKS_MAX, max_workers: int = 1,
+                 parallel_workflows=frozenset(), concurrency_controller=None):
         self._processor = processor
         self._max_done = max_done
-        self._max_workers = max(1, int(max_workers or 1))
+        self._concurrency_controller = concurrency_controller
+        initial_workers = max(1, int(max_workers or 1))
+        if concurrency_controller is not None:
+            initial_workers = max(initial_workers, concurrency_controller.worker_pool_size())
+        self._max_workers = initial_workers
+        self._parallel_workflows = parallel_workflows
         restored = self._load_history()
         self._pending: deque[Task] = deque(sorted(
             (task for task in restored if task.status == TaskStatus.PENDING),
@@ -363,6 +388,9 @@ class TaskQueue:
             "total_steps": task.total_steps,
             "progress": task.progress,
             "last_progress_ts": task.last_progress_ts,
+            "input_sources": list(task.input_sources),
+            "retry_recipe": task.retry_recipe,
+            "stage_seconds": task.stage_seconds,
             "effective_settings": {
                 key: task.args[key]
                 for key in TASK_EFFECTIVE_SETTING_KEYS
@@ -414,7 +442,7 @@ class TaskQueue:
                 done_ts=float(record.get("done_ts", 0.0)),
                 result=result,
                 error=(
-                    "后端重启时任务尚无 ComfyUI prompt_id，无法安全重放。"
+                    "后端重启时任务尚未取得可恢复的执行记录，无法安全重放，请核对后重新提交。"
                     if status == TaskStatus.ERROR and record.get("status") in {
                         TaskStatus.PENDING.value, TaskStatus.RUNNING.value,
                     } and not prompt_id
@@ -428,6 +456,12 @@ class TaskQueue:
                 progress=record.get("progress"),
                 last_progress_ts=float(record.get("last_progress_ts", 0.0)),
                 recovered=recovered,
+                input_sources=tuple(str(name) for name in record.get("input_sources", []) if isinstance(name, str)),
+                retry_recipe=dict(record.get("retry_recipe") or {}),
+                stage_seconds={
+                    key: seconds for key, seconds in (record.get("stage_seconds") or {}).items()
+                    if isinstance(seconds, (int, float)) and math.isfinite(seconds) and seconds >= 0
+                },
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -494,7 +528,7 @@ class TaskQueue:
         records = [self._record_from_task(task) for task in tasks]
         payload = {"version": 2, "tasks": records}
         try:
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            TASK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
             temp_path = TASK_HISTORY_PATH.with_name(f".{TASK_HISTORY_PATH.name}.{os.getpid()}.tmp")
             temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             temp_path.replace(TASK_HISTORY_PATH)
@@ -543,6 +577,27 @@ class TaskQueue:
             for task in running:
                 task.cancel_event.set()
             return running
+
+    def cancel_task(self, task_id: str) -> dict:
+        with self._lock:
+            for task in list(self._pending):
+                if task.id == task_id:
+                    self._pending.remove(task)
+                    task.cancel_event.set()
+                    task.status = TaskStatus.CANCELLED
+                    self._record_stage(task, "interrupted")
+                    task.done_ts = time.time()
+                    task.error = "用户请求取消排队任务"
+                    self._done.insert(0, task)
+                    del self._done[self._max_done:]
+                    self._save_history()
+                    return {"task_id": task_id, "state": "cancelled"}
+            if task_id in self._running:
+                self._running[task_id].cancel_event.set()
+                return {"task_id": task_id, "state": "cancel_requested"}
+            if any(task.id == task_id for task in self._done):
+                return {"task_id": task_id, "state": "already_finished"}
+        return {"error": "not_found"}
 
     def task_status(self, task_id: str) -> dict:
         """Return a safe, JSON-ready status record without leaking output paths."""
@@ -600,6 +655,7 @@ class TaskQueue:
                     "progress": task.progress,
                     "last_progress_at": task.last_progress_ts or None,
                     "recovered_after_restart": task.recovered,
+                    "stage_seconds": dict(task.stage_seconds),
                 },
                 "effective_settings": {
                     key: task.args[key]
@@ -613,6 +669,16 @@ class TaskQueue:
         with self._lock:
             return list(self._pending), list(self._running.values()), list(self._done)
 
+    @staticmethod
+    def _record_stage(task: Task, stage: str) -> None:
+        if stage == task.stage:
+            return
+        now = time.monotonic()
+        if task.stage_clock:
+            task.stage_seconds[task.stage] = task.stage_seconds.get(task.stage, 0.0) + now - task.stage_clock
+        task.stage_clock = now
+        task.stage = stage
+
     def update_execution(self, task: Task, event: dict) -> None:
         """Apply and durably store a ComfyUI lifecycle/progress event."""
         now = time.time()
@@ -620,7 +686,7 @@ class TaskQueue:
             if "prompt_id" in event:
                 task.prompt_id = str(event.get("prompt_id") or "")
             if event.get("stage"):
-                task.stage = str(event["stage"])
+                self._record_stage(task, str(event["stage"]))
             if "node_id" in event:
                 task.node_id = event.get("node_id")
             if "current_step" in event:
@@ -687,69 +753,148 @@ class TaskQueue:
 
     def _loop(self, worker_index: int = 1) -> None:
         while not self._stop.is_set():
+            snapshot = None
+            if self._concurrency_controller is not None:
+                with self._lock:
+                    has_pending = bool(self._pending)
+                if has_pending:
+                    snapshot = self._concurrency_controller.evaluate()
             task = None
             with self._lock:
                 if worker_index in self._retire_worker_ids:
                     self._retire_worker_ids.discard(worker_index)
                     self._workers.pop(worker_index, None)
                     return
-                if self._pending:
-                    task = self._pending.popleft()
+                task = self._pop_next_task_locked(snapshot)
+                if task is not None:
                     task.status = TaskStatus.RUNNING
                     task.stage = "recovering" if task.recovered else "building_workflow"
                     task.start_ts = time.time()
+                    task.stage_clock = time.monotonic()
                     self._running[task.id] = task
                     self._save_history()
+                    if self._pending:
+                        self._wake.set()
             if task is None:
-                # 队列空,等待新任务唤醒(最多等 0.5 秒再检查一次)。
+                # 队列空或当前并发水位已满,等待新任务或任务结束唤醒(最多等 0.5 秒再检查一次)。
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
                 continue
+            status, stage, error = TaskStatus.ERROR, "failed", "工作线程提前退出"
             try:
                 self._processor(task)
-                task.status = TaskStatus.DONE
-                task.stage = "completed"
-                task.progress = 1.0
-            except TimeoutError as e:
-                task.status, task.error = TaskStatus.TIMEOUT, str(e)
-                task.stage = "timed_out"
+                status, stage, error = TaskStatus.DONE, "completed", ""
+            except TimeoutError as exc:
+                status, stage, error = TaskStatus.TIMEOUT, "timed_out", str(exc)
                 print(f"[Queue] 任务「{task.name}」已超时，已请求中断 ComfyUI")
-            except Exception as e:
+            except Exception as exc:
                 if task.cancel_event.is_set():
-                    task.status, task.error = TaskStatus.CANCELLED, "用户请求中断"
-                    task.stage = "interrupted"
+                    status, stage, error = TaskStatus.CANCELLED, "interrupted", "用户请求中断"
                     print(f"[Queue] 任务「{task.name}」已中断")
                 else:
-                    task.status, task.error = TaskStatus.ERROR, str(e)
-                    task.stage = "failed"
-                    print(f"[Queue] 任务「{task.name}」失败: {e}")
+                    status, stage, error = TaskStatus.ERROR, "failed", str(exc)
+                    print(f"[Queue] 任务「{task.name}」失败: {exc}")
             finally:
-                task.done_ts = time.time()
                 with self._lock:
+                    task.done_ts = time.time()
+                    self._record_stage(task, stage)
+                    task.status, task.error = status, error
+                    if status == TaskStatus.DONE:
+                        task.progress = 1.0
                     self._running.pop(task.id, None)
                     self._done.insert(0, task)
                     # 只保留最近的若干条,避免列表与界面表格无限膨胀。
                     del self._done[self._max_done:]
                     self._save_history()
+                    self._wake.set()
 
-
-# 标记是否已经为 ComfyUI 掉线弹过一次提示,避免每轮检测都重复弹窗。
-_health_warned = False
-
-
-def check_health() -> None:
-    """定时检测 ComfyUI 存活;掉线时弹出一次错误提示,恢复后重新武装。"""
-    global _health_warned
-    if is_alive():
-        _health_warned = False
-        return
-    if not _health_warned:
-        _health_warned = True
-        raise gr.Error(
-            "后台检测到 ComfyUI 进程已退出或 API 不再响应。"
-            "请查看终端报错或 comfyui_runtime.log,修复后重启本程序。"
-            , duration=0
+    def _can_start_next_locked(self) -> bool:
+        if not self._pending:
+            return False
+        if not self._parallel_workflows or not self._running:
+            return True
+        next_workflow = self._pending[0].workflow_name
+        running_workflows = {task.workflow_name for task in self._running.values()}
+        return (
+            next_workflow in self._parallel_workflows
+            and running_workflows <= self._parallel_workflows
+            and next_workflow not in running_workflows
         )
+
+    def _pop_next_task_locked(self, snapshot: dict | None = None) -> Task | None:
+        """Select next admissible task using weight tiers, hardware limits, and anti-starvation."""
+        if not self._pending:
+            return None
+        if self._concurrency_controller is None:
+            if self._can_start_next_locked():
+                return self._pending.popleft()
+            return None
+        if snapshot is None:
+            snapshot = self._concurrency_controller.evaluate()
+        if not snapshot.get("adaptive_enabled", True):
+            if self._can_start_next_locked():
+                return self._pending.popleft()
+            return None
+
+        limits = snapshot.get("limits") or {}
+        voice_limit = int(limits.get(adaptive_concurrency.TIER_VOICE_CPU, 1))
+        image_light_limit = int(limits.get(adaptive_concurrency.TIER_IMAGE_LIGHT, 1))
+        audio_gpu_limit = int(limits.get(adaptive_concurrency.TIER_AUDIO_GPU, 1))
+
+        running_tasks = list(self._running.values())
+        running_voice_cpu = [
+            t for t in running_tasks
+            if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_CPU
+        ]
+        running_gpu = [
+            t for t in running_tasks
+            if adaptive_concurrency.classify_workflow(t.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+        ]
+        running_gpu_exclusive = any(
+            adaptive_concurrency.classify_workflow(t.workflow_name).exclusive
+            for t in running_gpu
+        )
+
+        # CPU voice lane (Zonos3-mini): decoupled from GPU0 queue.
+        voice_candidate = None
+        if len(running_voice_cpu) < voice_limit:
+            for pending_task in self._pending:
+                if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier == adaptive_concurrency.TIER_VOICE_CPU:
+                    voice_candidate = pending_task
+                    break
+
+        # GPU lane: inspect oldest pending GPU task first to prevent heavy-task starvation.
+        gpu_candidate = None
+        if not running_gpu_exclusive:
+            head_gpu = next(
+                (
+                    pending_task for pending_task in self._pending
+                    if adaptive_concurrency.classify_workflow(pending_task.workflow_name).tier != adaptive_concurrency.TIER_VOICE_CPU
+                ),
+                None,
+            )
+            if head_gpu is not None:
+                profile = adaptive_concurrency.classify_workflow(head_gpu.workflow_name)
+                if profile.exclusive or not profile.shares_comfy_light_lease:
+                    if len(running_gpu) == 0:
+                        gpu_candidate = head_gpu
+                elif all(adaptive_concurrency.classify_workflow(t.workflow_name).shares_comfy_light_lease for t in running_gpu):
+                    tier_limit = audio_gpu_limit if profile.tier == adaptive_concurrency.TIER_AUDIO_GPU else image_light_limit
+                    effective_limit = min(image_light_limit, tier_limit)
+                    if len(running_gpu) < effective_limit:
+                        gpu_candidate = head_gpu
+
+        chosen = None
+        if voice_candidate is not None and gpu_candidate is not None:
+            chosen = gpu_candidate if gpu_candidate.submit_ts <= voice_candidate.submit_ts else voice_candidate
+        elif gpu_candidate is not None:
+            chosen = gpu_candidate
+        elif voice_candidate is not None:
+            chosen = voice_candidate
+
+        if chosen is not None:
+            self._pending.remove(chosen)
+        return chosen
 
 
 CUSTOM_CSS = """
@@ -1014,6 +1159,14 @@ footer {
     background: #fbfdfe;
 }
 #qwen-config-panel { align-self: stretch; }
+#llm-switch-toolbar {
+    padding: 14px;
+    border: 1px solid var(--brm-line);
+    border-radius: 12px;
+    margin-bottom: 14px;
+}
+#llm-switch-toolbar button { min-height: 44px; cursor: pointer; }
+#llm-switch-toolbar button:focus-visible { outline: 2px solid var(--brm-coral); outline-offset: 3px; }
 #q-table-md table,
 #q-table-md th,
 #q-table-md td { border-color: #dbe4eb !important; }
@@ -1032,9 +1185,13 @@ button.primary:hover {
 #q-live-progress {
     margin: 8px 0 10px;
 }
+.brm-asset-delete { position:absolute; left:7px; top:7px; border:1px solid #efb4ac; border-radius:6px; background:#fff; color:#b42318; font-size:.75rem; padding:3px 7px; cursor:pointer; }
+.brm-asset-delete:disabled { opacity:.5; cursor:wait; }
+.brm-asset-grid.is-list .brm-asset-delete { position:static; margin-right:8px; flex-shrink:0; }
+#brm-asset-status { color:#b42318; font-size:.85rem; }
 #q-live-progress .brm-live-progress-list {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
     gap: 8px;
 }
 #q-live-progress .brm-live-progress-card {
@@ -1067,6 +1224,20 @@ button.primary:hover {
     margin-top: 5px;
     color: #765c57;
     font-size: 0.86rem;
+}
+#q-live-progress .brm-live-progress-status {
+    margin-top: 5px;
+    color: #765c57;
+    font-size: 0.86rem;
+}
+#q-live-progress .brm-live-progress-details { margin-top: 7px; }
+#q-live-progress .brm-live-progress-details summary {
+    cursor: pointer;
+    color: #765c57;
+    font-size: 0.8rem;
+}
+@media (prefers-reduced-motion: reduce) {
+    #q-live-progress .brm-live-progress-fill { animation: none !important; transition: none; }
 }
 #q-live-progress .brm-live-progress-track {
     height: 8px;
@@ -1518,12 +1689,51 @@ html[data-brm-section="tools"] #asset-center { display: initial !important; }
 .brm-task-progress em { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--brm-coral),var(--brm-orange)); }
 .brm-task-card footer { display:flex; justify-content:space-between; gap:7px; margin-top:8px; color:#7a8796; font-size:.7rem; white-space:nowrap; }
 .brm-empty-tasks { grid-column:1/-1; padding:22px; border:1px dashed #ccd8e1; border-radius:11px; color:#65758b; text-align:center; }
-#dashboard-system-status { min-width:265px; }
-.brm-system-status { height:100%; box-sizing:border-box; padding:14px; border:1px solid #dfe7ee; border-radius:12px; background:#fbfdfe; }
-.brm-system-status h3 { margin:0 0 9px; color:#23364a; font-size:.95rem; }
-.brm-system-status div { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid #e9eef2; }
-.brm-system-status div:last-child { border-bottom:0; }
-.brm-system-status span { color:#69798b; font-size:.78rem; }.brm-system-status strong { max-width:64%; overflow:hidden; color:#253b50; font-size:.78rem; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+#dashboard-system-status { min-width:320px; display:flex; flex-direction:column; }
+#dashboard-system-status > .wrap,
+#dashboard-system-status > .form,
+#dashboard-system-status .html-container,
+#dashboard-system-status .prose { flex:1 1 auto; display:flex; flex-direction:column; height:100%; }
+.brm-system-status { height:100%; box-sizing:border-box; padding:11px 13px; border:1px solid #dfe7ee; border-radius:12px; background:#fbfdfe; display:flex; flex-direction:column; gap:8px; }
+.brm-sys-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-bottom:6px; border-bottom:1px solid rgba(226,184,167,.45); }
+.brm-sys-head h3 { margin:0; color:#23364a; font-size:.94rem; font-weight:800; }
+.brm-sys-badge { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:99px; font-size:.69rem; font-weight:750; background:#e8f7ef; color:#137345; border:1px solid #bfe6d1; white-space:nowrap; }
+.brm-sys-badge.is-warn { background:#fff2e5; color:#b85814; border-color:#f2cbab; }
+.brm-sys-badge.is-busy { background:#e7f5f8; color:#0a6c7a; border-color:#b8dfe6; }
+.brm-sys-section { display:flex; flex-direction:column; gap:5px; padding-top:5px; border-top:1px dashed rgba(212,175,160,.45); }
+.brm-sys-section:first-of-type { border-top:0; padding-top:0; }
+.brm-sys-grid-2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.brm-sys-stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+.brm-sys-stat { padding:5px 4px; border-radius:7px; background:rgba(255,255,255,.84); border:1px solid rgba(232,196,182,.55); display:flex; flex-direction:column; align-items:center; gap:1px; }
+.brm-sys-stat span { color:#7a635e; font-size:.65rem; font-weight:650; white-space:nowrap; }
+.brm-sys-stat b { color:#23364a; font-size:.76rem; font-weight:800; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.brm-sys-title { font-size:.7rem; font-weight:800; color:#8b5f52; letter-spacing:.02em; }
+.brm-sys-metric { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.brm-sys-row { display:flex; align-items:baseline; justify-content:space-between; gap:6px; font-size:.73rem; line-height:1.28; }
+.brm-sys-row-right { display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.brm-sys-label { color:#5d6e80; font-weight:650; white-space:nowrap; }
+.brm-sys-val { color:#23364a; font-weight:750; text-align:right; font-variant-numeric:tabular-nums; }
+.brm-sys-val-left { text-align:left !important; font-size:.71rem; }
+.brm-sys-sub { color:#7a8796; font-size:.68rem; font-variant-numeric:tabular-nums; }
+.brm-sys-bar { height:4px; border-radius:99px; background:#f2e2da; overflow:hidden; }
+.brm-sys-bar > i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#ea6a47,#f29b4b); transition:width .25s ease; }
+.brm-sys-bar.is-ok > i { background:linear-gradient(90deg,#189c63,#36b97d); }
+.brm-sys-bar.is-warn > i { background:linear-gradient(90deg,#d97706,#f59e0b); }
+.brm-sys-bar.is-hot > i { background:linear-gradient(90deg,#c83344,#ea5455); }
+.brm-sys-gpu { padding:5px 8px; border-radius:8px; background:rgba(255,255,255,.8); border:1px solid rgba(232,196,182,.55); display:flex; flex-direction:column; gap:2px; }
+.brm-sys-gpu-top { display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:.72rem; }
+.brm-sys-gpu-top b { color:#24374a; font-weight:750; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.brm-sys-gpu-top span { color:#c24f2c; font-weight:750; font-variant-numeric:tabular-nums; white-space:nowrap; flex:0 0 auto; }
+.brm-telemetry-details { border:1px dashed rgba(212,175,160,.65); border-radius:8px; padding:6px 8px; background:rgba(255,255,255,.72); margin-top:auto; }
+.brm-telemetry-details summary { cursor:pointer; font-size:.72rem; font-weight:750; color:#8b5f52; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:6px; user-select:none; }
+.brm-telemetry-details summary::-webkit-details-marker { display:none; }
+.brm-telemetry-details summary::after { content:"▾"; font-size:.76rem; color:#a46c5c; transition:transform .16s ease; }
+.brm-telemetry-details[open] summary::after { transform:rotate(180deg); }
+.brm-telemetry-details-body { display:flex; flex-direction:column; gap:6px; margin-top:7px; padding-top:7px; border-top:1px dashed rgba(212,175,160,.45); }
+.brm-sys-pills { display:flex; flex-wrap:wrap; gap:4px; margin-top:2px; }
+.brm-sys-pill { display:inline-flex; align-items:center; gap:4px; padding:2px 6px; border-radius:6px; font-size:.67rem; font-weight:700; border:1px solid #d5e8dc; background:#f3fbf6; color:#157044; }
+.brm-sys-pill.is-off { border-color:#f0c6ca; background:#fff3f4; color:#b42c3b; }
+.brm-sys-pill i { width:5px; height:5px; border-radius:50%; background:currentColor; }
 #task-history-accordion { margin-top:14px; border:1px solid #e1e8ef; border-radius:10px; overflow:hidden; }
 #task-history-accordion > button { background:#f8fafc !important; }
 #task-center-body { margin-top:7px; }
@@ -1950,7 +2160,7 @@ html[data-brm-section="settings"] #global-settings-panel::before { display:none 
 #global-settings-panel label span { color:#654c48 !important; }
 
 /* API key management is a normal workspace page. Plaintext is revealed only
-   in the one-time result area after create/rotate and is never rendered in
+   in the temporary result area after create/rotate/reveal and is never rendered in
    the list. */
 #key-management-panel {
     position:relative !important;
@@ -2055,9 +2265,14 @@ html[data-brm-section="history"] #q-table-md { height:620px !important; }
 html[data-brm-section="history"] #home-task-overview { display:block !important; }
 html[data-brm-section="history"] #home-task-main { width:100% !important; max-width:none !important; }
 html[data-brm-section="home"] #dashboard-task-cards { display:none !important; }
-html[data-brm-section="home"] #task-history-accordion { margin-top:4px !important; }
+html[data-brm-section="home"] #home-task-main { display:flex !important; flex-direction:column !important; }
+html[data-brm-section="home"] #task-history-accordion { flex:1 1 auto !important; display:flex !important; flex-direction:column !important; margin-top:0 !important; }
 html[data-brm-section="home"] #task-history-accordion > button { display:none !important; }
-html[data-brm-section="home"] #q-table-md { height:276px !important; }
+html[data-brm-section="home"] #task-history-accordion > .wrap,
+html[data-brm-section="home"] #task-history-accordion [data-testid="accordion-content"] { flex:1 1 auto !important; display:flex !important; flex-direction:column !important; height:100% !important; }
+html[data-brm-section="home"] #task-center-body { flex:1 1 auto !important; height:100% !important; margin-top:0 !important; align-items:stretch !important; }
+html[data-brm-section="home"] #task-center-body > div:first-child { display:flex !important; flex-direction:column !important; }
+html[data-brm-section="home"] #q-table-md { flex:1 1 auto !important; min-height:368px !important; height:100% !important; max-height:460px !important; }
 
 /* Unified real asset library, including audio on every relevant page. */
 .brm-assets-header h3 { color:var(--brm-text) !important; }
@@ -2151,7 +2366,100 @@ body,
     --table-odd-background-fill:#fffaf7 !important;
     --table-row-focus:#fff0e9 !important;
     --table-text-color:#3a2d2d !important;
+    --code-background-fill:#fff3e6 !important;
+    --code-border-color:#fed7aa !important;
+    --checkbox-background-color:#ffffff !important;
+    --checkbox-border-color:#e2c5bb !important;
+    --block-label-background-fill:#fff7f2 !important;
+    --block-label-text-color:#654c48 !important;
 }
+code,
+.prose code,
+.markdown-body code,
+.gradio-container code,
+span code,
+p code,
+li code,
+td code {
+    background:#fff3e6 !important;
+    color:#9a3412 !important;
+    border:1px solid #fed7aa !important;
+    border-radius:6px !important;
+    padding:2px 7px !important;
+    font-weight:600 !important;
+    font-size:.88em !important;
+    font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+}
+pre,
+.prose pre,
+.markdown-body pre,
+.gradio-container pre {
+    background:#faf6f1 !important;
+    color:#292524 !important;
+    border:1px solid #e7ded3 !important;
+    border-radius:10px !important;
+    padding:12px 14px !important;
+    overflow-x:auto !important;
+}
+pre code,
+.prose pre code,
+.markdown-body pre code,
+.gradio-container pre code {
+    background:transparent !important;
+    color:#292524 !important;
+    border:0 !important;
+    padding:0 !important;
+    font-weight:500 !important;
+    font-size:.9em !important;
+}
+.brm-inline-status,
+#task-operation-status {
+    border:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+    padding:0 !important;
+    margin:0 !important;
+    min-height:0 !important;
+}
+.brm-inline-status:has(.prose:empty),
+#task-operation-status:has(.prose:empty) {
+    display:none !important;
+}
+.brm-inline-status .prose:not(:empty),
+#task-operation-status .prose:not(:empty) {
+    padding:8px 12px !important;
+    border:1px solid var(--brm-border) !important;
+    border-radius:8px !important;
+    background:#fff7f2 !important;
+    color:#523b37 !important;
+    font-size:.88rem !important;
+}
+#global-settings-panel input,
+#global-settings-panel textarea {
+    background:#ffffff !important;
+    color:#3a2d2d !important;
+    border-color:#e8cbc1 !important;
+}
+#llm-switch-toolbar {
+    background:#fffdfb !important;
+    border-color:var(--brm-border) !important;
+}
+#qwen-chat-panel,
+#qwen-config-panel {
+    background:#fffdfb !important;
+    border-color:var(--brm-border) !important;
+}
+html:not([data-brm-section="history"]) #brm-history-panel,
+html:not([data-brm-section="assets"]) #brm-catalog-panel { display:none !important; }
+html[data-brm-section="history"] #q-table-md,
+html[data-brm-section="assets"] #dashboard-assets .brm-asset-library { display:none !important; }
+.brm-history-item { border-bottom:1px solid var(--brm-line); padding:10px 4px; }
+.brm-history-item summary { cursor:pointer; }
+.brm-history-item p { overflow-wrap:anywhere; margin:.45rem 0; }
+.brm-history-error { color:#a12e20; }
+.brm-history-item button, .brm-asset-task { color:var(--brm-primary-deep); text-decoration:underline; cursor:pointer; }
+.brm-asset-task { position:absolute; bottom:5px; left:8px; z-index:2; background:#fff; border-radius:4px; padding:2px 5px; font-size:.7rem; }
+.brm-catalog-grid { height:auto !important; max-height:none !important; }
 #q-table-md,
 #q-table-md table,
 #q-table-md tbody,
@@ -2189,6 +2497,20 @@ body,
         color:var(--brm-text) !important;
     }
 }
+
+.brm-dashboard-viewer .brm-viewer-bar > span { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.brm-dashboard-viewer .brm-viewer-bar a,
+.brm-dashboard-viewer .brm-viewer-bar button {
+  box-sizing:border-box !important; display:inline-flex !important; align-items:center; justify-content:center;
+  width:112px !important; min-width:112px !important; max-width:112px !important;
+  height:42px !important; min-height:42px !important; padding:0 12px !important;
+  margin:0 !important; border:1px solid transparent !important; border-radius:8px !important;
+  font-size:14px !important; line-height:1 !important; font-weight:700 !important;
+}
+.brm-dashboard-viewer .brm-viewer-bar a { background:#ee5947 !important; color:#fff !important; }
+.brm-dashboard-viewer .brm-viewer-bar button { background:#f1f5f9 !important; color:#334155 !important; border-color:#cbd5e1 !important; }
+.brm-dashboard-viewer .brm-viewer-bar a:hover { background:#d94738 !important; }
+.brm-dashboard-viewer .brm-viewer-bar button:hover { background:#e2e8f0 !important; }
 """
 
 
@@ -2206,17 +2528,13 @@ VIDEO_EXTS   = {".mp4", ".webm", ".mov", ".mkv", ".avi"}   # .gif 已在 IMAGE_E
 AUDIO_EXTS   = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg"}
 GALLERY_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
-# ACE-Step 的下拉选项必须反映实际存在的 DiT 权重。此前固定展示
-# base/sft，即使服务器只有 turbo，也会让用户提交后才得到 ComfyUI 400。
+# ACE-Step 的下拉选项必须反映实际存在的 DiT 权重。已下线 sft，仅保留 turbo 与 base，
+# 默认优先 turbo 8 步极速生成，base 作为高品质备选。
 ACE_STEP_MODEL_FILENAMES = {
     "turbo": "acestep/acestep_v1.5_xl_turbo_bf16.safetensors",
     "base": "acestep/acestep_v1.5_xl_base_bf16.safetensors",
-    "sft": "acestep/acestep_v1.5_xl_sft_bf16.safetensors",
 }
-# Base is the normal high-quality ACE-Step path.  SFT remains a high-quality
-# fallback when Base is deliberately not installed; Turbo is the speed-only
-# fallback retained for recovery and short previews.
-ACE_STEP_MODEL_PREFERENCE = ("base", "sft", "turbo")
+ACE_STEP_MODEL_PREFERENCE = ("turbo", "base")
 
 # 中文名称面向工作台用户，值保持为 ACE-Step 更稳定识别的英文标签。
 # “自定义”不会覆盖现有输入，用户选中预设后仍可继续手工增删标签。
@@ -2262,15 +2580,22 @@ def default_acestep_model(installed: list[str] | None = None) -> str:
 
 
 def require_installed_acestep_model(model: str) -> str:
-    """Reject unavailable model choices before a task reaches ComfyUI."""
+    """Reject unavailable model choices before a task reaches ComfyUI; map retired SFT to Turbo."""
     installed = installed_acestep_models()
-    if model not in installed:
+    normalized = str(model or "").strip().lower()
+    if normalized in {"sft", "ace-step-sft"}:
+        normalized = "turbo" if "turbo" in installed else (installed[0] if installed else "turbo")
+    elif normalized == "ace-step-turbo":
+        normalized = "turbo"
+    elif normalized == "ace-step-base":
+        normalized = "base"
+    if normalized not in installed:
         readable = "、".join(installed) if installed else "无"
         raise gr.Error(
             f"ACE-Step 模型“{model}”未安装，当前可用：{readable}。"
             "请在部署对应权重后重启后端，或选择可用模型。"
         )
-    return model
+    return normalized
 
 def _parse_size(size: str) -> tuple[int, int]:
     """把下拉框里 '宽 × 高' 形式的整体值解析成 (宽, 高)。"""
@@ -2339,7 +2664,7 @@ H3_EFFECTIVE_SETTING_KEYS = (
     "effective_seconds",
 )
 VOICE_CLONE_EFFECTIVE_SETTING_KEYS = (
-    "engine", "language", "speed", "output_format", "temperature_deprecated",
+    "engine", "language", "speed", "output_format", "speaker_mode", "temperature_deprecated",
 )
 SEEDVR2_EFFECTIVE_SETTING_KEYS = (
     "engine", "model_variant", "mode", "scale", "strength", "input_width", "input_height",
@@ -2348,6 +2673,7 @@ SEEDVR2_EFFECTIVE_SETTING_KEYS = (
 TASK_EFFECTIVE_SETTING_KEYS = (
     H3_EFFECTIVE_SETTING_KEYS + VOICE_CLONE_EFFECTIVE_SETTING_KEYS
     + SEEDVR2_EFFECTIVE_SETTING_KEYS
+    + ("width", "height", "steps", "turbo", "seed", "h3_deadline_ts")
 )
 
 INDEXTTS25_SERVICE_URL = os.environ.get(
@@ -2360,6 +2686,28 @@ INDEXTTS25_MAX_OUTPUT_BYTES = max(
     1_000_000, int(os.environ.get("BRMMEDIA_INDEXTTS25_MAX_OUTPUT_BYTES", str(256 * 1024 * 1024)))
 )
 INDEXTTS25_LANGUAGES = ("zh", "en", "ja", "es", "ar")
+
+ZONOS3_SERVICE_URL = os.environ.get("BRM_ZONOS3_URL", "http://127.0.0.1:1919").rstrip("/")
+ZONOS3_WORKFLOW = "Zonos3-语音克隆"
+ZONOS3_TIMEOUT_SECONDS = max(30, int(os.environ.get("BRM_ZONOS3_TIMEOUT_SECONDS", "210")))
+ZONOS3_MAX_REFERENCE_BYTES = 16 * 1024 * 1024
+ZONOS3_LANGUAGES = {
+    "zh": "cmn",
+    "cmn": "cmn",
+    "en": "en_us",
+    "en_us": "en_us",
+    "en_gb": "en_gb",
+    "ja": "ja",
+    "ko": "ko",
+    "fr": "fr_fr",
+    "fr_fr": "fr_fr",
+    "de": "de",
+    "es": "es",
+    "pt": "pt_br",
+    "pt_br": "pt_br",
+    "it": "it",
+    "ru": "ru",
+}
 
 
 def normalise_h3_request(
@@ -2620,6 +2968,90 @@ def run_indextts25(task: Task) -> list[str]:
     return [str(mp3_path)]
 
 
+def _normalise_zonos3_language(language: str) -> str:
+    code = str(language or "zh").strip().lower()
+    if code not in ZONOS3_LANGUAGES:
+        raise RuntimeError(f"ZONOS3-Mini 不支持的语音语言：{language}")
+    return ZONOS3_LANGUAGES[code]
+
+
+def run_zonos3(task: Task) -> list[str]:
+    """Invoke the isolated CPU ZONOS3-Mini loopback service directly and save WAV."""
+    import base64
+
+    if task.cancel_event.is_set():
+        raise RuntimeError("ZONOS3-Mini 语音任务已取消")
+    text = str(task.args.get("text") or task.args.get("prompt") or "").strip()
+    if not text:
+        raise RuntimeError("ZONOS3-Mini 合成文本不能为空")
+    if len(text) > 2000:
+        raise RuntimeError("ZONOS3-Mini 合成文本最多 2000 字符")
+    zonos_lang = _normalise_zonos3_language(task.args.get("language", "zh"))
+    try:
+        seed = int(task.args.get("seed", 42))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("ZONOS3-Mini 随机种子必须为整数") from exc
+    if not 0 <= seed <= 2**32 - 1:
+        raise RuntimeError("ZONOS3-Mini 随机种子范围须为 0–4294967295")
+
+    payload: dict[str, object] = {
+        "text": text,
+        "stream": False,
+        "format": "wav",
+        "language": zonos_lang,
+        "seed": seed,
+        "speaker_mode": "embedding",
+    }
+    ref_audio = str(task.args.get("ref_audio") or "").strip()
+    if ref_audio:
+        reference = _indextts25_reference_path(ref_audio)
+        audio_bytes = reference.read_bytes()
+        if len(audio_bytes) > ZONOS3_MAX_REFERENCE_BYTES:
+            raise RuntimeError("ZONOS3-Mini 参考音频不能超过 16 MiB")
+        payload["speaker_audio_base64"] = base64.b64encode(audio_bytes).decode("ascii")
+
+    task_queue.update_execution(task, {"stage": "checking_zonos3"})
+    with requests.Session() as session:
+        session.trust_env = False
+        try:
+            health = session.get(f"{ZONOS3_SERVICE_URL}/v2/health", timeout=(5, 10))
+        except requests.RequestException as exc:
+            raise RuntimeError("ZONOS3-Mini 服务暂不可用，请检查 brmmedia-zonos3-mini 服务状态") from exc
+        if health.status_code != 200:
+            raise RuntimeError(f"ZONOS3-Mini 健康检查失败（HTTP {health.status_code}）")
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        wav_path = OUTPUT_DIR / f"{task.name}.wav"
+        tmp_path = OUTPUT_DIR / f".{task.name}.{os.getpid()}.wav.tmp"
+        task_queue.update_execution(task, {"stage": "synthesizing_zonos3"})
+        try:
+            response = session.post(
+                f"{ZONOS3_SERVICE_URL}/v2/generate",
+                json=payload,
+                timeout=(10, ZONOS3_TIMEOUT_SECONDS),
+            )
+            if response.status_code != 200:
+                detail = response.text[:500].replace("\n", " ")
+                raise RuntimeError(f"ZONOS3-Mini 合成失败（HTTP {response.status_code}）：{detail}")
+            content = response.content
+            if not content.startswith(b"RIFF") or content[8:12] != b"WAVE":
+                raise RuntimeError("ZONOS3-Mini 返回了无效 WAV 数据")
+            if task.cancel_event.is_set():
+                raise RuntimeError("ZONOS3-Mini 语音任务已取消")
+            tmp_path.write_bytes(content)
+            tmp_path.replace(wav_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    task.args.update({
+        "engine": "ZONOS3-Mini",
+        "language": zonos_lang,
+        "speaker_mode": "embedding",
+        "output_format": "WAV (44.1kHz)",
+    })
+    return [str(wav_path)]
+
+
 # ---------------------------------------------------------------------------
 # 提交工作流
 # ---------------------------------------------------------------------------
@@ -2630,10 +3062,39 @@ def submit_workflow_1(prompt, size, batch):
     return submit("image_z_image_turbo", {"prompt": prompt, "size": size, "batch": batch})
 
 
-def api_submit_qwen_image21(prompt: str, width: int = 1024, height: int = 1024, steps: int = 40, seed: int = 0) -> dict:
+def _fit_qwen_image21_size(width: int, height: int) -> tuple[int, int]:
+    """Scale legacy dimensions (e.g. 2048x2048) cleanly into Qwen Image 2.1's <=1MP 32-grid."""
+    if (width, height) in qwen_image21.FULL_HD_SIZES:
+        return width, height
+    if width <= 0 or height <= 0:
+        return 1024, 1024
+    if (
+        min(width, height) >= 256
+        and max(width, height) <= 1536
+        and width % 32 == 0
+        and height % 32 == 0
+        and width * height <= qwen_image21.MAX_PIXELS
+    ):
+        return width, height
+    scale = (qwen_image21.MAX_PIXELS / (width * height)) ** 0.5 if width * height > qwen_image21.MAX_PIXELS else 1.0
+    nw = max(256, min(1536, (int(width * scale) // 32) * 32))
+    nh = max(256, min(1536, (int(height * scale) // 32) * 32))
+    while nw * nh > qwen_image21.MAX_PIXELS and max(nw, nh) > 256:
+        if nw >= nh and nw > 256:
+            nw -= 32
+        elif nh > 256:
+            nh -= 32
+        else:
+            break
+    return nw, nh
+
+
+def api_submit_qwen_image21(
+    prompt: str, width: int = 1024, height: int = 1024, steps: int = 8, seed: int = 0, turbo: bool | None = None,
+) -> dict:
     if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") != "1":
         raise gr.Error("Qwen Image 2.1 研究运行时尚未启用")
-    args = qwen_image21.validate(prompt, width, height, steps, seed)
+    args = qwen_image21.validate(prompt, width, height, steps, seed, turbo=turbo)
     try:
         with requests.Session() as session:
             session.trust_env = False
@@ -2642,6 +3103,131 @@ def api_submit_qwen_image21(prompt: str, width: int = 1024, height: int = 1024, 
     except requests.RequestException as exc:
         raise gr.Error("Qwen Image 2.1 研究运行时暂不可用，请稍后重试") from exc
     return submit(qwen_image21.WORKFLOW, args)
+
+
+def api_submit_qwen_image21_edit(
+    prompt: str, width: int = 1024, height: int = 1024, steps: int = 8, seed: int = 0, input_filename: str = "",
+    turbo: bool | None = None,
+) -> dict:
+    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") != "1":
+        raise gr.Error("Qwen Image 2.1 研究运行时尚未启用")
+    args = qwen_image21.validate_edit(prompt, width, height, steps, seed, input_filename, turbo=turbo)
+    with qwen_image21._session() as session:
+        session.get(qwen_image21.BASE + "/system_stats", timeout=5).raise_for_status()
+    return submit(qwen_image21.EDIT, args)
+
+
+IMAGE_SIZE_PRESETS = {
+    "h3": ["2048 × 2048（1:1 方图）", "2304 × 1728（4:3 横图）", "1728 × 2304（3:4 竖图）", "2496 × 1664（3:2 横图）", "1664 × 2496（2:3 竖图）", "2560 × 1440（16:9 横图）", "1440 × 2560（9:16 竖图）", "1920 × 1080（16:9 全高清）", "1080 × 1920（9:16 全高清）"],
+    "qwen21": ["1024 × 1024（1:1 方图）", "1152 × 864（4:3 横图）", "864 × 1152（3:4 竖图）", "1248 × 832（3:2 横图）", "832 × 1248（2:3 竖图）", "1024 × 576（16:9 横图）", "576 × 1024（9:16 竖图）", "512 × 512（快速预览）", "1920 × 1080（16:9 全高清）", "1080 × 1920（9:16 全高清）"],
+}
+
+
+def ui_submit_image(model, editing, prompt, size, steps, seed, input_filename, mode="turbo"):
+    if size not in IMAGE_SIZE_PRESETS[model]:
+        raise gr.Error("请选择预设图片尺寸")
+    width, height = _parse_size(size)
+    if model == "h3":
+        if editing:
+            return api_submit_h3_image_edit(prompt, width, height, seed, input_filename)
+        return api_submit_h3_image(prompt, width, height, seed)
+    use_turbo = None if mode is None else (str(mode).strip().lower() != "base")
+    if editing:
+        return api_submit_qwen_image21_edit(prompt, width, height, steps, seed, input_filename, turbo=use_turbo)
+    return api_submit_qwen_image21(prompt, width, height, steps, seed, turbo=use_turbo)
+
+
+def api_submit_h3_image(prompt: str, width: int = 2048, height: int = 2048, seed: int = 0) -> dict:
+    if not h3_image.enabled():
+        nw, nh = _fit_qwen_image21_size(int(width), int(height))
+        return api_submit_qwen_image21(prompt, nw, nh, steps=8, seed=seed, turbo=True)
+    args = h3_image.validate(prompt, width, height, seed)
+    try:
+        h3_image.check_available()
+    except requests.RequestException as exc:
+        raise gr.Error("MiniMax H3 Image运行时暂不可用") from exc
+    return submit(h3_image.TEXT, args)
+
+
+def api_submit_h3_image_edit(prompt: str, width: int = 2048, height: int = 2048, seed: int = 0, input_filename: str = "") -> dict:
+    if not h3_image.enabled():
+        nw, nh = _fit_qwen_image21_size(int(width), int(height))
+        return api_submit_qwen_image21_edit(prompt, nw, nh, steps=8, seed=seed, input_filename=input_filename, turbo=True)
+    args = h3_image.validate(prompt, width, height, seed, input_filename)
+    try:
+        h3_image.check_available()
+    except requests.RequestException as exc:
+        raise gr.Error("MiniMax H3 Image运行时暂不可用") from exc
+    return submit(h3_image.EDIT, args)
+
+
+def api_submit_flux2_fast(prompt: str, input_filename: str, width: int = 1024, height: int = 1024, seed: int = 42) -> dict:
+    if os.environ.get("BRM_FLUX2_FAST_ENABLED") != "1":
+        raise gr.Error("FLUX.2快速编辑尚未启用")
+    return submit(flux2_fast.WORKFLOW, flux2_fast.validate(prompt,input_filename,width,height,seed))
+
+
+def ui_submit_flux2_fast(prompt,size,seed,input_filename):
+    width,height=_parse_size(size)
+    return api_submit_flux2_fast(prompt,input_filename,width,height,seed)
+
+
+def api_submit_flux3_text(prompt: str, width: int = 1024, height: int = 1024, seed: int = 42) -> dict:
+    if not flux3_image.enabled():
+        nw, nh = _fit_qwen_image21_size(int(width), int(height))
+        return api_submit_qwen_image21(prompt, nw, nh, steps=8, seed=seed, turbo=True)
+    return submit(flux3_image.TEXT, flux3_image.validate(prompt,width,height,seed))
+
+
+def api_submit_flux3_edit(prompt: str, width: int = 1024, height: int = 1024, seed: int = 42, input_filename: str = "") -> dict:
+    if not flux3_image.enabled():
+        nw, nh = _fit_qwen_image21_size(int(width), int(height))
+        return api_submit_qwen_image21_edit(prompt, nw, nh, steps=8, seed=seed, input_filename=input_filename, turbo=True)
+    return submit(flux3_image.EDIT, flux3_image.validate(prompt,width,height,seed,input_filename))
+
+
+def ui_submit_flux3_image(editing,prompt,size,seed,input_filename):
+    width,height=_parse_size(size)
+    if editing:
+        return api_submit_flux3_edit(prompt,width,height,seed,input_filename)
+    return api_submit_flux3_text(prompt,width,height,seed)
+
+
+def api_submit_zonos3(text: str, input_filename: str = "", language: str = "zh", seed: int = 42) -> dict:
+    text = str(text or "").strip()
+    if not text:
+        raise gr.Error("请输入要合成的文本")
+    if len(text) > 2000:
+        raise gr.Error("合成文本最多 2000 字符")
+    lang_code = str(language or "zh").strip().lower()
+    if lang_code not in ZONOS3_LANGUAGES:
+        raise gr.Error(f"ZONOS3-Mini 不支持的语音语言：{language}")
+    try:
+        seed_val = int(seed)
+    except (TypeError, ValueError):
+        raise gr.Error("随机种子必须为整数") from None
+    if not 0 <= seed_val <= 2**32 - 1:
+        raise gr.Error("随机种子须在 0–4294967295 之间")
+    ref_name = str(input_filename or "").strip()
+    if ref_name:
+        try:
+            _indextts25_reference_path(ref_name)
+        except RuntimeError as exc:
+            raise gr.Error(str(exc)) from exc
+    return submit(ZONOS3_WORKFLOW, {
+        "text": text,
+        "ref_audio": ref_name,
+        "language": lang_code,
+        "seed": seed_val,
+    })
+
+
+def api_submit_qwen3_tts(text: str, input_filename: str = "", language: str = "zh", reference_text: str = "") -> dict:
+    if not qwen3_tts.enabled():
+        return api_submit_zonos3(text, input_filename, language)
+    args=qwen3_tts.validate(text,input_filename,language,reference_text)
+    qwen3_tts.check_reference(input_filename,COMFY_ROOT / "input")
+    return submit(qwen3_tts.WORKFLOW,args)
 
 
 def submit_workflow_2(prompt, input_filename):
@@ -3396,7 +3982,14 @@ def build_seedvr2_workflow(workflow_name: str, args: dict) -> dict:
 # 工作流登记表:工作流名 -> 构建函数。新增工作流时,在这里登记一行即可。
 # ---------------------------------------------------------------------------
 WORKFLOW_BUILDERS = {
+    h3_image.TEXT: (lambda name, args: h3_image.build_workflow(args), "MiniMax H3 Image 文生图"),
+    h3_image.EDIT: (lambda name, args: h3_image.build_workflow(args), "MiniMax H3 Image 单图编辑"),
     qwen_image21.WORKFLOW: (lambda name, args: qwen_image21.build_workflow(args), "Qwen Image 2.1 文生图"),
+    qwen_image21.EDIT: (lambda name, args: qwen_image21.build_workflow(args), "Qwen Image 2.1 图生图"),
+    flux2_fast.WORKFLOW: (flux2_fast.build_workflow, "FLUX.2 Klein 快速图生图"),
+    flux3_image.TEXT: (lambda name,args: {}, "FLUX 3 文生图（实验）"),
+    flux3_image.EDIT: (lambda name,args: {}, "FLUX 3 图生图（实验）"),
+    qwen3_tts.WORKFLOW: (lambda name,args: {}, "Qwen3-TTS 语音克隆（实验）"),
     "image_z_image_turbo": (build_workflow_1, "文生图"),
     "image_flux2_klein_image_edit_4b_base": (build_workflow_2, "图生图 FLUX.2-klein"),
     "MiniMaxH3-文生视频": (build_workflow_3, "MiniMax H3 文生视频"),
@@ -3408,6 +4001,7 @@ WORKFLOW_BUILDERS = {
     # Keep the existing ComfyUI workflow available for a deliberate rollback.
     "TTS-语音克隆": (build_workflow_7, "语音克隆"),
     "IndexTTS-2.5-语音克隆": (build_workflow_7, "语音克隆 IndexTTS-2.5"),
+    ZONOS3_WORKFLOW: (lambda name, args: {}, "语音克隆 ZONOS3-Mini"),
     "音乐生成": (build_workflow_8, "音乐生成"),
     "SeedVR2-图像/视频增强修复": (build_seedvr2_workflow, "SeedVR2 图像/视频增强修复"),
 }
@@ -3689,15 +4283,80 @@ def run_seedvr2_video_task(task: Task) -> list[str]:
         raise
 
 
+def _adaptive_config_from_yzy() -> adaptive_concurrency.AdaptiveConfig:
+    return adaptive_concurrency.load_adaptive_config(yzy_config)
+
+
+concurrency_controller = adaptive_concurrency.AdaptiveConcurrencyController(
+    config_provider=_adaptive_config_from_yzy
+)
+
+
 def process_task(task: Task) -> None:
+    if task.workflow_name == ZONOS3_WORKFLOW:
+        # ZONOS3-Mini runs on CPU (:1919) and consumes zero A5000 VRAM.
+        return _process_task_impl(task)
+    profile = adaptive_concurrency.classify_workflow(task.workflow_name)
+    if (
+        VOICE_PARALLEL_ENABLED
+        and task.workflow_name in VOICE_PARALLEL_WORKFLOWS
+        and not profile.shares_comfy_light_lease
+    ):
+        with media_runtime_guard.voice_lease(BASE, task.cancel_event):
+            return _process_task_impl(task)
+    if task.workflow_name in flux3_image.WORKFLOWS:
+        if not flux3_image.enabled():
+            raise RuntimeError("FLUX 3实验入口已下线，请使用 Qwen Image 2.1 Turbo 8步")
+        task.result=flux3_image.run_task(task,OUTPUT_DIR,BASE,lambda event:task_queue.update_execution(task,event))
+        task_queue.update_execution(task,{"stage":"completed","progress":1.0,"current_step":16,"total_steps":16})
+        return
+    if task.workflow_name in h3_image.WORKFLOWS:
+        if not h3_image.enabled():
+            raise RuntimeError("MiniMax H3 Image已下线，请使用 Qwen Image 2.1 Turbo 8步")
+        task.result = h3_image.run_task(task, OUTPUT_DIR, BASE, lambda event: task_queue.update_execution(task, event))
+        task_queue.update_execution(task, {"stage": "completed", "progress": 1.0, "current_step": 6, "total_steps": 6})
+        return
+    needs_guard = h3_image.runtime_ready() or os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1"
+    if not needs_guard and task.workflow_name != qwen3_tts.WORKFLOW:
+        return _process_task_impl(task)
+    if (
+        concurrency_controller.config().enabled
+        and not profile.exclusive
+        and profile.shares_comfy_light_lease
+    ):
+        with media_runtime_guard.light_lease(BASE, task.cancel_event):
+            task_queue.update_execution(
+                task,
+                {"stage": "recovering" if task.prompt_id else "building_workflow"},
+            )
+            return _process_task_impl(task)
+    target = qwen_image21.BASE if task.workflow_name in qwen_image21.WORKFLOWS else BASE
+    with media_runtime_guard.lease():
+        task_queue.update_execution(task, {"stage": "runtime_handover"})
+        media_runtime_guard.handover(BASE, target=target, owned_prompt=task.prompt_id or '')
+        task_queue.update_execution(task, {"stage": "recovering" if task.prompt_id else "building_workflow"})
+        try:
+            return _process_task_impl(task)
+        finally:
+            media_runtime_guard.release_all(BASE)
+
+
+def _process_task_impl(task: Task) -> None:
+    if task.workflow_name == ZONOS3_WORKFLOW:
+        task.result = run_zonos3(task)
+        task_queue.update_execution(task, {"stage": "saving_artifacts", "progress": 1.0})
+        return
+    if task.workflow_name == qwen3_tts.WORKFLOW:
+        task.result=qwen3_tts.run_task(task,OUTPUT_DIR,COMFY_ROOT / "input",lambda event:task_queue.update_execution(task,event))
+        return
     """一次完整执行:构建工作流 -> 提交并等待 -> 解析并保存结果。供任务队列调用。"""
-    if task.workflow_name == qwen_image21.WORKFLOW:
+    if task.workflow_name in qwen_image21.WORKFLOWS:
         task.result = qwen_image21.run_task(
             task, OUTPUT_DIR, BASE,
             lambda event: task_queue.update_execution(task, event),
         )
         return
-    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1":
+    if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1" and qwen_image21.BASE != BASE.rstrip("/"):
         qwen_image21.release_idle(qwen_image21.BASE)
     if task.workflow_name == "SeedVR2-图像/视频增强修复":
         model_variant = task.args.get("model_variant", SEEDVR2_MODEL_DEFAULT)
@@ -3769,7 +4428,12 @@ def process_task(task: Task) -> None:
 
 
 # 任务队列实例,processor 指向本页面的 process_task。
-task_queue = TaskQueue(processor=process_task, max_workers=QUEUE_CONCURRENCY)
+task_queue = TaskQueue(
+    processor=process_task,
+    max_workers=2 if VOICE_PARALLEL_ENABLED else QUEUE_CONCURRENCY,
+    parallel_workflows=VOICE_PARALLEL_WORKFLOWS if VOICE_PARALLEL_ENABLED else frozenset(),
+    concurrency_controller=concurrency_controller,
+)
 
 
 def _setting_int(value, default: int, min_value: int, max_value: int) -> int:
@@ -3806,8 +4470,13 @@ def save_global_settings(queue_concurrency=None, done_tasks_max=None, done_galle
     QUEUE_CONCURRENCY = concurrency
     DONE_TASKS_MAX = task_queue.set_max_done(task_limit)
     DONE_GALLERY_MAX = gallery_limit
-    target_workers, active_workers = task_queue.set_max_workers(concurrency)
-    mode_note = "（MiniMax H3 模式固定单队列）" if VIDEO_ENGINE == "h3" else ""
+    desired_workers = (
+        concurrency_controller.worker_pool_size()
+        if concurrency_controller.config().enabled
+        else (2 if VOICE_PARALLEL_ENABLED else concurrency)
+    )
+    target_workers, active_workers = task_queue.set_max_workers(desired_workers)
+    mode_note = "（自适应并发已启用，重型视频/生图独占，轻生图/CPU语音按负载动态扩展）" if concurrency_controller.config().enabled else ("（语音克隆最多两路，其他媒体独占）" if VOICE_PARALLEL_ENABLED else "")
     return (
         f"✅ 全局设置已保存并生效：并发 {target_workers}{mode_note}（当前 worker {active_workers}），"
         f"保留任务 {DONE_TASKS_MAX} 条，画廊显示 {DONE_GALLERY_MAX} 个产物。"
@@ -3863,6 +4532,15 @@ def change_lan_access_password(current_password, new_password, confirm_password)
     )
 
 
+RETRY_FIELDS = {
+    "image_z_image_turbo": ("prompt", "size", "batch"),
+    h3_image.TEXT: ("prompt", "width", "height", "seed"),
+    flux3_image.TEXT: ("prompt", "width", "height", "seed"),
+    qwen_image21.WORKFLOW: ("prompt", "width", "height", "steps", "seed"),
+    "LTX23-文生视频": ("prompt", "size", "seconds"),
+}
+
+
 def submit(wfname, args):
     """入队并返回供 LAN API/自动化跟踪的安全任务标识。"""
     try:
@@ -3876,7 +4554,18 @@ def submit(wfname, args):
             f"{MIN_FREE_DISK_PERCENT:.1f}%。请先归档或清理历史素材后再提交。"
         )
     _name = WORKFLOW_BUILDERS[wfname][1]
-    task = Task(id=uuid.uuid4().hex, name=make_task_name(_name), workflow_name=wfname, args=args)
+    fields = RETRY_FIELDS.get(wfname, ())
+    retry_recipe = {key: args[key] for key in fields} if all(key in args for key in fields) else {}
+    sources = tuple(
+        Path(value.replace("\\", "/")).name for key, value in args.items()
+        if isinstance(value, str) and value and (
+            key.endswith(("_filename", "_path")) or key in {"input_filename1", "input_filename2"}
+        )
+    )
+    task = Task(
+        id=uuid.uuid4().hex, name=make_task_name(_name), workflow_name=wfname, args=args,
+        input_sources=sources, retry_recipe=retry_recipe,
+    )
     position = task_queue.enqueue(task)
     gr.Info(f"已提交：{task.name}（提交时排队位置 {position}）", duration=3)
     return {
@@ -3897,12 +4586,20 @@ def api_task_status(task_id: str) -> dict:
     return task_queue.task_status(task_id)
 
 
+def api_cancel_task(task_id: str) -> dict:
+    return task_queue.cancel_task(task_id)
+
+
 def interrupt_running_tasks():
     """确认 ComfyUI 已接收中断后，再标记本工作台对应任务。"""
     _, running, _ = task_queue.snapshot()
     if not running:
         return "当前没有工作台运行任务；未向 ComfyUI 发送中断信号。"
 
+    owned_runtime_workflows = (*h3_image.WORKFLOWS, *flux3_image.WORKFLOWS, qwen3_tts.WORKFLOW)
+    if all(task.workflow_name in owned_runtime_workflows for task in running):
+        task_queue.cancel_running({task.id for task in running})
+        return "已请求定向中断当前任务；等待专属运行时停止并释放A5000。"
     accepted, signal_result = interrupt()
     if not accepted:
         return (
@@ -3954,10 +4651,19 @@ STATUS_ICONS = {
 # 任务阶段来自 ComfyUI WebSocket、IndexTTS 服务与队列本身。中文化展示在
 # 前端完成，持久化仍使用稳定的机器可读 stage 值，避免影响 REST 查询和恢复。
 STAGE_LABELS = {
+    "flux3_starting": "正在准备图像模型",
+    "flux3_enhance": "正在细化提示词",
+    "flux3_generate": "正在加载并生成图片",
+    "flux3_sampling": "FLUX 3 图像生成",
+
     "qwen_image21_sampling": "Qwen Image 2.1 研究生图",
+    "qwen3_tts_loading": "正在加载模型并合成语音",
+    "h3_image_sampling": "MiniMax H3 Image 采样",
+    "decoding_image": "图片解码",
     "queued": "等待队列",
     "recovering": "正在重新附着任务",
     "building_workflow": "正在构建工作流",
+    "runtime_handover": "媒体运行时交接",
     "submitted": "已提交至 ComfyUI",
     "execution_start": "开始执行",
     "executing": "正在执行节点",
@@ -3971,6 +4677,8 @@ STAGE_LABELS = {
     "muxing": "正在合成音视频",
     "checking_indextts25": "正在检查语音服务",
     "synthesizing_indextts25": "正在合成语音",
+    "checking_zonos3": "正在检查 ZONOS3-Mini 服务",
+    "synthesizing_zonos3": "正在使用 ZONOS3-Mini 合成语音",
     "encoding_mp3": "正在编码 MP3",
     "saving_artifacts": "正在保存素材",
     "completed": "已完成",
@@ -4048,9 +4756,12 @@ def _render_live_progress(running: list[Task]) -> str:
             f'<span class="brm-live-progress-name" title="{escape(task.name)}">{escape(task.name)}</span>'
             f'<span class="brm-live-progress-percent">{percent}</span>'
             '</div>'
-            f'<div class="brm-live-progress-detail">{escape(_stage_label(task.stage))} · {step_detail} · 已运行 {elapsed}{updated}</div>'
+            f'<div class="brm-live-progress-status">{escape(_stage_label(task.stage))}</div>'
             f'<div class="brm-live-progress-track" role="progressbar" aria-label="{escape(task.name)} 生成进度" aria-valuemin="0" aria-valuemax="100"{aria_value}>'
-            f'{fill}</div></article>'
+            f'{fill}</div>'
+            f'<details class="brm-live-progress-details" data-task-id="{escape(str(task.id))}"><summary>查看详情</summary>'
+            f'<div class="brm-live-progress-detail">{step_detail} · 已运行 {elapsed}{updated}</div>'
+            '</details></article>'
         )
     return '<section class="brm-live-progress-list" aria-live="polite">' + "".join(cards) + '</section>'
 
@@ -4080,7 +4791,7 @@ def _render_queue_summary(*, backend: str, pending: int, running: int, completed
         else f'<span class="brm-queue-health {state_class}"><i></i>ComfyUI {escape(backend)}</span>'
     )
     return (
-        '<section class="brm-queue-summary" aria-label="任务队列状态">'
+        f'<section class="brm-queue-summary" aria-label="任务队列状态" data-active="{int(bool(pending or running))}">'
         f'{management_entry}'
         f'<div class="brm-queue-metrics">{pills}</div>'
         '</section>'
@@ -4208,8 +4919,9 @@ def _thumbnail_worker() -> None:
             temporary = target.with_name(target.stem + ".partial" + target.suffix)
             try:
                 result = subprocess.run(command + [str(temporary)], check=False, timeout=75)
-                if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size:
-                    temporary.replace(target)
+                with _thumb_lock:
+                    if result.returncode == 0 and temporary.is_file() and temporary.stat().st_size and _completed_output_path(path):
+                        temporary.replace(target)
             finally:
                 temporary.unlink(missing_ok=True)
         except (OSError, subprocess.TimeoutExpired):
@@ -4261,59 +4973,126 @@ def _task_status_class(status: TaskStatus) -> str:
     }.get(status, "is-queued")
 
 
-def _real_system_status(done: list[Task], running: list[Task]) -> dict[str, str]:
-    """Read actual host state with a short cache; degrade explicitly on errors."""
+_asset_count_cache: tuple[float, int | None] = (0.0, None)
+_asset_count_lock = threading.Lock()
+
+
+def _cached_output_asset_count() -> int | None:
+    global _asset_count_cache
+    now = time.monotonic()
+    with _asset_count_lock:
+        cached_at, cached_val = _asset_count_cache
+        if cached_val is not None and now - cached_at < 15.0:
+            return cached_val
+    try:
+        count = sum(
+            1 for p in OUTPUT_DIR.rglob("*")
+            if p.is_file() and p.suffix.lower() in PERSISTABLE_MEDIA_EXTS
+            and MEDIA_CACHE_DIR not in p.parents and OUTPUT_DIR / ".brm-cache" not in p.parents
+        )
+    except OSError:
+        return None
+    with _asset_count_lock:
+        _asset_count_cache = (now, count)
+    return count
+
+
+def _real_system_status(done: list[Task], running: list[Task]) -> dict[str, object]:
+    """Read actual host, 3xGPU, queue, services, and tiered storage state."""
     global _system_status_cache
     now = time.monotonic()
     with _system_status_lock:
         cached_at, cached = _system_status_cache
-        if cached and now - cached_at < 5:
+        if cached and now - cached_at < 3.0 and cached.get("_running_count") == len(running):
             return cached
-    result: dict[str, str] = {
-        "gpu": "暂不可用",
-        "vram": "暂不可用",
-        "queue": f"{len(running)} 运行 / {len(running) + len(task_queue.snapshot()[0])} 并发占用",
-        "storage": "暂不可用",
-        "assets": "暂不可用",
-        "today": "暂不可用",
-    }
-    try:
-        nvidia_smi = shutil.which("nvidia-smi") or "/usr/lib/wsl/lib/nvidia-smi"
-        smi = subprocess.run(
-            [nvidia_smi, "--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=2, check=False,
-        )
-        rows = [line.strip() for line in smi.stdout.splitlines() if line.strip()]
-        selected = next((row for row in rows if "A5000" in row.upper()), rows[0] if rows else "")
-        parts = [item.strip() for item in selected.split(",")]
-        if len(parts) >= 4:
-            # 标签已明确固定在 A5000；数值独立显示避免窄卡片截断型号。
-            result["gpu"] = f"{parts[1]}%"
-            result["vram"] = f"{parts[2]} / {parts[3]} MiB"
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        disk = shutil.disk_usage(OUTPUT_DIR)
-        result["storage"] = f"可用 {disk.free // (1024 ** 3)} GB"
-    except OSError:
-        pass
-    try:
-        assets = [
-            p for p in OUTPUT_DIR.rglob("*")
-            if p.is_file() and p.suffix.lower() in PERSISTABLE_MEDIA_EXTS and MEDIA_CACHE_DIR not in p.parents
-        ]
-        result["assets"] = f"{len(assets):,} 项"
-    except OSError:
-        pass
+
+    pending_tasks, _, _ = task_queue.snapshot()
+    telemetry = system_telemetry.collect_host_telemetry(
+        OUTPUT_DIR,
+        running_workflows=[task.workflow_name for task in running],
+        cache_ttl=3.0,
+    )
+    gpus = telemetry.get("gpus") or []
+    gpu0 = next((g for g in gpus if "A5000" in str(g.get("name", "")).upper()), gpus[0] if gpus else None)
+    storage_tiers = telemetry.get("storage") or []
+    out_tier = storage_tiers[0] if storage_tiers else {}
+
+    asset_count = _cached_output_asset_count()
     today = datetime.now().date()
-    result["today"] = f"{sum(1 for task in done if task.status == TaskStatus.DONE and datetime.fromtimestamp(task.done_ts or task.submit_ts).date() == today)} 项"
+    today_done = sum(
+        1 for task in done
+        if task.status == TaskStatus.DONE and datetime.fromtimestamp(task.done_ts or task.submit_ts).date() == today
+    )
+    total_ok = sum(1 for task in done if task.status == TaskStatus.DONE)
+    total_fail = sum(1 for task in done if task.status in {TaskStatus.ERROR, TaskStatus.TIMEOUT})
+
+    conc_info = dict(telemetry.get("concurrency") or {})
+    if not conc_info:
+        conc_info = concurrency_controller.evaluate()
+    conc_active = dict(conc_info.get("active") or {})
+    conc_active.update({
+        "gpu_exclusive": sum(
+            1 for t in running
+            if adaptive_concurrency.classify_workflow(t.workflow_name).exclusive
+        ),
+        "gpu_light": sum(
+            1 for t in running
+            if (p := adaptive_concurrency.classify_workflow(t.workflow_name)).uses_gpu and not p.exclusive
+        ),
+        "voice_cpu": sum(
+            1 for t in running
+            if adaptive_concurrency.classify_workflow(t.workflow_name).tier == adaptive_concurrency.TIER_VOICE_CPU
+        ),
+        "pending_total": len(pending_tasks),
+    })
+    conc_info["active"] = conc_active
+
+    result: dict[str, object] = {
+        "_running_count": len(running),
+        "gpu": f"{gpu0['util_pct']:.0f}%" if gpu0 and gpu0.get("util_pct") is not None else "暂不可用",
+        "vram": (
+            f"{gpu0['vram_used_mib']} / {gpu0['vram_total_mib']} MiB"
+            if gpu0 and gpu0.get("vram_used_mib") is not None and gpu0.get("vram_total_mib")
+            else "暂不可用"
+        ),
+        "queue": f"{len(running)} 运行 / {len(pending_tasks)} 排队 / {len(running)}/{QUEUE_CONCURRENCY} 并发",
+        "storage": (
+            f"可用 {system_telemetry.format_storage_size(out_tier['avail_bytes'])}"
+            if out_tier.get("available") else "暂不可用"
+        ),
+        "assets": f"{asset_count:,} 项" if asset_count is not None else "暂不可用",
+        "today": f"{today_done} 项",
+        "cpu": telemetry.get("cpu") or {},
+        "ram": telemetry.get("ram") or {},
+        "gpus": gpus,
+        "services": telemetry.get("services") or {},
+        "storage_tiers": storage_tiers,
+        "engine": telemetry.get("engine") or {"busy": False, "label": "空闲"},
+        "concurrency": conc_info,
+        "queue_stats": {
+            "running": len(running),
+            "pending": len(pending_tasks),
+            "concurrency": QUEUE_CONCURRENCY,
+            "limits": conc_info.get("limits") or {},
+            "degraded": bool(conc_info.get("degraded", False)),
+            "degrade_reasons": conc_info.get("degrade_reasons") or [],
+        },
+        "task_stats": {
+            "today_done": today_done,
+            "total_ok": total_ok,
+            "total_fail": total_fail,
+            "assets_text": f"{asset_count:,} 项" if asset_count is not None else "暂不可用",
+        },
+    }
     with _system_status_lock:
         _system_status_cache = (now, result)
     return result
 
 
-def _asset_records(done: list[Task]) -> list[dict[str, object]]:
+def _asset_records(done: list[Task], limit: int | None = None) -> list[dict[str, object]]:
     """Return deduplicated, validated real artifacts ordered by newest task first."""
+    if limit is None:
+        limit = DONE_GALLERY_MAX
     records: list[dict[str, object]] = []
     seen: set[Path] = set()
     for task in sorted(done, key=lambda item: item.done_ts or item.submit_ts, reverse=True):
@@ -4325,12 +5104,59 @@ def _asset_records(done: list[Task]) -> list[dict[str, object]]:
                 continue
             seen.add(path)
             records.append({"path": path, "task": task, "kind": _media_kind(path)})
-            if len(records) >= DONE_GALLERY_MAX:
+            if len(records) >= limit:
                 return records
-    return records[:DONE_GALLERY_MAX]
+    return records
+
+_asset_mutation_lock = threading.RLock()
 
 
-def _asset_card_html(record: dict[str, object]) -> str:
+def api_delete_asset(task_id: str, filename: str, confirmed: bool = False) -> dict:
+    """Physically delete one terminal-task artifact, never an arbitrary path."""
+    if confirmed is not True:
+        return {"error": "confirmation_required"}
+    if not isinstance(filename, str) or not filename or filename in (".", "..") or any(c in filename for c in ("/", "\\", "\x00")):
+        return {"error": "not_found"}
+    with _asset_mutation_lock, task_queue._lock:
+        owner = next((t for t in task_queue._done if t.id == task_id), None)
+        if owner is None or not isinstance(owner.result, list):
+            return {"error": "not_found"}
+        path = next((_completed_output_path(p) for p in owner.result
+                     if Path(p).name == filename and _completed_output_path(p)), None)
+        if path is None:
+            return {"error": "not_found"}
+        # Never remove a file still referenced by a pending/running task.
+        active = list(task_queue._pending) + list(task_queue._running.values())
+        if any(isinstance(t.result, list) and any(_completed_output_path(p) == path for p in t.result) for t in active):
+            return {"error": "asset_busy"}
+        cache = _thumbnail_path(path, _media_kind(path))
+        warnings = []
+        try:
+            with _thumb_lock:
+                path.unlink()  # Only the exact validated media file; no recursion.
+                try:
+                    if cache.is_file() and OUTPUT_DIR.resolve() in cache.resolve().parents:
+                        cache.unlink(missing_ok=True)
+                except OSError:
+                    warnings.append("预览缓存清理失败")
+            for t in task_queue._done:
+                if isinstance(t.result, list):
+                    # Resolution without strict=True also matches the just-deleted file.
+                    t.result = [p for p in t.result if Path(p).resolve() != path]
+            task_queue._save_history()
+        except OSError:
+            return {"error": "delete_failed"}
+        # Cached ZIP exports contain copies: invalidate them, not other originals.
+        for bundle in DOWNLOAD_CACHE_DIR.glob("BRM-AI-素材-*.zip"):
+            try:
+                if bundle.is_file() and bundle.resolve().parent == DOWNLOAD_CACHE_DIR.resolve():
+                    bundle.unlink()
+            except OSError:
+                warnings.append("批量下载缓存清理失败")
+        return {"deleted": True, "filename": filename, "warnings": warnings}
+
+
+def _asset_card_html(record: dict[str, object], *, task_link=False) -> str:
     path = record["path"]
     task = record["task"]
     kind = record["kind"]
@@ -4358,6 +5184,16 @@ def _asset_card_html(record: dict[str, object]) -> str:
         )
     kind_text = {"image": "图片", "video": "视频", "audio": "音频"}[kind]
     action = "audio-play" if kind == "audio" else "media-open"
+    detail = (
+        f'<button type="button" class="brm-asset-task" data-brm-action="task-link" '
+        f'data-task-id="{escape(task.id)}">生成任务</button>'
+        if task_link and task.id else ""
+    )
+    delete = (
+        f'<button type="button" class="brm-asset-delete" data-brm-action="asset-delete" '
+        f'data-task-id="{escape(task.id)}" data-filename="{filename}" aria-label="彻底删除 {filename}">彻底删除</button>'
+        if task.id else ""
+    )
     return (
         f'<article class="brm-asset-card" data-asset-type="{kind}" '
         f'data-asset-name="{escape((task.name + " " + path.name).lower(), quote=True)}" '
@@ -4365,8 +5201,179 @@ def _asset_card_html(record: dict[str, object]) -> str:
         f'<button type="button" class="brm-asset-preview" data-brm-action="{action}" '
         f'data-media-url="{url}" data-media-kind="{kind}" data-media-name="{filename}">{preview}</button>'
         f'<div class="brm-asset-meta"><span>{kind_text} · {title}</span><time>{date_text}</time></div>'
-        f'<a class="brm-asset-download" href="{url}" download>下载</a></article>'
+        f'<a class="brm-asset-download" href="{url}" download>下载</a>'
+        f'{detail}{delete}</article>'
     )
+
+
+WORKBENCH_PAGE_SIZE = 24
+_archive_lock = threading.Lock()
+_archive_cache = (-60.0, ())
+
+
+def _archive_files():
+    """Index on demand and reuse the directory scan across library searches."""
+    global _archive_cache
+    with _archive_lock:
+        now = time.monotonic()
+        if now - _archive_cache[0] < 60:
+            return _archive_cache[1]
+        files = {}
+        for entry in OUTPUT_DIR.rglob("*"):
+            if entry.suffix.lower() not in PERSISTABLE_MEDIA_EXTS:
+                continue
+            if any(part.startswith(".") for part in entry.relative_to(OUTPUT_DIR).parts):
+                continue
+            path = _completed_output_path(entry)
+            if path is None or MEDIA_CACHE_DIR in path.parents or path in files:
+                continue
+            try:
+                files[path] = path.stat().st_mtime
+            except OSError:
+                continue
+        _archive_cache = (now, tuple(files.items()))
+        return _archive_cache[1]
+
+
+def _workbench_page(items, page):
+    pages = max(1, (len(items) + WORKBENCH_PAGE_SIZE - 1) // WORKBENCH_PAGE_SIZE)
+    page = max(1, min(pages, int(page or 1)))
+    start = (page - 1) * WORKBENCH_PAGE_SIZE
+    return items[start:start + WORKBENCH_PAGE_SIZE], page, pages
+
+
+def search_workbench_assets(query, kind, workflow, date, order, page):
+    _, _, done = task_queue.snapshot()
+    records = _asset_records(done, limit=math.inf)
+    known_paths = {record["path"] for record in records}
+    for path, timestamp in _archive_files():
+        if path in known_paths:
+            continue
+        archive = Task("", path.name, "历史归档", {}, submit_ts=timestamp, done_ts=timestamp)
+        records.append({"path": path, "task": archive, "kind": _media_kind(path)})
+    query = (query or "").strip().casefold()
+    workflow = (workflow or "").strip().casefold()
+    date = (date or "").strip()
+    matches = []
+    for record in records:
+        task, path = record["task"], record["path"]
+        timestamp = task.done_ts or task.submit_ts
+        label = WORKFLOW_BUILDERS.get(task.workflow_name, (None, task.workflow_name))[1]
+        if (kind != "all" and kind != record["kind"]
+            or query not in f"{task.id} {task.name} {path.name}".casefold()
+            or workflow not in f"{task.workflow_name} {label}".casefold()
+            or not time.strftime("%Y-%m-%d", time.localtime(timestamp)).startswith(date)):
+            continue
+        matches.append((timestamp, record))
+    matches.sort(key=lambda item: (item[0], str(item[1]["path"])), reverse=order != "oldest")
+    visible, page, pages = _workbench_page(matches, page)
+    cards = "".join(_asset_card_html(record, task_link=True) for _, record in visible
+                    if _completed_output_path(record["path"]))
+    return (
+        f'<p role="status">共 {len(matches)} 项 · 第 {page} / {pages} 页</p>'
+        f'<div class="brm-asset-grid brm-catalog-grid">{cards or "没有匹配的素材"}</div>',
+        gr.update(value=page, maximum=pages),
+    )
+
+
+def _task_details_html(task):
+    label = WORKFLOW_BUILDERS.get(task.workflow_name, (None, task.workflow_name))[1]
+    now = time.time()
+    wait_end = task.start_ts or task.done_ts or now
+    wait = _fmt_duration(max(0, wait_end - task.submit_ts))
+    duration = _fmt_duration(max(0, (task.done_ts or now) - task.start_ts)) if task.start_ts else "—"
+    stages = "".join(
+        f'<li>{escape(_stage_label(stage))} · {_fmt_duration(seconds)}</li>'
+        for stage, seconds in dict(task.stage_seconds).items()
+    )
+    outputs = "".join(
+        f'<li><a href="{_media_url(path)}" download>{escape(path.name)}</a></li>'
+        for value in (task.result if isinstance(task.result, list) else [])
+        if (path := _completed_output_path(value))
+    )
+    source = "、".join(task.input_sources) or "无文件输入或历史未记录"
+    error = f'<p class="brm-history-error">{escape(task.error[:2000])}</p>' if task.error else ""
+    retry = (
+        f'<button type="button" data-brm-action="task-retry" data-task-id="{escape(task.id)}">'
+        "使用原参数新建</button>" if task.retry_recipe and task.done_ts else ""
+    )
+    submitted = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(task.submit_ts))
+    return (
+        '<details class="brm-history-item">'
+        f'<summary><strong>{escape(label)}</strong> · {escape(task.status.value)} · {submitted}</summary>'
+        f'<p>{escape(task.name)} · <code>{escape(task.id)}</code></p>'
+        f'<p>输入来源：{escape(source)}　排队：{wait}　执行：{duration}</p>'
+        f'{error}<p>阶段耗时</p>{f"<ul>{stages}</ul>" if stages else "<p>暂无阶段数据</p>"}'
+        f'<p>产物</p>{f"<ul>{outputs}</ul>" if outputs else "<p>暂无可下载产物</p>"}'
+        f'{retry}</details>'
+    )
+
+
+def search_workbench_history(query, workflow, status, date, page):
+    query = (query or "").strip().casefold()
+    workflow = (workflow or "").strip().casefold()
+    date = (date or "").strip()
+    pending, running, done = task_queue.snapshot()
+    tasks = pending + running + done
+    exact = next((task for task in tasks if query == task.id.casefold()), None) if query else None
+    matches = [exact] if exact else sorted(
+        (task for task in tasks
+         if query in f"{task.name} {task.id}".casefold()
+         and workflow in f"{task.workflow_name} {WORKFLOW_BUILDERS.get(task.workflow_name, (None, task.workflow_name))[1]}".casefold()
+         and (status == "all" or task.status.value == status)
+         and time.strftime("%Y-%m-%d", time.localtime(task.submit_ts)).startswith(date)),
+        key=lambda task: task.submit_ts, reverse=True,
+    )
+    visible, page, pages = _workbench_page(matches, page)
+    details = "".join(_task_details_html(task) for task in visible) or "<p>没有匹配的任务</p>"
+    return f'<p role="status">共 {len(matches)} 条 · 第 {page} / {pages} 页</p>{details}', gr.update(value=page, maximum=pages)
+
+
+def _task_retry_source(task_id):
+    _, _, done = task_queue.snapshot()
+    task = next((item for item in done if item.id == task_id), None)
+    if not task or not task.retry_recipe or task.workflow_name not in RETRY_FIELDS:
+        raise gr.Error("这条任务没有可复用的完整参数。")
+    return task
+
+
+def prepare_workbench_retry(task_id):
+    task = _task_retry_source(task_id)
+    recipe = dict(task.retry_recipe)
+    return (
+        gr.update(visible=True), str(recipe.pop("prompt")),
+        json.dumps(recipe, ensure_ascii=False, indent=2), task.id, "",
+    )
+
+
+def submit_workbench_retry(task_id, prompt, parameters):
+    task = _task_retry_source(task_id)
+    try:
+        options = json.loads(parameters)
+        if not isinstance(options, dict) or set(options) != set(RETRY_FIELDS[task.workflow_name]) - {"prompt"}:
+            raise ValueError("请保留原有参数名称")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 12000:
+            raise ValueError("请输入提示词，最多 12000 字")
+        if any(isinstance(v, bool) or not isinstance(
+            v, str if isinstance(task.retry_recipe[key], str) else (int, float)
+        ) for key, v in options.items()):
+            raise ValueError("参数类型与原任务不一致")
+        handlers = {
+            h3_image.TEXT: api_submit_h3_image, flux3_image.TEXT: api_submit_flux3_text,
+            qwen_image21.WORKFLOW: api_submit_qwen_image21,
+            "image_z_image_turbo": submit_workflow_1, "LTX23-文生视频": submit_workflow_3_ltx,
+        }
+        if task.workflow_name in {"image_z_image_turbo", "LTX23-文生视频"}:
+            if _parse_size(options["size"]) not in {_parse_size(value) for value in output_size}:
+                raise ValueError("请选择工作台支持的尺寸")
+            if "batch" in options and (not float(options["batch"]).is_integer() or not 1 <= options["batch"] <= 4):
+                raise ValueError("图片数量须为 1 到 4 的整数")
+            if "seconds" in options and (not float(options["seconds"]).is_integer() or not 2 <= options["seconds"] <= 360):
+                raise ValueError("视频时长须为 2 到 360 的整数秒")
+        result = handlers[task.workflow_name](prompt=prompt, **options)
+    except (TypeError, ValueError) as exc:
+        raise gr.Error(str(exc)) from exc
+    return f'已新建任务 {result["task_id"]}'
 
 
 def _render_dashboard_assets(records: list[dict[str, object]]) -> str:
@@ -4384,6 +5391,8 @@ def _render_dashboard_assets(records: list[dict[str, object]]) -> str:
         '<select id="brm-asset-sort" aria-label="素材排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>'
         '<button type="button" data-brm-action="asset-view" data-asset-view="grid">网格</button>'
         '<button type="button" data-brm-action="asset-view" data-asset-view="list">列表</button></div></div>'
+        '<div id="brm-asset-count" role="status"></div>'
+        '<div id="brm-asset-status" role="status" aria-live="polite"></div>'
         '<div id="brm-asset-grid" class="brm-asset-grid">'
         f'{cards}{empty}</div></section>'
         '<aside id="brm-audio-dock" class="brm-audio-dock" hidden>'
@@ -4430,18 +5439,19 @@ def _render_task_cards(tasks: list[Task], pending_positions: dict[str, int]) -> 
     return '<div class="brm-task-card-grid">' + ("".join(cards) or '<div class="brm-empty-tasks">暂无任务，点击“新建任务”开始创作。</div>') + '</div>'
 
 
-def _render_system_status(stats: dict[str, str]) -> str:
-    entries = [
-        ("A5000 利用率", stats["gpu"]), ("显存占用", stats["vram"]),
-        ("媒体任务", stats["queue"]), ("输出空间", stats["storage"]),
-        ("素材总数", stats["assets"]), ("今日完成", stats["today"]),
-    ]
-    return '<section class="brm-system-status"><h3>系统状态</h3>' + "".join(
-        f'<div><span>{label}</span><strong>{escape(value)}</strong></div>' for label, value in entries
-    ) + '</section>'
+def _render_system_status(stats: dict[str, object]) -> str:
+    return system_telemetry.render_system_status_html(
+        stats,
+        default_concurrency=QUEUE_CONCURRENCY,
+    )
 
 
 def build_completed_assets_bundle():
+    with _asset_mutation_lock:
+        return _build_completed_assets_bundle_locked()
+
+
+def _build_completed_assets_bundle_locked():
     """Create a bounded download archive from validated current artifacts only."""
     _, _, done = task_queue.snapshot()
     records = _asset_records(done)
@@ -4484,7 +5494,7 @@ def build_completed_assets_bundle():
         return gr.update(value=None, visible=False)
 
 
-def render_queue():
+def _build_dashboard_snapshot():
     """Render the shared task state plus the homepage's real dashboard data."""
     pending, running, done = task_queue.snapshot()
 
@@ -4514,7 +5524,7 @@ def render_queue():
         "| 任务名称 | 状态 | 实时进度 | 提交时间 | 耗时 | 备注 |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for t in all_tasks:
+    for t in all_tasks[:12]:
         icon = STATUS_ICONS.get(t.status, "")
         rows.append(
             f"| {_md_cell(t.name)} "
@@ -4556,6 +5566,75 @@ def render_queue():
     )
 
 
+_dashboard_cache_lock = threading.Lock()
+_dashboard_cache = None
+_dashboard_cache_started = False
+
+
+def _refresh_dashboard_cache():
+    global _dashboard_cache
+    snapshot = _build_dashboard_snapshot()
+    with _dashboard_cache_lock:
+        _dashboard_cache = snapshot
+
+
+def start_dashboard_cache_worker():
+    """Collect filesystem/GPU state once per process, never in a page request."""
+    global _dashboard_cache_started
+    with _dashboard_cache_lock:
+        if _dashboard_cache_started:
+            return
+        _dashboard_cache_started = True
+    try:
+        _refresh_dashboard_cache()
+    except Exception:
+        logging.exception('Initial dashboard snapshot failed; background collector will retry')
+
+    def collect():
+        while True:
+            started = time.monotonic()
+            try:
+                _refresh_dashboard_cache()
+            except Exception:
+                logging.exception('Dashboard refresh failed; retaining last completed snapshot')
+            time.sleep(max(0.25, 1.5 - (time.monotonic() - started)))
+
+    threading.Thread(target=collect, name='brm-dashboard-cache', daemon=True).start()
+
+
+def refresh_dashboard(previous, *, force=False):
+    """Keep each browser's unchanged panels in place, including media controls."""
+    snapshot = render_queue()
+    return tuple(
+        value if force or previous is None or value != previous[index] else gr.skip()
+        for index, value in enumerate(snapshot)
+    ) + (snapshot,)
+
+
+def force_dashboard_refresh(previous):
+    return refresh_dashboard(previous, force=True)
+
+
+def render_queue():
+    """Serve the latest complete snapshot without waiting for GPU/disk probes."""
+    with _dashboard_cache_lock:
+        snapshot = _dashboard_cache
+        started = _dashboard_cache_started
+    if snapshot is not None:
+        # Gradio postprocessing must not mutate the collector's cached update dict.
+        return tuple(dict(value) if isinstance(value, dict) else value for value in snapshot)
+    if not started:
+        return _build_dashboard_snapshot()  # Standalone tools/tests need no daemon.
+    return (
+        '<div role="status">正在同步任务状态…</div>',
+        gr.update(value='', visible=False),
+        '<div role="status">正在读取任务记录…</div>',
+        '<div role="status">正在读取系统状态…</div>',
+        '正在读取任务记录…',
+        '<div role="status">正在读取素材…</div>',
+    )
+
+
 output_size = [
     "512 × 512", "768 × 768", "1024 × 1024", "2048 × 2048",
     "1024 × 768", "768 × 1024",
@@ -4593,6 +5672,145 @@ def on_audio_upload(filepath):
     return name, dur
 
 
+def on_voice_preset(qwen, preset_id):
+    if preset_id:
+        name, voice = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
+        common = (str(voice["path"]), name, voice["duration"],
+                  f"**{voice['label']}** · {voice['description']} · {voice['duration']:.1f}秒参考音频")
+        text = voice["reference_text"]
+    else:
+        common = (None, "", 0.0, "选择内置音色即可试听，也可在下方上传自己的参考音频。")
+        text = ""
+    return common + (gr.update(value=text, interactive=not bool(preset_id)),) if qwen else common
+
+
+def on_voice_custom_upload(qwen, filepath):
+    name, duration = on_audio_upload(filepath)
+    description = (f"已使用自定义参考音频 · {duration:.1f}秒" if name else
+                   "选择内置音色即可试听，也可在下方上传自己的参考音频。")
+    common = (name, duration, gr.update(value=""), description)
+    return common + (gr.update(value="", interactive=True),) if qwen else common
+
+
+def ui_submit_index_voice(prompt, preset_id, uploaded_name, language, speed, temperature=0.8):
+    if preset_id:
+        uploaded_name, _ = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
+    return submit_workflow_7(prompt, uploaded_name, temperature, language, speed)
+
+
+def ui_submit_qwen_voice(text, preset_id, uploaded_name, language, reference_text):
+    if preset_id:
+        uploaded_name, voice = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
+        reference_text = voice["reference_text"]
+    return api_submit_qwen3_tts(text, uploaded_name, language, reference_text)
+
+
+ZONOS3_UI_LANGUAGE_CHOICES = [
+    ("中文（普通话）", "zh"),
+    ("英文（美式）", "en"),
+    ("日文", "ja"),
+    ("韩文", "ko"),
+    ("法文", "fr"),
+    ("德文", "de"),
+    ("西班牙文", "es"),
+    ("葡萄牙文", "pt"),
+    ("意大利文", "it"),
+    ("俄文", "ru"),
+]
+INDEXTTS25_UI_LANGUAGE_CHOICES = [
+    ("中文", "zh"),
+    ("英文", "en"),
+    ("日文", "ja"),
+    ("西班牙文", "es"),
+    ("阿拉伯文", "ar"),
+]
+
+
+def on_voice_engine_change(engine_choice, current_lang):
+    is_zonos = str(engine_choice or "zonos3").strip().lower() == "zonos3"
+    if is_zonos:
+        choices = ZONOS3_UI_LANGUAGE_CHOICES
+        valid_codes = {code for _, code in choices}
+        lang_val = current_lang if current_lang in valid_codes else "zh"
+        return (
+            gr.update(choices=choices, value=lang_val),
+            gr.update(visible=False),
+            gr.update(visible=True),
+        )
+    choices = INDEXTTS25_UI_LANGUAGE_CHOICES
+    valid_codes = {code for _, code in choices}
+    lang_val = current_lang if current_lang in valid_codes else "zh"
+    return (
+        gr.update(choices=choices, value=lang_val),
+        gr.update(visible=(VOICE_ENGINE == "indextts25")),
+        gr.update(visible=False),
+    )
+
+
+def ui_submit_voice_clone(engine_choice, prompt, preset_id, uploaded_name, language, speed, seed):
+    if preset_id:
+        uploaded_name, _ = voice_presets.stage_voice(preset_id, COMFY_ROOT / "input")
+    if str(engine_choice or "zonos3").strip().lower() == "zonos3":
+        return api_submit_zonos3(prompt, uploaded_name, language, seed)
+    return submit_workflow_7(prompt, uploaded_name, 0.8, language, speed)
+
+
+def build_voice_clone_panel(qwen=False):
+    engine = "zonos3"
+    with gr.Column(elem_classes=["voice-clone-panel"]):
+        gr.Markdown(
+            "## 语音克隆 & TTS · ZONOS3-Mini / IndexTTS-2.5\n"
+            "主力推荐 **ZONOS3-Mini（约 3.3s 极速零显存语音克隆，直连 :1919 输出 WAV）**；"
+            "亦可切换 **IndexTTS-2.5（高表现力情感克隆，输出 MP3）**。支持 12 款内置音色、自定义参考音频或零样本默认音色（ZONOS3-Mini）。",
+            elem_classes=["voice-clone-heading"],
+        )
+        tts_engine = gr.Radio(
+            label="语音合成引擎",
+            choices=[
+                ("ZONOS3-Mini（3.3s 极速零显存语音克隆 · 推荐）", "zonos3"),
+                ("IndexTTS-2.5（高表现力情感克隆）", "indextts25"),
+            ],
+            value="zonos3",
+        )
+        with gr.Row(equal_height=False, elem_classes=["voice-clone-row"]):
+            with gr.Column(scale=3, min_width=320, elem_classes=["voice-text-column"]):
+                text = gr.Textbox(label="合成文本", value="欢迎使用本地人工智能工作台，让创作更加自然高效。",
+                                  placeholder="输入要朗读的文字，可用标点安排停顿。", lines=9, max_lines=14,
+                                  elem_classes=["voice-clone-text"])
+                gr.Markdown("建议先用一小段文字试听，再提交完整内容。", elem_classes=["voice-clone-hint"])
+            with gr.Column(scale=2, min_width=320, elem_classes=["voice-reference-column"]):
+                preset = gr.Dropdown(label="音色选择", choices=voice_presets.choices(), value="", filterable=True,
+                                     info="12款内置参考音色，ZONOS3-Mini 与 IndexTTS-2.5 共用；上传音频后自动切换为自定义。")
+                description = gr.Markdown("选择内置音色即可试听，也可在下方上传自己的参考音频（ZONOS3-Mini 也支持不传参考音频直接合成）。",
+                                           elem_classes=["voice-preset-description"])
+                audio = gr.Audio(type="filepath", label="参考音频 · 可试听、上传或录音", editable=False,
+                                 elem_classes=["voice-reference-audio"])
+                name = gr.State(""); duration = gr.State(0.0)
+        with gr.Row(equal_height=False, elem_classes=["voice-clone-controls"]):
+            language = gr.Dropdown(label="合成语言", value="zh", scale=1, choices=ZONOS3_UI_LANGUAGE_CHOICES)
+            speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label="语速（1.0 为正常）", scale=2, visible=False)
+            seed = gr.Number(label="随机种子（ZONOS3-Mini）", value=42, precision=0, minimum=0, maximum=2**32 - 1, scale=2, visible=True)
+        button = gr.Button("提交语音任务", variant="primary", elem_classes=["voice-clone-submit"])
+    source_outputs = [audio, name, duration, description]
+    upload_outputs = [name, duration, preset, description]
+    tts_engine.change(
+        fn=on_voice_engine_change,
+        inputs=[tts_engine, language],
+        outputs=[language, speed, seed],
+        queue=False,
+        show_progress="hidden",
+        api_visibility="private",
+    )
+    preset.input(fn=partial(on_voice_preset, False), inputs=preset, outputs=source_outputs,
+                 api_name="voice_preset_"+engine, api_visibility="private")
+    audio.upload(fn=partial(on_voice_custom_upload, False), inputs=audio, outputs=upload_outputs,
+                 api_name="voice_upload_"+engine, api_visibility="private")
+    audio.clear(fn=partial(on_voice_custom_upload, False), inputs=audio, outputs=upload_outputs,
+                api_visibility="private")
+    button.click(fn=ui_submit_voice_clone, inputs=[tts_engine, text, preset, name, language, speed, seed],
+                 api_name="ui_submit_voice_clone", api_visibility="private")
+
+
 def _qwen_display_text(reasoning: str, answer: str) -> str:
     """将 Qwen 的可选推理片段与最终回答组合成适合流式文本框显示的内容。"""
     parts = []
@@ -4603,8 +5821,66 @@ def _qwen_display_text(reasoning: str, answer: str) -> str:
     return "\n\n".join(parts) or "正在等待模型输出……"
 
 
+def _llm_ui_state():
+    state = llm_runtime.status()
+    try:
+        response = requests.get("http://127.0.0.1:9300/admin/llm-runtime", timeout=2)
+        if response.ok:
+            return response.json()
+    except Exception:
+        pass
+    return {**state, "control_unavailable": True}
+
+
+def llm_status_text(state=None):
+    state = _llm_ui_state() if state is None else state
+    model = state.get("model") or llm_runtime.selection(QWEN_API_BASE, QWEN_MODEL)[1]
+    if state.get("control_unavailable"):
+        message = "模型引擎控制服务暂不可用，请稍后刷新。"
+    elif state.get("state") == "ready" and str(model).startswith("strata-"):
+        message = "引擎状态：Strata 双 A4000 32GB 高速并发在线（工作台对话、`/qwen-api/v1` 及开机自启均已绑定该主力模型）。"
+    else:
+        message = state.get("message", "")
+    return f"当前模型：`{model}`\n\n{message}"
+
+
+def llm_control_updates():
+    state = _llm_ui_state()
+    ready = state.get("state") == "ready" and not state.get("switching") and not state.get("control_unavailable")
+    return (llm_status_text(state),
+            gr.update(interactive=False, visible=False),
+            gr.update(interactive=ready and state.get("target") != "strata" and bool(state.get("strata_installed")), visible=False))
+
+
+def switch_llm_ui(target):
+    message = request_llm_switch(target)
+    if message.startswith("切换已开始"):
+        return message, gr.update(interactive=False), gr.update(interactive=False)
+    _, qwen, strata = llm_control_updates()
+    return message, qwen, strata
+
+
+def request_llm_switch(target):
+    try:
+        response = requests.post("http://127.0.0.1:9300/admin/llm-runtime/switch", json={"target": target}, timeout=8)
+        if response.status_code != 202:
+            return "切换未开始：" + response.json().get("detail", response.text)
+        return "切换已开始。双 A4000 互斥加载；状态每 5 秒自动刷新，完成后再发送问题。"
+    except requests.RequestException:
+        return "切换控制服务暂不可用，请联系管理员。"
+
+
 def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_thinking):
-    """通过本机 OpenAI 兼容接口流式返回当前启用的 Qwen 回答。"""
+    try:
+        with llm_runtime.inference_guard():
+            yield from _stream_selected_llm(question, system_prompt, temperature, max_tokens, enable_thinking)
+    except RuntimeError as exc:
+        yield str(exc)
+
+
+def _stream_selected_llm(question, system_prompt, temperature, max_tokens, enable_thinking):
+    """通过本机 OpenAI 兼容接口流式返回当前启用的 Qwen 回答。
+"""
     question = (question or "").strip()
     if not question:
         yield "请输入问题后再发送。"
@@ -4614,8 +5890,10 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
     if (system_prompt or "").strip():
         messages.append({"role": "system", "content": system_prompt.strip()})
     messages.append({"role": "user", "content": question})
+    api_base, model = llm_runtime.selection(QWEN_API_BASE, QWEN_MODEL)
+    read_timeout = 180 if model.startswith("strata-") else 30
     payload = {
-        "model": QWEN_MODEL,
+        "model": model,
         "messages": messages,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
@@ -4624,6 +5902,7 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
         # 留给正文；需要观察推理流时，用户可在页面中显式开启。
         "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
     }
+    payload = llm_runtime.prepare_payload(payload, model)
 
     reasoning_parts = []
     answer_parts = []
@@ -4639,10 +5918,11 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
     while response is None:
         try:
             candidate = requests.post(
-                f"{QWEN_API_BASE}/chat/completions",
+                f"{api_base}/chat/completions",
                 json=payload,
+                headers=llm_runtime.upstream_headers(model),
                 stream=True,
-                timeout=(8, 30),
+                timeout=(8, read_timeout),
             )
             candidate.raise_for_status()
             response = candidate
@@ -4704,7 +5984,7 @@ def stream_qwen_answer(question, system_prompt, temperature, max_tokens, enable_
                         "".join(answer_parts),
                     )
     except requests.ReadTimeout:
-        yield "⚠️ Qwen 已连续 30 秒没有返回内容，连接已停止。请重试或缩短问题。"
+        yield f"⚠️ 模型已连续 {read_timeout} 秒没有返回内容，连接已停止。请重试或缩短问题。"
         return
     except requests.RequestException as exc:
         yield (
@@ -4739,15 +6019,18 @@ def clear_qwen_chat():
 BRM_NAV_JS = r"""
 (() => {
   const groups = {
-    "任务中心": "home", "文生图Z-Image": "image", "Qwen Image 2.1 文生图": "image", "图生图FLUX.2-klein": "image",
+    "任务中心": "home",
+    "Qwen Image 2.1 文生图": "image", "Qwen Image 2.1 图生图": "image",
+    "文生图Z-Image": "image", "FLUX.2 Klein 快速图生图": "image", "图生图FLUX.2-klein": "image",
     "MiniMax H3 文生视频": "video", "MiniMax H3 图生视频": "video",
     "文生视频 LTX2.3": "video", "图生视频 LTX2.3": "video",
-    "图像/视频增强修复 SeedVR2": "media",
     "首尾帧视频LTX2.3": "video", "数字人-语音驱动LTX2.3": "video",
-    "语音克隆 IndexTTS-2.5": "audio", "语音克隆 IndexTTS-2（回退）": "audio",
-    "音乐生成ACE-Step 1.5": "audio", "Qwen 大模型": "tools"
+    "图像/视频增强修复 SeedVR2": "media",
+    "语音克隆 & TTS": "audio", "音乐生成ACE-Step 1.5": "audio",
+    "Qwen 大模型": "tools"
   };
-  const firstTabs = { image:"文生图Z-Image", video:"MiniMax H3 文生视频", media:"图像/视频增强修复 SeedVR2", audio:"语音克隆 IndexTTS-2.5", tools:"Qwen 大模型", home:"任务中心" };
+  const firstTabs = { image:"Qwen Image 2.1 文生图", video:"MiniMax H3 文生视频", media:"图像/视频增强修复 SeedVR2", audio:"语音克隆 & TTS", tools:"Qwen 大模型", home:"任务中心" };
+  const fallbackTabs = { image:"文生图Z-Image", video:"文生视频 LTX2.3", audio:"音乐生成ACE-Step 1.5" };
   const auxiliarySections = new Set(["home", "assets", "history", "settings", "keys"]);
   const boot = () => {
     const root = document.querySelector("#workflow-tabs"); const nav = document.querySelector("#primary-nav");
@@ -4755,13 +6038,50 @@ BRM_NAV_JS = r"""
     if (window.__brmNavigationReady) return;
     const labelOf = (button) => (button?.textContent || "").trim();
     const workflowButtons = () => Array.from(root.querySelectorAll('.tab-container[role="tablist"] button, .overflow-dropdown button'));
-    let currentAssetFilter = "all";
-    const applyAssetFilter = (filter) => {
-      currentAssetFilter = filter || "all";
-      document.querySelectorAll("[data-brm-action='asset-filter']").forEach((item) => item.classList.toggle("is-selected", item.dataset.assetFilter === currentAssetFilter));
-      document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = currentAssetFilter !== "all" && card.dataset.assetType !== currentAssetFilter; });
+    const assetState = { type:"all", query:"", sort:"newest", view:"grid" };
+    const applyAssetFilter = () => {
+      const grid = document.querySelector("#brm-asset-grid");
+      if (!grid) return;
+      const search = document.querySelector("#brm-asset-search");
+      const sort = document.querySelector("#brm-asset-sort");
+      if (search && search.value !== assetState.query) search.value = assetState.query;
+      if (sort && sort.value !== assetState.sort) sort.value = assetState.sort;
+      document.querySelectorAll("[data-brm-action='asset-filter']").forEach((item) => {
+        const selected = item.dataset.assetFilter === assetState.type;
+        item.classList.toggle("is-selected", selected);
+        item.setAttribute("aria-pressed", String(selected));
+      });
+      grid.classList.toggle("is-list", assetState.view === "list");
+      const query = assetState.query.trim().toLowerCase();
+      const cards = [...grid.querySelectorAll(".brm-asset-card")];
+      let visible = 0;
+      for (const card of cards) {
+        card.hidden = (assetState.type !== "all" && card.dataset.assetType !== assetState.type)
+          || (query !== "" && !card.dataset.assetName.includes(query));
+        if (!card.hidden) visible++;
+      }
+      const direction = assetState.sort === "oldest" ? 1 : -1;
+      const ordered = [...cards].sort((a, b) => direction * (Number(a.dataset.assetTime) - Number(b.dataset.assetTime)));
+      if (ordered.some((card, i) => card !== cards[i])) ordered.forEach((card) => grid.appendChild(card));
+      const count = document.querySelector("#brm-asset-count");
+      const message = visible ? `显示 ${visible} / ${cards.length} 项` : "当前筛选没有匹配的素材";
+      if (count && count.textContent !== message) count.textContent = message;
+    };
+    const clickControl = (id) => document.querySelector("#" + id + " button, button#" + id)?.click();
+    const setTextControl = (id, value) => {
+      const input = document.querySelector("#" + id + " input, #" + id + " textarea");
+      if (!input) return;
+      const prototype = input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value").set.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles:true }));
     };
     const showGroup = (group) => {
+      const keySecret = document.querySelector("#brm-key-secret");
+      if (keySecret) keySecret.value = "";
+      const keySecretWrap = document.querySelector("#brm-key-secret-wrap");
+      if (keySecretWrap) keySecretWrap.hidden = true;
+      window.clearTimeout(window.__brmKeyHideTimer);
+      const previousGroup = nav.dataset.active;
       nav.dataset.active = group; document.documentElement.dataset.brmSection = group;
       const settingsTrigger = document.querySelector("#global-settings-trigger");
       if (settingsTrigger) {
@@ -4778,9 +6098,12 @@ BRM_NAV_JS = r"""
           ? "none"
           : (buttonGroup === group ? "inline-flex" : "none");
       });
-      applyAssetFilter(({image:"image", video:"video", audio:"audio"})[group] || "all");
+      if (previousGroup !== group && ["image", "video", "audio"].includes(group)) assetState.type = group;
+      applyAssetFilter();
       if (group === "keys") window.__brmLoadApiKeys?.();
+      if (previousGroup !== group && group === "assets") clickControl("brm-catalog-search");
       if (group === "history") {
+        if (previousGroup !== group) window.setTimeout(() => clickControl("brm-history-search"), 0);
         window.setTimeout(() => {
           const accordion = document.querySelector("#task-history-accordion");
           const trigger = accordion?.querySelector(":scope > button");
@@ -4800,11 +6123,41 @@ BRM_NAV_JS = r"""
       const selected = root.querySelector('[role="tab"][aria-selected="true"]');
       showGroup(groups[labelOf(selected)] || "home");
     };
-    window.__brmSelectCategory = (group) => selectWorkflow(firstTabs[group] || firstTabs.image);
+    window.__brmSelectCategory = (group) => {
+      const primary = firstTabs[group] || firstTabs.image;
+      const target = workflowButtons().find((button) => labelOf(button) === primary)
+        ? primary
+        : (fallbackTabs[group] || firstTabs.image);
+      selectWorkflow(target);
+    };
     window.__brmSelectSection = (section) => showGroup(section || "home");
     window.__brmSelectDashboard = () => showGroup("home");
     const htmlEscape = (value) => String(value || "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
     const keyApiUrl = "/qwen-api/admin/api-keys";
+    let deletingAsset = false;
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest('[data-brm-action="asset-delete"]');
+      if (!button) return;
+      event.preventDefault();
+      if (deletingAsset) return;
+      const filename = button.dataset.filename;
+      if (!window.confirm(`确认彻底删除“${filename}”吗？服务器素材文件和关联预览将永久删除，无法恢复。已下载到本地的副本不受影响。`)) return;
+      deletingAsset = true; button.disabled = true;
+      const status = (message) => { const host = document.querySelector("#brm-asset-status"); if (host) host.textContent = message; };
+      status("正在彻底删除…");
+      try {
+        const url = `/api/v1/tasks/${encodeURIComponent(button.dataset.taskId)}/artifacts/${encodeURIComponent(filename)}`;
+        const response = await fetch(url, {method:"DELETE", credentials:"same-origin", headers:{"Content-Type":"application/json"}, body:JSON.stringify({confirmed:true})});
+        const data = await response.json();
+        if (!response.ok || !data.deleted) throw new Error(data.error?.message || data.detail || "删除失败，请重试");
+        document.querySelectorAll('[data-brm-action="asset-delete"]').forEach((item) => { if (item.dataset.filename === filename && item.dataset.taskId === button.dataset.taskId) item.closest(".brm-asset-card")?.remove(); });
+        const viewer = document.querySelector("#brm-dashboard-viewer"); if (viewer) { viewer.hidden = true; viewer.innerHTML = ""; }
+        const player = document.querySelector("#brm-audio-player"); if (player) { player.pause(); player.removeAttribute("src"); player.load(); }
+        const dock = document.querySelector("#brm-audio-dock"); if (dock) dock.hidden = true;
+        status(data.warnings?.length ? "素材已删除，部分下载缓存未清理，请联系管理员" : "素材已彻底删除，无法恢复");
+      } catch (error) { status(error.message || "删除失败，请重试"); }
+      finally { deletingAsset = false; button.disabled = false; }
+    });
     const keyState = { records: [], loaded: false, busy: false };
     const keyStatus = (record) => {
       if (record.status === "revoked") return ["已撤销", "revoked"];
@@ -4830,11 +6183,14 @@ BRM_NAV_JS = r"""
           const [label, css] = keyStatus(record);
           const disabled = keyState.busy ? " disabled" : "";
           const keyId = htmlEscape(record.id);
-          const controls = record.status === "active"
+          const lifecycleControls = record.status === "active"
             ? `<button type="button" data-key-action="disable" data-key-id="${keyId}"${disabled}>禁用</button><button type="button" class="primary" data-key-action="rotate" data-key-id="${keyId}"${disabled}>轮换</button>`
             : record.status === "disabled"
               ? `<button type="button" data-key-action="enable" data-key-id="${keyId}"${disabled}>启用</button><button type="button" class="danger" data-key-action="delete" data-key-id="${keyId}"${disabled}>删除</button>`
               : `<button type="button" class="danger" data-key-action="delete" data-key-id="${keyId}"${disabled}>删除</button>`;
+          const revealControl = `<button type="button" data-key-action="reveal" data-key-id="${keyId}"${disabled}>查看</button>`;
+          const deleteControl = record.status === "active" ? '<button type="button" class="danger" disabled title="请先禁用密钥，再永久删除">删除</button>' : "";
+          const controls = revealControl + lifecycleControls + deleteControl;
           return `<tr><td>${htmlEscape(record.name)}</td><td><code>${htmlEscape(record.prefix)}</code></td><td><span class="brm-key-state ${css}">${label}</span></td><td>${formatTime(record.expires_at)}</td><td>${Number(record.use_count || 0)}</td><td>${formatLastUsed(record.last_used_at)}</td><td><div class="brm-key-row-actions">${controls}</div></td></tr>`;
         }).join("");
       }
@@ -4866,10 +6222,12 @@ BRM_NAV_JS = r"""
           const secret = document.querySelector("#brm-key-secret");
           if (secret) secret.value = payload.api_key;
           if (secretWrap) secretWrap.hidden = false;
-          setKeyStatus("密钥已生成，请立即复制明文；离开此页面后无法再次查看");
+          window.clearTimeout(window.__brmKeyHideTimer);
+          window.__brmKeyHideTimer = window.setTimeout(() => { if (secret) secret.value = ""; if (secretWrap) secretWrap.hidden = true; }, 60000);
+          setKeyStatus("明文密钥已显示，60 秒后自动隐藏，请妥善保管");
         } else setKeyStatus(successMessage);
         await loadApiKeys(Boolean(payload.api_key));
-        if (payload.api_key) setKeyStatus("密钥已生成，请立即复制明文；离开此页面后无法再次查看");
+        if (payload.api_key) setKeyStatus("明文密钥已显示，60 秒后自动隐藏，请妥善保管");
         return true;
       } catch (error) {
         setKeyStatus(error.message || "密钥操作失败", true);
@@ -4882,8 +6240,13 @@ BRM_NAV_JS = r"""
       const keyAction = event.target.closest("[data-key-action]");
       if (!keyAction) return;
       const action = keyAction.dataset.keyAction;
-      if (!["create", "disable", "enable", "delete", "rotate"].includes(action)) return;
+      if (!["create", "disable", "enable", "delete", "rotate", "reveal", "hide"].includes(action)) return;
       event.preventDefault();
+      if (action === "hide") {
+        const secret = document.querySelector("#brm-key-secret"); if (secret) secret.value = "";
+        const wrap = document.querySelector("#brm-key-secret-wrap"); if (wrap) wrap.hidden = true;
+        window.clearTimeout(window.__brmKeyHideTimer); return;
+      }
       if (action === "create") {
         const name = document.querySelector("#brm-key-name")?.value.trim() || "";
         const expires = document.querySelector("#brm-key-expires")?.value || "";
@@ -4895,6 +6258,8 @@ BRM_NAV_JS = r"""
       const selected = keyAction.dataset.keyId || "";
       const selectedRecord = keyState.records.find((record) => record.id === selected);
       if (!selectedRecord) { setKeyStatus("找不到要操作的密钥，请刷新列表后重试", true); return; }
+      if (action === "reveal" && !selectedRecord.can_reveal) { setKeyStatus("旧密钥仅保存哈希，无法恢复明文；请使用原保存副本，或轮换后查看新密钥（轮换会使旧密钥失效）", true); return; }
+      if (action === "rotate" && !window.confirm(`确认轮换“${selectedRecord.name}”吗？旧密钥将立即失效，调用方需要更新新密钥。`)) return;
       if (action === "delete" && !window.confirm(`确认从数据库永久删除“${selectedRecord.name}”吗？此操作不可恢复。`)) return;
       const secretWrap = document.querySelector("#brm-key-secret-wrap"); if (secretWrap && action === "rotate") secretWrap.hidden = true;
       const method = action === "delete" ? "DELETE" : "POST";
@@ -4908,10 +6273,21 @@ BRM_NAV_JS = r"""
       if (kind === "home") { event.preventDefault(); window.__brmSelectDashboard(); }
       if (kind === "section") { event.preventDefault(); showGroup(action.dataset.section || "home"); }
       if (kind === "workflow") { event.preventDefault(); selectWorkflow(action.dataset.workflow); action.closest("details")?.removeAttribute("open"); }
-      if (kind === "asset-filter") {
-        applyAssetFilter(action.dataset.assetFilter);
+      if (kind === "task-link") {
+        setTextControl("brm-history-query", action.dataset.taskId);
+        const alreadyViewing = nav.dataset.active === "history";
+        showGroup("history");
+        if (alreadyViewing) window.setTimeout(() => clickControl("brm-history-search"), 0);
       }
-      if (kind === "asset-view") { document.querySelector("#brm-asset-grid")?.classList.toggle("is-list", action.dataset.assetView === "list"); }
+      if (kind === "task-retry") {
+        setTextControl("brm-retry-id", action.dataset.taskId);
+        window.setTimeout(() => clickControl("brm-retry-load"), 0);
+      }
+      if (kind === "asset-filter") {
+        assetState.type = action.dataset.assetFilter;
+        applyAssetFilter();
+      }
+      if (kind === "asset-view") { assetState.view = action.dataset.assetView; applyAssetFilter(); }
       if (kind === "audio-play") {
         const dock = document.querySelector("#brm-audio-dock"), player = document.querySelector("#brm-audio-player"), title = document.querySelector("#brm-audio-title"), download = document.querySelector("#brm-audio-download");
         if (dock && player && download) { player.src = action.dataset.mediaUrl || ""; title.textContent = action.dataset.mediaName || "音频试听"; download.href = action.dataset.mediaUrl || "#"; dock.hidden = false; player.play().catch(() => {}); }
@@ -4925,8 +6301,12 @@ BRM_NAV_JS = r"""
       }
       if (kind === "media-close") { const viewer = document.querySelector("#brm-dashboard-viewer"); if (viewer) { viewer.hidden = true; viewer.innerHTML = ""; } }
     });
-    document.addEventListener("input", (event) => { if (event.target.id !== "brm-asset-search") return; const query = event.target.value.trim().toLowerCase(); document.querySelectorAll(".brm-asset-card").forEach((card) => { card.hidden = Boolean(query) && !String(card.dataset.assetName || "").includes(query); }); });
-    document.addEventListener("change", (event) => { if (event.target.id !== "brm-asset-sort") return; const grid = document.querySelector("#brm-asset-grid"); if (!grid) return; const cards = Array.from(grid.querySelectorAll(".brm-asset-card")); cards.sort((a,b) => (Number(a.dataset.assetTime) - Number(b.dataset.assetTime)) * (event.target.value === "oldest" ? 1 : -1)).forEach((card) => grid.appendChild(card)); });
+    document.addEventListener("input", (event) => {
+      if (event.target.id === "brm-asset-search") { assetState.query = event.target.value; applyAssetFilter(); }
+    });
+    document.addEventListener("change", (event) => {
+      if (event.target.id === "brm-asset-sort") { assetState.sort = event.target.value; applyAssetFilter(); }
+    });
     const syncRuntimeStatus = () => {
       const status = document.querySelector("#brm-runtime-text");
       const summary = (document.querySelector("#q-summary")?.textContent || "").trim();
@@ -4940,19 +6320,73 @@ BRM_NAV_JS = r"""
       const padding = window.innerWidth <= 980 ? "132px 14px 34px" : "84px 24px 42px 244px";
       shell.style.setProperty("padding", padding, "important");
     };
+    let pollTimer;
+    let activeQueue = Boolean(document.querySelector('.brm-queue-summary[data-active="1"]'));
+    const schedulePoll = () => {
+      window.clearTimeout(pollTimer);
+      if (!document.hidden) pollTimer = window.setTimeout(poll, activeQueue ? 1500 : 8000);
+    };
+    const poll = () => {
+      window.clearTimeout(pollTimer);
+      if (!document.hidden) clickControl("brm-dashboard-poll");
+      schedulePoll();
+    };
     const summaryHost = document.querySelector("#q-summary");
-    if (summaryHost) new MutationObserver(syncRuntimeStatus).observe(summaryHost, { childList:true, subtree:true, characterData:true });
+    if (summaryHost) new MutationObserver(() => {
+      syncRuntimeStatus();
+      const active = Boolean(summaryHost.querySelector('.brm-queue-summary[data-active="1"]'));
+      if (active !== activeQueue) {
+        activeQueue = active;
+        schedulePoll();
+      }
+    }).observe(summaryHost, { childList:true, subtree:true, characterData:true, attributes:true, attributeFilter:["data-active"] });
     const assetHost = document.querySelector("#dashboard-assets");
-    if (assetHost) new MutationObserver(() => applyAssetFilter(currentAssetFilter)).observe(assetHost, { childList:true, subtree:true });
+    if (assetHost) new MutationObserver(applyAssetFilter).observe(assetHost, { childList:true, subtree:true });
+    const progressHost = document.querySelector("#q-live-progress");
+    if (progressHost) {
+      const expandedProgress = new Set();
+      progressHost.addEventListener("click", (event) => {
+        const summary = event.target.closest(".brm-live-progress-details > summary");
+        if (!summary) return;
+        const details = summary.parentElement;
+        // The browser toggles `open` after this click handler returns.
+        if (details.open) expandedProgress.delete(details.dataset.taskId);
+        else expandedProgress.add(details.dataset.taskId);
+      });
+      new MutationObserver(() => {
+        const liveIds = new Set();
+        progressHost.querySelectorAll(".brm-live-progress-details").forEach((details) => {
+          liveIds.add(details.dataset.taskId);
+          details.open = expandedProgress.has(details.dataset.taskId);
+        });
+        for (const id of expandedProgress) if (!liveIds.has(id)) expandedProgress.delete(id);
+      }).observe(progressHost, { childList:true, subtree:true });
+    }
+    const telemetryHost = document.querySelector("#dashboard-system-status");
+    if (telemetryHost) {
+      let telemetryDetailsOpen = false;
+      telemetryHost.addEventListener("click", (event) => {
+        const summary = event.target.closest(".brm-telemetry-details > summary");
+        if (!summary) return;
+        telemetryDetailsOpen = !summary.parentElement.open;
+      });
+      new MutationObserver(() => {
+        const details = telemetryHost.querySelector(".brm-telemetry-details");
+        if (details && details.open !== telemetryDetailsOpen) details.open = telemetryDetailsOpen;
+      }).observe(telemetryHost, { childList:true, subtree:true });
+    }
     syncShellViewport(); window.addEventListener("resize", syncShellViewport, { passive:true });
     root.addEventListener("click", () => window.setTimeout(syncFromSelected, 60));
     new MutationObserver(syncFromSelected).observe(root, { childList:true, subtree:true, attributes:true, attributeFilter:["aria-selected", "class"] });
+    document.addEventListener("visibilitychange", poll);
     window.__brmNavigationReady = true; window.__brmSelectDashboard();
+    poll();
   }; boot();
 })();
 """
 
 def build_ui():
+    initial_dashboard = render_queue()
     with gr.Blocks(
         title="BRM AI 工作台",
     ) as demo:
@@ -5004,8 +6438,10 @@ def build_ui():
                 "### 全局设置\n"
                 "并发会立即调整；下调时，已在处理的任务会自然完成后再收缩。"
                 + (
-                    "当前媒体工作流共享 A5000 队列；为避免显存争用，并发固定为 **1**。"
-                    if VIDEO_ENGINE == "h3" or SEEDVR2_ENABLED
+                    "ZONOS3-Mini（零显存直连）可与其它媒体并行，IndexTTS-2.5 独立排队。其他媒体任务独占 A5000。"
+                    if VOICE_PARALLEL_ENABLED
+                    else "当前媒体工作流共享 A5000 队列，并发固定为 **1**。"
+                    if MAX_MEDIA_QUEUE_CONCURRENCY == 1
                     else "视频、数字人等高显存任务通常建议保持并发 **1**。"
                 )
             )
@@ -5029,7 +6465,7 @@ def build_ui():
                     label="画廊最多显示产物数",
                 )
             save_settings_btn = gr.Button("保存并应用", variant="primary")
-            settings_status = gr.Markdown("")
+            settings_status = gr.Markdown("", elem_classes=["brm-inline-status"])
             gr.Markdown("---\n#### brmadmin 主账号密码")
             gr.Markdown(
                 "这里只修改 `brmadmin` 主账号的 Basic Auth 密码，不影响新增用户。"
@@ -5046,7 +6482,7 @@ def build_ui():
                     label="确认 brmadmin 新密码", type="password", max_length=128,
                 )
             change_lan_password_btn = gr.Button("修改 brmadmin 主账号密码", variant="secondary")
-            lan_password_status = gr.Markdown("")
+            lan_password_status = gr.Markdown("", elem_classes=["brm-inline-status"])
 
             gr.Markdown("---\n#### 新增访问用户")
             gr.Markdown(
@@ -5065,7 +6501,7 @@ def build_ui():
                     label="确认新用户密码", type="password", max_length=72,
                 )
             add_lan_user_btn = gr.Button("新增用户", variant="secondary")
-            lan_user_status = gr.Markdown("")
+            lan_user_status = gr.Markdown("", elem_classes=["brm-inline-status"])
 
         gr.HTML(
             """
@@ -5095,7 +6531,8 @@ def build_ui():
               </table>
             </div>
             <div id="brm-key-secret-wrap" hidden>
-              <strong>仅显示这一次：请立即复制并保存新密钥</strong>
+              <strong>明文密钥（60 秒后自动隐藏，请勿分享截图）</strong>
+              <button type="button" data-key-action="hide">隐藏密钥</button>
               <textarea id="brm-key-secret" readonly spellcheck="false" aria-label="新生成的明文密钥"></textarea>
             </div>
             """,
@@ -5107,9 +6544,63 @@ def build_ui():
             # 首页没有伪造表单；真正的任务中心和素材库位于 Tabs 后方。
             with gr.Tab("任务中心"):
                 gr.HTML("<div class='brm-home-tab-anchor'></div>", elem_id="home-tab-anchor")
-            # ========== Tab 1 ==========
+            # ========== Tab 1: 图像创作主力矩阵 ==========
+            if os.environ.get("BRM_QWEN_IMAGE21_ENABLED", "1") != "0":
+                for image_editing in (False, True):
+                    mode_label = "图生图" if image_editing else "文生图"
+                    with gr.Tab(f"Qwen Image 2.1 {mode_label}"):
+                        gr.Markdown(
+                            f"## Qwen Image 2.1 · {mode_label}\n"
+                            "主力推荐 · 默认开启 **Turbo 8 步极速模式（约 8 秒出图）**，可随时切换 40 步高精模式；单张输出，支持全高清，其余尺寸最大 1MP。"
+                            + ("上传参考图，按所选尺寸适配画幅后进行编辑。" if image_editing else "选择常用尺寸后直接提交。"),
+                            elem_classes=["workflow-heading"],
+                        )
+                        image_prompt = gr.Textbox(
+                            label="提示词",
+                            lines=5,
+                            value=(
+                                "保留原图主体与构图，优化光线和色彩，增强细节与质感，让画面自然清晰。"
+                                if image_editing
+                                else "一只红色陶瓷茶壶放在浅色木桌上，旁边摆着一只白色茶杯，清晨柔和的窗光，真实产品摄影，陶瓷釉面细节清晰，画面简洁自然。"
+                            ),
+                        )
+                        with gr.Row():
+                            image_size = gr.Dropdown(
+                                label="图片尺寸",
+                                choices=IMAGE_SIZE_PRESETS["qwen21"],
+                                value=IMAGE_SIZE_PRESETS["qwen21"][0],
+                            )
+                            image_mode = gr.Radio(
+                                label="推理模式",
+                                choices=[
+                                    ("Turbo 8步极速（推荐 · ~8s）", "turbo"),
+                                    ("40步高精模式", "base"),
+                                ],
+                                value="turbo",
+                            )
+                            image_steps = gr.Slider(label="采样步数", minimum=1, maximum=40, value=8, step=1)
+                            image_seed = gr.Number(label="随机种子", value=42, precision=0, minimum=0)
+                        image_mode.change(
+                            fn=lambda mode: gr.update(value=8 if mode == "turbo" else 40),
+                            inputs=image_mode,
+                            outputs=image_steps,
+                            queue=False,
+                            show_progress="hidden",
+                            api_visibility="private",
+                        )
+                        image_uploaded = gr.State("")
+                        if image_editing:
+                            image_source = gr.Image(type="filepath", label="参考图片", height=300)
+                            image_source.upload(fn=on_ref_upload, inputs=image_source, outputs=image_uploaded, api_visibility="private")
+                            image_source.clear(fn=lambda: "", outputs=image_uploaded, api_visibility="private")
+                        gr.Button(f"提交{mode_label}任务", variant="primary").click(
+                            fn=partial(ui_submit_image, "qwen21", image_editing),
+                            inputs=[image_prompt, image_size, image_steps, image_seed, image_uploaded, image_mode],
+                            api_visibility="private",
+                        )
+
             with gr.Tab("文生图Z-Image"):
-                gr.Markdown("## 文生图 Z-Image", elem_classes=["workflow-heading"])
+                gr.Markdown("## 文生图 Z-Image Turbo", elem_classes=["workflow-heading"])
                 with gr.Row():
                     with gr.Column(scale=1):
                         prompt1 = gr.Textbox(label="提示词", autofocus=True, value="一个漂亮的女生在校园散步", lines=3)
@@ -5125,22 +6616,18 @@ def build_ui():
                     api_visibility="private",
                 )
 
-            if os.environ.get("BRM_QWEN_IMAGE21_ENABLED") == "1":
-                with gr.Tab("Qwen Image 2.1 文生图"):
-                    gr.Markdown("## Qwen Image 2.1 · 非商业研究版\n基础模型 INT8，非 Turbo。单张输出，最大1MP；与其他媒体共享 A5000 单队列。")
-                    q21_prompt = gr.Textbox(label="提示词", lines=4, value="一只穿宇航服的橘猫，电影摄影，柔和光线")
+            if os.environ.get("BRM_FLUX2_FAST_ENABLED") == "1":
+                with gr.Tab("FLUX.2 Klein 快速图生图"):
+                    gr.Markdown("## FLUX.2 Klein · 快速图生图\n四步极速编辑，输出单张PNG。参考图会按所选尺寸居中裁切缩放。")
+                    fast_prompt=gr.Textbox(label="提示词",lines=5,value="保留原图主体与构图，优化光线和色彩，让画面自然清晰。")
                     with gr.Row():
-                        q21_width = gr.Number(label="宽度（32的倍数）", value=1024, precision=0)
-                        q21_height = gr.Number(label="高度（32的倍数）", value=1024, precision=0)
-                        q21_steps = gr.Slider(label="采样步数", minimum=1, maximum=40, value=40, step=1)
-                        q21_seed = gr.Number(label="随机种子", value=0, precision=0)
-                    gr.Button("提交研究生图任务", variant="primary").click(
-                        fn=api_submit_qwen_image21,
-                        inputs=[q21_prompt, q21_width, q21_height, q21_steps, q21_seed],
-                        api_name="ui_submit_qwen_image21", api_visibility="private",
-                    )
-
-            # ========== Tab 2 ==========
+                        fast_size=gr.Dropdown(label="图片尺寸",choices=[x for x in IMAGE_SIZE_PRESETS['qwen21'] if _parse_size(x) in flux2_fast.SIZES],value=IMAGE_SIZE_PRESETS['qwen21'][0])
+                        fast_seed=gr.Number(label="随机种子",value=42,precision=0,minimum=0)
+                    fast_ref=gr.Image(type="filepath",label="参考图片",height=320)
+                    fast_name=gr.State("")
+                    fast_ref.upload(fn=on_ref_upload,inputs=fast_ref,outputs=fast_name,api_visibility="private")
+                    fast_ref.clear(fn=lambda:"",outputs=fast_name,api_visibility="private")
+                    gr.Button("提交快速编辑任务",variant="primary").click(fn=ui_submit_flux2_fast,inputs=[fast_prompt,fast_size,fast_seed,fast_name],api_visibility="private")
             with gr.Tab("图生图FLUX.2-klein"):
                 gr.Markdown("## 图生图 FLUX.2-klein", elem_classes=["workflow-heading"])
                 with gr.Row(equal_height=True):
@@ -5531,53 +7018,8 @@ def build_ui():
                 )
 
             # ========== Tab 7 ==========
-            with gr.Tab("语音克隆 IndexTTS-2.5" if VOICE_ENGINE == "indextts25" else "语音克隆 IndexTTS-2（回退）"):
-                gr.Markdown(
-                    "## 语音克隆 IndexTTS-2.5"
-                    if VOICE_ENGINE == "indextts25"
-                    else "## 语音克隆 IndexTTS-2（回退）",
-                    elem_classes=["workflow-heading"],
-                )
-                with gr.Row(equal_height=True):
-                    with gr.Column(scale=1):
-                        prompt7 = gr.Textbox(label="合成文本", autofocus=True, placeholder="输入要合成的文本",
-                                             value="你好，这是一段语音克隆测试。", lines=8, max_lines=12)
-                    with gr.Column(scale=1):
-                        reference_audio7 = gr.Audio(label="参考音频（克隆音色来源，建议 10–30 秒清晰人声）",
-                                                    type="filepath")
-                        uploaded_name7 = gr.State("")
-                        uploaded_dur7 = gr.State(0.0)
-                        if VOICE_ENGINE == "indextts25":
-                            language7 = gr.Dropdown(
-                                choices=[("中文", "zh"), ("English", "en"), ("日本語", "ja"),
-                                         ("Español", "es"), ("العربية", "ar")],
-                                value="zh", label="语言",
-                            )
-                            speed7 = gr.Slider(0.5, 2.0, value=1.0, step=0.05,
-                                               label="原生语速（1.0 为正常）")
-                            gr.Markdown("IndexTTS‑2.5 使用语言与原生语速控制；旧 API 的 `temperature` 参数仍可传入，但不会影响本次推理。")
-                        else:
-                            temperature7 = gr.Slider(0.1, 1.5, value=0.8, step=0.05,
-                                                     label="采样温度（IndexTTS‑2 回退模式）")
-                        submit_btn7 = gr.Button("提交", variant="primary")
-                reference_audio7.upload(fn=on_audio_upload, inputs=reference_audio7,
-                                        outputs=[uploaded_name7, uploaded_dur7], api_visibility="private")
-                reference_audio7.clear(fn=lambda: ("", 0.0), outputs=[uploaded_name7, uploaded_dur7],
-                                       api_visibility="private")
-                if VOICE_ENGINE == "indextts25":
-                    submit_btn7.click(
-                        fn=ui_submit_workflow_7,
-                        inputs=[prompt7, uploaded_name7, language7, speed7],
-                        api_name="ui_submit_workflow_7", api_visibility="private",
-                    )
-                else:
-                    submit_btn7.click(
-                        fn=submit_workflow_7,
-                        inputs=[prompt7, uploaded_name7, temperature7],
-                        api_name="ui_submit_workflow_7", api_visibility="private",
-                    )
-
-            # ========== Tab 8 ==========
+            with gr.Tab("语音克隆 & TTS"):
+                build_voice_clone_panel()
             with gr.Tab("音乐生成ACE-Step 1.5"):
                 gr.Markdown("## 音乐生成 ACE-Step 1.5", elem_classes=["workflow-heading"])
                 ace_step_models = installed_acestep_models()
@@ -5624,7 +7066,7 @@ def build_ui():
                                 label="模型",
                                 choices=ace_step_models,
                                 value=default_acestep_model(ace_step_models) if ace_step_models else None,
-                                info="默认优先 Base 高品质；仅显示服务器已安装的 ACE-Step 权重。",
+                                info="默认锁定 ACE-Step 1.5 XL Turbo（8步极速）；仅显示服务器已安装权重（turbo / base）。",
                             )
                         submit_btn8 = gr.Button("提交", variant="primary")
                 music_style_preset8.change(
@@ -5644,13 +7086,26 @@ def build_ui():
 
             # ========== Tab 9 ==========
             with gr.Tab("Qwen 大模型"):
-                gr.Markdown("## 智能工具 / Qwen3.8 流式对话测试", elem_classes=["workflow-heading"])
+                gr.Markdown("## 智能工具 / 本地大模型", elem_classes=["workflow-heading"])
+                initial_runtime_status, initial_qwen, initial_strata = llm_control_updates()
+                with gr.Column(elem_id="llm-switch-toolbar"):
+                    gr.Markdown("### 本地大模型引擎 · Strata\n当前唯一主力本地大模型：**Strata · Qwen3.8-Flash-Next**（双 A4000 32GB 高速并发 · 支持 64K 上下文与多模态推理，原 Qwen 27B 已正式退役下线）。")
+                    runtime_status = gr.Markdown(value=initial_runtime_status, elem_id="llm-runtime-status")
+                    with gr.Row():
+                        switch_qwen = gr.Button("使用 Qwen 27B（已下线）", elem_id="llm-switch-qwen", interactive=False, visible=False)
+                        switch_strata = gr.Button("使用 Strata（高速）", elem_id="llm-switch-strata", interactive=False, visible=False)
+                        refresh_runtime = gr.Button("刷新模型状态", elem_id="llm-switch-refresh")
+                    runtime_outputs = [runtime_status, switch_qwen, switch_strata]
+                    switch_qwen.click(lambda: switch_llm_ui("qwen38"), outputs=runtime_outputs, queue=False, api_visibility="private")
+                    switch_strata.click(lambda: switch_llm_ui("strata"), outputs=runtime_outputs, queue=False, api_visibility="private")
+                    refresh_runtime.click(llm_control_updates, outputs=runtime_outputs, queue=False, api_visibility="private")
+                    runtime_timer = gr.Timer(5)
+                    runtime_timer.tick(llm_control_updates, outputs=runtime_outputs, queue=False, show_progress="hidden", api_visibility="private")
                 with gr.Row(elem_id="qwen-workspace"):
                     with gr.Column(scale=3, elem_id="qwen-chat-panel"):
                         gr.Markdown(
-                            f"### {QWEN_RUNTIME_LABEL} 本地对话\n"
-                            f"当前模型：`{QWEN_MODEL}`。流式验证问答能力；Qwen 固定在 A4000，"
-                            "媒体工作流固定在 A5000。"
+                            "### 本地模型对话\n"
+                            "主力引擎 **Strata · Qwen3.8-Flash-Next（双 A4000 32GB 高速并发）** 常驻提供实时对话与 `/qwen-api/v1` OpenAI 兼容接口；媒体工作流固定运行在 RTX A5000，算力完全隔离互不抢占。"
                         )
                         qwen_system = gr.Textbox(
                             label="系统提示词（可选）",
@@ -5664,7 +7119,7 @@ def build_ui():
                             autofocus=True,
                         )
                         qwen_answer = gr.Textbox(
-                            label="Qwen 流式回答",
+                            label="Strata / Qwen3.8 流式回答",
                             lines=18,
                             max_lines=30,
                             interactive=False,
@@ -5675,7 +7130,6 @@ def build_ui():
                     with gr.Column(scale=1, min_width=300, elem_id="qwen-config-panel"):
                         gr.Markdown(
                             "### 模型运行配置\n"
-                            f"{QWEN_RUNTIME_LABEL} · 在线\n\n"
                             "流式输出将直接显示模型返回的内容；可按需开启推理内容。"
                         )
                         qwen_temperature = gr.Slider(
@@ -5707,48 +7161,123 @@ def build_ui():
                     gr.HTML(
                         '<details id="dashboard-new-task-menu"><summary>＋ 新建任务</summary>'
                         '<div class="brm-new-task-list">'
-                        '<button type="button" data-brm-action="workflow" data-workflow="文生图Z-Image">图像 · 文生图</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="图生图FLUX.2-klein">图像 · 图生图 FLUX.2-klein</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="Qwen Image 2.1 文生图">图像 · Qwen Image 2.1 Turbo</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="Qwen Image 2.1 图生图">图像 · Qwen Image 2.1 图生图</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="文生图Z-Image">图像 · Z-Image Turbo</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="FLUX.2 Klein 快速图生图">图像 · FLUX.2 Fast (4步)</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 文生视频">视频 · H3 文生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="MiniMax H3 图生视频">视频 · H3 图生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="文生视频 LTX2.3">视频 · LTX 文生视频</button>'
                         '<button type="button" data-brm-action="workflow" data-workflow="图生视频 LTX2.3">视频 · LTX 图生视频</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 IndexTTS-2.5">音频 · 语音克隆</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成</button>'
-                        '<button type="button" data-brm-action="workflow" data-workflow="Qwen 大模型">智能工具 · Qwen</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="图像/视频增强修复 SeedVR2">媒体 · SeedVR2 超分修复</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="语音克隆 & TTS">音频 · 语音克隆 (ZONOS3-Mini)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="音乐生成ACE-Step 1.5">音频 · 音乐生成 (ACE-Step Turbo)</button>'
+                        '<button type="button" data-brm-action="workflow" data-workflow="Qwen 大模型">智能工具 · Strata / Qwen3.8</button>'
                         '</div></details>'
                     )
-            q_summary = gr.HTML(value="", elem_id="q-summary")
+            q_summary = gr.HTML(value=initial_dashboard[0], elem_id="q-summary")
             with gr.Row(equal_height=True, elem_id="home-task-overview"):
                 with gr.Column(scale=9, elem_id="home-task-main"):
-                    q_live_progress = gr.HTML(value="", visible=False, elem_id="q-live-progress")
-                    dashboard_task_cards = gr.HTML(value="", elem_id="dashboard-task-cards")
+                    q_live_progress = gr.HTML(value=initial_dashboard[1].get('value', ''), visible=initial_dashboard[1].get('visible', False), elem_id="q-live-progress")
+                    dashboard_task_cards = gr.HTML(value=initial_dashboard[2], elem_id="dashboard-task-cards")
                     with gr.Accordion("全部任务记录", open=True, elem_id="task-history-accordion"):
                         with gr.Row(equal_height=True, elem_id="task-center-body"):
                             with gr.Column(scale=10):
-                                q_table = gr.Markdown(elem_id="q-table-md")
+                                q_table = gr.Markdown(value=initial_dashboard[4], elem_id="q-table-md")
+                                with gr.Column(elem_id="brm-history-panel"):
+                                    with gr.Row():
+                                        history_query = gr.Textbox(label="任务名称或 ID", elem_id="brm-history-query")
+                                        history_workflow = gr.Textbox(label="工作流")
+                                        history_status = gr.Dropdown(
+                                            choices=[("全部状态", "all")] + [(item.value, item.value) for item in TaskStatus],
+                                            value="all", label="状态",
+                                        )
+                                        history_date = gr.Textbox(label="提交日期", placeholder="YYYY-MM-DD")
+                                    with gr.Row():
+                                        history_page = gr.Number(label="页码", value=1, minimum=1, precision=0)
+                                        history_search = gr.Button("查询任务", elem_id="brm-history-search")
+                                    history_results = gr.HTML()
+                                    retry_id = gr.Textbox(visible="hidden", elem_id="brm-retry-id")
+                                    retry_load = gr.Button("读取原参数", visible="hidden", elem_id="brm-retry-load")
+                                    with gr.Column(visible=False, elem_id="brm-retry-panel") as retry_panel:
+                                        gr.Markdown("#### 使用原参数新建")
+                                        retry_prompt = gr.Textbox(label="提示词", lines=3)
+                                        retry_options = gr.Textbox(label="生成参数", lines=5)
+                                        retry_source = gr.State("")
+                                        retry_submit = gr.Button("确认新建任务", variant="primary")
+                                        retry_status = gr.Markdown("", elem_classes=["brm-inline-status"])
                             with gr.Column(scale=1, min_width=158, elem_id="queue-actions"):
                                 clear_btn = gr.Button("清空排队任务")
                                 interrupt_btn = gr.Button("中断当前运行任务", variant="stop")
-                with gr.Column(scale=2, min_width=265, elem_id="dashboard-system-status"):
-                    dashboard_system_status = gr.HTML(value="")
+                with gr.Column(scale=3, min_width=320, elem_id="dashboard-system-status"):
+                    dashboard_system_status = gr.HTML(value=initial_dashboard[3])
             op_status = gr.Markdown("", elem_id="task-operation-status")
 
         with gr.Column(elem_id="asset-center"):
             with gr.Row(equal_height=True, elem_id="asset-download-row"):
-                download_all_btn = gr.Button("下载当前素材", variant="secondary")
+                download_all_btn = gr.Button("下载近期素材", variant="secondary")
                 download_all_file = gr.File(
                     label="批量下载文件", visible=False, interactive=False, elem_id="asset-download-file",
                 )
-            dashboard_assets = gr.HTML(value="", elem_id="dashboard-assets")
+            dashboard_assets = gr.HTML(value=initial_dashboard[5], elem_id="dashboard-assets")
+            with gr.Column(elem_id="brm-catalog-panel"):
+                gr.Markdown("### 素材库")
+                with gr.Row():
+                    catalog_query = gr.Textbox(label="素材名称或任务 ID")
+                    catalog_kind = gr.Dropdown(
+                        choices=[("全部类型", "all"), ("图片", "image"), ("视频", "video"), ("音频", "audio")],
+                        value="all", label="素材类型",
+                    )
+                    catalog_workflow = gr.Textbox(label="工作流或模型")
+                    catalog_date = gr.Textbox(label="产出日期", placeholder="YYYY-MM-DD")
+                with gr.Row():
+                    catalog_sort = gr.Dropdown(
+                        choices=[("最新优先", "newest"), ("最早优先", "oldest")], value="newest", label="排序",
+                    )
+                    catalog_page = gr.Number(label="页码", value=1, minimum=1, precision=0)
+                    catalog_search = gr.Button("查询素材", elem_id="brm-catalog-search")
+                catalog_results = gr.HTML()
+
+        dashboard_state = gr.State(initial_dashboard)
+        dashboard_poll = gr.Button("自动刷新", elem_id="brm-dashboard-poll", visible="hidden")
+        dashboard_outputs = [
+            q_summary, q_live_progress, dashboard_task_cards, dashboard_system_status,
+            q_table, dashboard_assets, dashboard_state,
+        ]
+
+        history_inputs = [history_query, history_workflow, history_status, history_date, history_page]
+        catalog_inputs = [catalog_query, catalog_kind, catalog_workflow, catalog_date, catalog_sort, catalog_page]
+        gr.on(
+            [history_search.click, history_query.submit, history_page.input], search_workbench_history,
+            inputs=history_inputs, outputs=[history_results, history_page],
+            queue=False, api_visibility="private", show_progress="hidden",
+        )
+        gr.on(
+            [catalog_search.click, catalog_query.submit, catalog_page.input], search_workbench_assets,
+            inputs=catalog_inputs, outputs=[catalog_results, catalog_page],
+            queue=False, api_visibility="private", show_progress="hidden",
+        )
+        retry_load.click(
+            prepare_workbench_retry, inputs=retry_id,
+            outputs=[retry_panel, retry_prompt, retry_options, retry_source, retry_status],
+            queue=False, api_visibility="private",
+        ).then(fn=None, js='() => { document.querySelector("#brm-retry-panel")?.scrollIntoView({block:"nearest"}); return []; }',
+               api_visibility="private")
+        retry_submit.click(
+            submit_workbench_retry, inputs=[retry_source, retry_prompt, retry_options], outputs=retry_status,
+            api_visibility="private", trigger_mode="once",
+        )
 
         # 事件绑定。
         clear_btn.click(fn=clear_pending, outputs=op_status, api_visibility="private")
         interrupt_btn.click(fn=interrupt_running_tasks, outputs=op_status, api_visibility="private")
         dashboard_refresh_btn.click(
-            fn=render_queue,
-            outputs=[q_summary, q_live_progress, dashboard_task_cards, dashboard_system_status, q_table, dashboard_assets],
+            fn=force_dashboard_refresh,
+            inputs=dashboard_state,
+            outputs=dashboard_outputs,
             api_visibility="private",
+            queue=False,
+            show_progress="hidden",
         )
         download_all_btn.click(
             fn=build_completed_assets_bundle,
@@ -5756,20 +7285,10 @@ def build_ui():
             api_visibility="private",
         )
 
-        # 定时刷新任务面板与存活检测。
-        gr.Timer(1.5).tick(
-            fn=render_queue,
-            outputs=[
-                q_summary,
-                q_live_progress,
-                dashboard_task_cards,
-                dashboard_system_status,
-                q_table,
-                dashboard_assets,
-            ],
-            api_visibility="private",
+        dashboard_poll.click(
+            refresh_dashboard, inputs=dashboard_state, outputs=dashboard_outputs,
+            api_visibility="private", show_progress="hidden", queue=False,
         )
-        gr.Timer(3.0).tick(fn=check_health, api_visibility="private")
 
         # Stable LAN API surface. These wrappers accept explicit values for
         # arguments that are State-only in the browser UI (uploaded filenames
@@ -5777,7 +7296,15 @@ def build_ui():
         # from a non-browser client.
         gr.api(api_submit_workflow_1, api_name="submit_workflow_1")
         gr.api(api_submit_qwen_image21, api_name="submit_qwen_image21")
+        gr.api(api_submit_qwen_image21_edit, api_name="submit_qwen_image21_edit")
+        gr.api(api_submit_h3_image, api_name="submit_h3_image")
+        gr.api(api_submit_h3_image_edit, api_name="submit_h3_image_edit")
         gr.api(api_submit_workflow_2, api_name="submit_workflow_2")
+        gr.api(api_submit_flux2_fast, api_name="submit_flux2_fast")
+        gr.api(api_submit_flux3_text, api_name="submit_flux3_text")
+        gr.api(api_submit_flux3_edit, api_name="submit_flux3_edit")
+        gr.api(api_submit_qwen3_tts, api_name="submit_qwen3_tts")
+        gr.api(api_submit_zonos3, api_name="submit_zonos3")
         gr.api(api_submit_workflow_3, api_name="submit_workflow_3")
         gr.api(api_submit_workflow_4, api_name="submit_workflow_4")
         gr.api(api_submit_workflow_3_h3, api_name="submit_workflow_3_h3")
@@ -5790,6 +7317,8 @@ def build_ui():
         gr.api(api_submit_workflow_8, api_name="submit_workflow_8")
         gr.api(api_submit_seedvr2_enhance, api_name="submit_seedvr2_enhance")
         gr.api(api_task_status, api_name="task_status")
+        gr.api(api_cancel_task, api_name="cancel_task")
+        gr.api(api_delete_asset, api_name="delete_asset")
 
         # 放在既有队列/API 事件之后，保持旧浏览器标签页中已有事件的编号稳定。
         nav_home_btn.click(
@@ -5895,17 +7424,22 @@ def main():
     start_comfyui(wait=True)
     task_queue.start_workers()      # 启动队列后台 worker
     start_media_cache_worker()      # 单线程补齐视频首帧与音频波形，不阻塞任务刷新
+    start_dashboard_cache_worker()  # 首屏预填充；GPU/磁盘探测不占用浏览器回调
 
     demo = build_ui()
     demo.queue()
+    from starlette.middleware import Middleware
+    from ui_event_guard import middleware_class
     demo.launch(
         server_name=GRADIO_HOST,
         server_port=server_port,
-        css=CUSTOM_CSS,
+        css=CUSTOM_CSS + voice_presets.CSS,
         theme=gr.themes.Soft(primary_hue="red", secondary_hue="orange", neutral_hue="stone"),
         inbrowser=False,
         root_path=GRADIO_ROOT_PATH,
+        allowed_paths=[str(THUMB_CACHE_DIR), str(DOWNLOAD_CACHE_DIR)],
         js=BRM_NAV_JS,
+        app_kwargs={"middleware":[Middleware(middleware_class(demo))]},
     )
 
 

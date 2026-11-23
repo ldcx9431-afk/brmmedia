@@ -54,10 +54,11 @@ fi
 # /usr/local/sbin/brmmedia-verify-runtime is shared across releases.  Record
 # the release it must inspect so post-H3 acceptance never silently validates
 # the preserved recovery checkout instead of the active candidate.
-install -d -m 0755 /etc/brmmedia
+install -d -m 0750 -o root -g "$SERVICE_USER" /etc/brmmedia
 printf 'BRMMEDIA_APP_ROOT=%s\nBRMMEDIA_SOURCE_ROOT=%s\n' "$APP_ROOT" "$ROOT_DIR" \
   > /etc/brmmedia/runtime.env
-chmod 0644 /etc/brmmedia/runtime.env
+chown root:"$SERVICE_USER" /etc/brmmedia/runtime.env
+chmod 0640 /etc/brmmedia/runtime.env
 
 install_service() {
   local src="$1"

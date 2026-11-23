@@ -1,17 +1,25 @@
+# [DEPRECATED 2026-11-23] Qwen Image 2.1 has been unified into the main ComfyUI
+# v0.39.0 instance (:8188, baorong-backend.service) via extra_model_paths.yaml.
+# Keep this unit disabled unless rolling back to dual-instance mode.
 [Unit]
-Description=Qwen Image 2.1 isolated non-commercial research runtime
+Description=Qwen Image 2.1 isolated non-commercial research runtime (retired)
 After=network-online.target
 
 [Service]
+User=brm
+Group=brm
 Type=simple
 WorkingDirectory=/srv/brmmedia/qwen-image21/ComfyUI
 Environment=CUDA_VISIBLE_DEVICES=0
 Environment=PYTHONUNBUFFERED=1
 Environment=OMP_NUM_THREADS=8
-ExecStart=/srv/brmmedia/qwen-image21/venv/bin/python main.py --listen 127.0.0.1 --port 8190 --extra-model-paths-config /srv/brmmedia/qwen-image21/extra_models.yaml --disable-all-custom-nodes --offline --cache-none --reserve-vram 2
+ExecStart=/srv/brmmedia/qwen-image21/venv/bin/python main.py --listen 127.0.0.1 --port 8190 --extra-model-paths-config /srv/brmmedia/qwen-image21/extra_models.yaml --disable-all-custom-nodes --offline --reserve-vram 1.5 --use-sage-attention --fast autotune cublas_ops
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=120
+MemoryHigh=18G
+MemoryMax=24G
+OOMScoreAdjust=300
 
 [Install]
 WantedBy=multi-user.target
